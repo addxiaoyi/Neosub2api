@@ -1,0 +1,106 @@
+name: upstream-watch
+
+# 每周检查 11 个上游仓库是否有新提交。
+# 设计原则：检查结果只做通知（job summary + issue），绝不让构建失败。
+# 不依赖第三方 action：只用 GitHub 官方 actions/checkout，其余全部走 pwsh + gh CLI。
+
+on:
+  schedule:
+    # 每周一 01:00 UTC（北京时间 09:00）
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 检查上游 HEAD
+        id: check
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pwsh -NoProfile -File scripts/check-upstreams.ps1 -Json |
+            Out-File -FilePath upstream-report.json -Encoding utf8
+
+          $rows = Get-Content -Path upstream-report.json -Raw -Encoding UTF8 | ConvertFrom-Json
+
+          $md = New-Object System.Collections.ArrayList
+          [void]$md.Add('# 上游仓库检查')
+          [void]$md.Add('')
+          [void]$md.Add("时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm')")
+          [void]$md.Add("运行记录：$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID")
+          [void]$md.Add('')
+          [void]$md.Add('| 状态 | 仓库 | 基线 | 最新 | 说明 |')
+          [void]$md.Add('| --- | --- | --- | --- | --- |')
+
+          foreach ($r in $rows) {
+            $state = '一致'
+            if ($r.status -eq 'outdated') { $state = '**有更新**' }
+            elseif ($r.status -eq 'unreachable') { $state = '无法访问' }
+
+            $base = [string]$r.analyzed_commit
+            if ($base.Length -gt 12) { $base = $base.Substring(0, 12) }
+            $latest = [string]$r.latest_commit
+            if (-not $latest) { $latest = '-' }
+            elseif ($latest.Length -gt 12) { $latest = $latest.Substring(0, 12) }
+
+            [void]$md.Add("| $state | $($r.repo) | $base | $latest | $($r.message) |")
+          }
+
+          [void]$md.Add('')
+          [void]$md.Add('跟进流程见 docs/UPSTREAM-SYNC.md；确认后执行 `scripts/check-upstreams.ps1 -Update` 刷新基线。')
+
+          $mdText = $md -join "`n"
+          $mdText | Out-File -FilePath report.md -Encoding utf8
+          $mdText | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          $changed = @($rows | Where-Object { $_.status -ne 'ok' })
+          "changed=$($changed.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "有变化或不可访问的仓库数：$($changed.Count)"
+
+      - name: 汇总结果
+        shell: pwsh
+        run: |
+          Get-Content -Path report.md -Raw -Encoding UTF8 | Write-Host
+
+      - name: 创建或追加 issue
+        if: steps.check.outputs.changed != '0'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 标签不存在时先建（--force 幂等覆盖）。
+          gh label create upstream-watch --color FBCA04 --description "上游仓库有更新" --force | Out-Null
+
+          $existing = $null
+          $raw = gh issue list --label upstream-watch --state open --json number
+          if ($LASTEXITCODE -eq 0 -and $raw) {
+            $existing = $raw | ConvertFrom-Json
+          }
+
+          if ($existing -and @($existing).Count -gt 0) {
+            $num = @($existing)[0].number
+            gh issue comment $num --body-file report.md | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning '追加 issue 评论失败，请看 job summary。' }
+          } else {
+            $title = "上游仓库有更新（$(Get-Date -Format 'yyyy-MM-dd')）"
+            gh issue create --title $title --body-file report.md --label upstream-watch | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning '创建 issue 失败，请看 job summary。' }
+          }
+
+          # 通知环节任何失败都不应让工作流失败。
+          exit 0

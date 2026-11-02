@@ -1,0 +1,24 @@
+# sub2api 可选对照实现（上游 LGPL-3.0，独立进程，源码不进本仓）
+# 主仓已不依赖该进程；仅在需要与上游做 A/B 对照时手工启动。
+#
+# 用法（单独启动，与主 compose 解耦）：
+#   docker compose -f providers/sub2api/docker-compose.fragment.yml up -d
+#
+# 上游未提供官方镜像时请自行构建，镜像名/端口以自己部署为准。
+
+services:
+  sub2api:
+    image: ghcr.io/sub-store/sub2api:latest
+    container_name: u2a-sub2api
+    restart: unless-stopped
+    ports:
+      - "7870:8000"
+    environment:
+      SUB2API_ADMIN_TOKEN: ${SUB2API_ADMIN_TOKEN:-}
+    networks:
+      - u2a
+
+networks:
+  u2a:
+    external: true
+    name: unified-2api_default

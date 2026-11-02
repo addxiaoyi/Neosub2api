@@ -1,0 +1,150 @@
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from .adapters.base import ProviderError
+from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
+from .db import Database
+from .registry import ProviderRegistry
+from .routers import accounts, auth, grok, keys, models, providers, settings as settings_router, stats, sub2api, v1
+from .security import hash_password, verify_password
+from .services.grok_register import GrokRegisterService
+
+logger = logging.getLogger("unified.security")
+
+
+def _seed_admin(db: Database, settings) -> None:
+    """首次建库写入管理员；已有库按口令来源决定是否轮换。
+
+    环境变量是显式配置，和库里不一致就覆盖；文件/随机口令是权威来源，
+    只覆盖历史默认口令 `unified-admin`，不碰运维自己设过的密码。
+    """
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT username, password_hash FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, created_at) VALUES(?,?,?,?)",
+                (settings.admin_username, hash_password(settings.admin_password), "admin", int(time.time())),
+            )
+            conn.commit()
+            _announce_password(settings, created=True)
+            return
+        if settings.admin_password_source == "env":
+            needs_rotate = not verify_password(settings.admin_password, row["password_hash"])
+        else:
+            needs_rotate = verify_password(LEGACY_ADMIN_PASSWORD, row["password_hash"])
+        if not needs_rotate:
+            return
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (hash_password(settings.admin_password), row["username"]),
+        )
+        conn.execute("DELETE FROM sessions WHERE username = ?", (row["username"],))
+        conn.commit()
+        if settings.admin_password_source == "env":
+            logger.warning("已按 UNIFIED_ADMIN_PASSWORD 轮换管理员「%s」口令，旧会话全部失效", row["username"])
+        else:
+            logger.warning("检测到历史默认口令，已轮换管理员「%s」口令，旧会话全部失效", row["username"])
+            _announce_password(settings, created=False)
+    finally:
+        conn.close()
+
+
+def _announce_password(settings, *, created: bool) -> None:
+    if settings.admin_password_source == "generated":
+        logger.warning(
+            "首次启动：已随机生成管理员口令并写入 %s（权限 0600）。口令：%s",
+            settings.data_dir / ADMIN_PASSWORD_FILE,
+            settings.admin_password,
+        )
+    elif settings.admin_password_source == "file":
+        logger.info("管理员口令来自 %s（如遗忘可删除该文件后重启重新生成）", settings.data_dir / ADMIN_PASSWORD_FILE)
+    elif created:
+        logger.info("管理员口令来自 UNIFIED_ADMIN_PASSWORD")
+
+
+def create_app() -> FastAPI:
+    settings = load_settings()
+    db = Database(settings.db_path)
+    _seed_admin(db, settings)
+    registry = ProviderRegistry(db, settings)
+    grok_service = GrokRegisterService(settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        grok_service.start()
+        try:
+            yield
+        finally:
+            await grok_service.stop()
+
+    app = FastAPI(title="unified-2api control plane", version="0.1.0", lifespan=lifespan)
+    app.state.settings = settings
+    app.state.db = db
+    app.state.registry = registry
+    app.state.grok_service = grok_service
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.exception_handler(ProviderError)
+    async def provider_error_handler(request: Request, exc: ProviderError):
+        return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
+
+    for module in (auth, providers, accounts, keys, models, stats, settings_router, sub2api, grok, v1):
+        app.include_router(module.router)
+
+    @app.get("/healthz")
+    def healthz():
+        return {
+            "ok": True,
+            "providers": len(registry.list_public()),
+            "db": str(settings.db_path),
+        }
+
+    if settings.web_dir.is_dir():
+        app.mount("/", StaticFiles(directory=settings.web_dir, html=True), name="web")
+    else:
+
+        @app.get("/")
+        def root():
+            return {
+                "service": "unified-2api control plane",
+                "hint": "未找到前端静态产物（apps/web/out），先执行 npm run build:export",
+            }
+
+    return app
+
+
+def run() -> None:
+    """直接启动入口：默认只绑 127.0.0.1，需要外部访问时显式设 UNIFIED_HOST（S-03）。"""
+    import uvicorn
+
+    settings = load_settings()
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        log_level=os.getenv("UNIFIED_LOG_LEVEL", "info"),
+    )
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    run()

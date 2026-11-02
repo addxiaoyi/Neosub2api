@@ -1,0 +1,260 @@
+# 模型别名与路由矩阵（对外契约）
+# 语义、权重算法、与 /v1/models 的关系：docs/model-routing.md
+# 迁移方案：docs/model-map-migration.md
+# 改完必须跑：scripts/check-model-aliases.ps1 -Strict
+#
+# 填写约束：
+# 1. upstream_model 只允许写上游公开 README / 示例配置 / 本仓适配器代码里真实出现的标识符；
+#    每条候选上方用「出处」注释标注链接，不允许凭行业常识补全。
+# 2. 别名键统一小写、只允许 [a-z0-9._-]，不含 "/"；alias 命中时大小写不敏感。
+# 3. 同一别名内 weight 合计必须为 1.0；weight 是「同优先级层内的相对份额」。
+# 4. capabilities 是我方对外的能力承诺（路由前按此过滤），不代表已逐项实测上游。
+# 5. fallbacks 只允许引用本文件里存在的别名，且不能成环。
+
+version: 1
+
+aliases:
+  claude-sonnet:
+    # 出处：https://github.com/czg86389-hub/muse2api README 内置模型别名清单（claude-sonnet-4）
+    - provider: muse
+      upstream_model: claude-sonnet-4
+      weight: 1.0
+      priority: 10
+
+  gpt-4o-mini:
+    # 出处：https://github.com/addxiaoyi/gptGrok2api README 文本聊天示例的 model 字段（gpt-5）
+    - provider: gptgrok
+      upstream_model: gpt-5
+      weight: 0.5
+      priority: 10
+    # 出处：https://github.com/czg86389-hub/muse2api README 内置模型别名清单（gpt-4o）
+    - provider: muse
+      upstream_model: gpt-4o
+      weight: 0.5
+      priority: 10
+
+  deepseek-chat:
+    # 出处：https://github.com/ColudAI/Deepseek2Go README 示例 curl 的 model 字段（deepseek-chat）
+    - provider: deepseek_sidecar
+      upstream_model: deepseek-chat
+      weight: 1.0
+      priority: 10
+
+  deepseek-v4.1-flash:
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json
+    #       rotation.sota.order 数组里的 deepseek-v4.1-flash
+    - provider: opencode
+      upstream_model: deepseek-v4.1-flash
+      weight: 1.0
+      priority: 10
+
+  glm:
+    # 出处：https://github.com/addxiaoyi/codebuddy2api README「可用模型」清单（glm-5.2）
+    - provider: codebuddy
+      upstream_model: glm-5.2
+      weight: 0.7
+      priority: 10
+    # 出处：https://github.com/JeffHu0912/trae2api README 示例 curl 与 TW2A_DEFAULT_MODEL（glm-5.2）
+    - provider: trae_sidecar
+      upstream_model: glm-5.2
+      weight: 0.3
+      priority: 10
+
+  glm-5.3:
+    # 出处：https://github.com/addxiaoyi/ZCode2api README models 数组（GLM-5.3）
+    - provider: zcode
+      upstream_model: GLM-5.3
+      weight: 0.5
+      priority: 10
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json
+    #       rotation.sota.order 数组里的 glm-5.3
+    - provider: opencode
+      upstream_model: glm-5.3
+      weight: 0.5
+      priority: 10
+
+  qwen-max:
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json
+    #       rotation.sota.order 数组里的 qwen3.8-max
+    - provider: opencode
+      upstream_model: qwen3.8-max
+      weight: 1.0
+      priority: 10
+
+  kimi:
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json
+    #       rotation.sota.order 数组里的 kimi-k3
+    - provider: opencode
+      upstream_model: kimi-k3
+      weight: 0.6
+      priority: 10
+    # 出处：https://github.com/addxiaoyi/codebuddy2api README「可用模型」清单（kimi-k2.7）
+    - provider: codebuddy
+      upstream_model: kimi-k2.7
+      weight: 0.4
+      priority: 10
+
+  grok:
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json
+    #       rotation.sota.order 数组里的 grok-4.6
+    - provider: opencode
+      upstream_model: grok-4.6
+      weight: 1.0
+      priority: 10
+
+  minimax:
+    # 出处：https://github.com/addxiaoyi/codebuddy2api README「可用模型」清单（minimax-m3）
+    - provider: codebuddy
+      upstream_model: minimax-m3
+      weight: 1.0
+      priority: 10
+
+  hy3:
+    # 出处：https://github.com/addxiaoyi/codebuddy2api README「可用模型」清单（hy3 / hy3-preview）
+    - provider: codebuddy
+      upstream_model: hy3
+      weight: 0.7
+      priority: 10
+    # 出处：同上，codebuddy2api README「可用模型」清单（hy3-preview）
+    - provider: codebuddy
+      upstream_model: hy3-preview
+      weight: 0.3
+      priority: 10
+
+  gpt-5:
+    # 出处：https://github.com/addxiaoyi/gptGrok2api README 文本聊天示例的 model 字段（gpt-5）
+    - provider: gptgrok
+      upstream_model: gpt-5
+      weight: 0.6
+      priority: 10
+    # 出处：https://github.com/czg86389-hub/muse2api README 内置模型别名清单（gpt-5）
+    - provider: muse
+      upstream_model: gpt-5
+      weight: 0.4
+      priority: 10
+
+fallbacks:
+  deepseek-chat:
+    # 出处：https://github.com/jasonxu114514/opencode2api/blob/main/config.example.json（deepseek-v4.1-flash）
+    - provider: opencode
+      upstream_model: deepseek-v4.1-flash
+      priority: 20
+      "on": ["429", "5xx", "timeout"]
+    # 出处：apps/control/app/adapters/trae.py 的 DEFAULT_WORK_MODEL（DeepSeek-V4-Flash-Official）
+    - provider: trae
+      upstream_model: DeepSeek-V4-Flash-Official
+      priority: 30
+      "on": ["429", "5xx", "timeout"]
+
+  glm:
+    # 出处：https://github.com/addxiaoyi/ZCode2api README models 数组（GLM-5.3）
+    - provider: zcode
+      upstream_model: GLM-5.3
+      priority: 20
+      "on": ["429", "5xx", "timeout", "capability_unsupported"]
+    # 出处：https://github.com/JeffHu0912/trae2api README（glm-5.3）
+    - provider: trae_sidecar
+      upstream_model: glm-5.3
+      priority: 30
+      "on": ["429", "5xx", "timeout", "capability_unsupported"]
+
+  glm-5.3:
+    # 出处：https://github.com/JeffHu0912/trae2api README（glm-5.3）
+    - provider: trae_sidecar
+      upstream_model: glm-5.3
+      priority: 20
+      "on": ["429", "5xx", "timeout"]
+
+  deepseek-v4.1-flash:
+    # 别名链：主候选不可用时整链委托给 deepseek-chat，避免复制同一组上游候选
+    - alias: deepseek-chat
+      priority: 20
+      "on": ["429", "5xx", "timeout", "capability_unsupported"]
+
+capabilities:
+  claude-sonnet:
+    stream: true
+    tools: true
+    vision: true
+    long_context: true
+    reasoning: true
+  gpt-4o-mini:
+    stream: true
+    tools: true
+    vision: true
+    long_context: true
+    reasoning: false
+  deepseek-chat:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  deepseek-v4.1-flash:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  glm:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  glm-5.3:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  qwen-max:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  kimi:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  grok:
+    stream: true
+    tools: true
+    vision: false
+    long_context: true
+    reasoning: false
+  minimax:
+    stream: true
+    tools: true
+    vision: false
+    long_context: false
+    reasoning: false
+  hy3:
+    stream: true
+    tools: true
+    vision: false
+    long_context: false
+    reasoning: false
+  gpt-5:
+    stream: true
+    tools: true
+    vision: true
+    long_context: true
+    reasoning: true
+
+notes:
+  claude-sonnet: "自造对外名：按 Claude 家族命名、不承诺具体版本；只用 muse 的 claude-sonnet-4，未把 Deepseek2Go 的 Claude 映射当作真 Claude 候选。"
+  gpt-4o-mini: "自造对外名：沿用 OpenAI 小型号命名习惯；上游没有同名 mini 型号，候选是 gpt-5 与 gpt-4o，按能力等价而非同版本。"
+  deepseek-chat: "沿用上游名：Deepseek2Go README 示例 curl 的 model 字段就是 deepseek-chat。"
+  deepseek-v4.1-flash: "沿用上游名：opencode2api config.example.json 的 rotation 列表原样使用。"
+  glm: "自造对外名：家族级别名，上游真实标识是 glm-5.2 / glm-5.3。"
+  glm-5.3: "沿用上游名：ZCode2api 写 GLM-5.3、opencode2api 写 glm-5.3，大小写因上游而异，统一在别名层吸收。"
+  qwen-max: "自造对外名：上游示例只有 qwen3.8-max，没有 qwen-max。"
+  kimi: "自造对外名：家族级别名，上游标识是 kimi-k3 / kimi-k2.7。"
+  grok: "自造对外名：上游示例只有 grok-4.6。"
+  minimax: "自造对外名：上游清单只有 minimax-m3。"
+  hy3: "沿用上游名：codebuddy2api README 的可用模型清单含 hy3 / hy3-preview。"
+  gpt-5: "沿用上游名：gptGrok2api 与 muse2api README 都直接写 gpt-5。"

@@ -1,0 +1,127 @@
+# 上游仓库追踪清单
+#
+# 用途：记录本仓（unified-2api）所参考 / 代理 / 重写的 11 个上游仓库，
+# 以及我们实际分析过的 commit。由 scripts/check-upstreams.ps1 读取并比对远端 HEAD。
+#
+# 格式约定（重要）：
+#   - 顶层固定为 version / updated_at / upstreams 三个键。
+#   - upstreams 为列表，每个元素必须以 2 个空格的 "- repo: owner/name" 开头。
+#   - 元素内部字段统一 4 空格缩进。
+#   - our_files 与 protocols 使用 flow 数组（单行 [ "a", "b" ]），
+#     不要改写成多行 block 数组，否则 PowerShell 侧解析会失败。
+#   - license 值取自上游 LICENSE 文件的实际标题，不做整理。
+#   - analyzed_commit 只写 `git rev-parse HEAD` 的真实输出；拿不到就写 unknown。
+
+version: 1
+updated_at: 2026-11-02
+
+upstreams:
+  - repo: addxiaoyi/codebuddy2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: 92b8b910417c8bb24412ad62b99cef9adf96adb6
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/codebuddy.py"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "Python 管理端 + Go 数据面（workbuddy2api）。主仓由 CodeBuddyAdapter 代理 127.0.0.1:7864，不复制源码。"
+
+  - repo: czg86389-hub/muse2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: 1cd01682533dbf2c015fa879a8dc09534b50b4a3
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/muse.py", "apps/control/app/adapters/openai_compat.py", "docs/providers/muse2api.md"]
+    protocols: ["openai.chat.completions"]
+    notes: "Python 单服务 app.py + requirements.txt；上游另有 responses/images/videos，本仓只按 chat 能力代理 127.0.0.1:7865。2026-11-02 跟进 v1.6.6（1cd0168）：/v1 路由、结构体、SSE、错误码、启动参数、模型列表均未变，适配器无需改动；变化仅在账号导入规则（engine.py:45/store.py:17 改为只要求 hatch_sess）与扩展升级提示。"
+
+  - repo: kaibush/grok-register
+    license: MIT
+    license_source: LICENSE 文件
+    integration: in-repo-rewrite
+    analyzed_commit: a5eddc2ccdc890605a6395c44686120c766b71f9
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/grok_register.py", "apps/control/app/services/grok_register.py", "apps/control/app/routers/grok.py", "docs/providers/grok-register.md"]
+    protocols: []
+    notes: "纯注册流程参考（Python requirements.txt）。本仓自研 MIT 重写为控制面内置任务服务，只保留注册状态机，不含上游源码。"
+
+  - repo: jasonxu114514/opencode2api
+    license: GPL-3.0
+    license_source: LICENSE 文件
+    integration: in-repo-rewrite
+    analyzed_commit: 58f56676ba1438adb30604b889bf36db2a1542a1
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/opencode.py", "docs/providers/opencode2api.md"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "上游 Go（go.mod）、GPL-3.0。本仓按 clean-room 方式自研 MIT 直连 opencode.ai Zen/Go，不引入上游代码，规避 GPL 传染。"
+
+  - repo: addxiaoyi/gptGrok2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: 0335d6279083da46ffc14ac0c8165d6acce3c1d1
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/gptgrok.py", "apps/control/app/adapters/openai_compat.py"]
+    protocols: ["openai.chat.completions"]
+    notes: "Go + 前端 package.json；上游另有 responses/messages/images。本仓只代理 chat 到 127.0.0.1:7867。"
+
+  - repo: addxiaoyi/ZCode2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: 25c57e6d94c018748f8f226198bf2c919ef7bba0
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/zcode.py", "apps/control/app/adapters/openai_compat.py"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "Node 单文件 zcgw-server.mjs。注意：OpenAI 路径的 stream 实际上返回整体 JSON，Anthropic 路径才是原生 SSE；代理端按 127.0.0.1:8787 处理。"
+
+  - repo: Wei-Shaw/sub2api
+    license: LGPL-3.0
+    license_source: LICENSE 文件
+    integration: in-repo-rewrite
+    analyzed_commit: 4a4a83ee5ec86b19d3a2dd9b6471de5128963bec
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/sub2api.py", "apps/control/app/adapters/sub2api_store.py", "apps/control/app/routers/sub2api.py", "docs/providers/sub2api.md"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "上游 backend/frontend 双目录、LGPL-3.0。本仓自研 MIT 重写为配额分发适配器，不链接上游库。"
+
+  - repo: JeffHu0912/trae2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: ec20c088a375bc5a2989d43aa5b561b06a4382e7
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/trae_sidecar.py", "apps/control/app/adapters/trae.py", "providers/trae2api/README.md"]
+    protocols: ["openai.chat.completions"]
+    notes: "Go（go.mod）。双路径：trae_sidecar 代理 127.0.0.1:7871；trae.py 为自研 MIT 直连 Solo/Work，属协议参考。"
+
+  - repo: ColudAI/Deepseek2Go
+    license: unknown
+    license_source: 未声明
+    integration: sidecar
+    analyzed_commit: 3d9f10c175bbfee7e1ca5e0735cbd4747635d021
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/deepseek_sidecar.py", "providers/deepseek2go/README.md", "docs/providers/deepseek2go-feasibility.md"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "仓库内无 LICENSE 文件，README 亦无授权声明，默认按 All Rights Reserved 处理。Go + module.wasm（PoW）。仅以 sidecar 方式运行上游二进制，不分发、不复制源码。"
+
+  - repo: NextAgentX/qoder-trae-workbuddy-switch
+    license: PolyForm-Noncommercial-1.0.0
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: 93d873c98775dd145bdb3605aa1ccc37fd426c44
+    analyzed_at: 2026-11-02
+    our_files: ["apps/control/app/adapters/qoder_sidecar.py", "apps/control/app/adapters/qoder.py", "providers/qoder-switch/README.md"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "Rust Axum + package.json，PolyForm Noncommercial 1.0.0（禁止商用）。qoder_sidecar 代理 127.0.0.1:7873；qoder.py 为自研 MIT 直连 COSY 网关的替代路径。2026-11-02 跟进 802e510→93d873c（含 0f972a5）：LICENSE、路由（lib.rs:135-140）、chat/messages/models、错误码、鉴权、启动参数均未变，适配器无需改动；变化仅在未接入的 /v1/responses（namespace 工具扁平化）与 model_capability 新增可选值 image_input_source=known。"
+
+  - repo: AiXiaoc/codar2api
+    license: MIT
+    license_source: LICENSE 文件
+    integration: sidecar
+    analyzed_commit: d7f50246c49ef5cc3df8eb014e79397cfdd0f8b5
+    analyzed_at: 2026-11-02
+    our_files: ["docs/providers/codar2api.md"]
+    protocols: ["openai.chat.completions", "anthropic.messages"]
+    notes: "Go 1.26.4 纯标准库单二进制，上游为 Codar（SpeedAI）私有 API，含微信/短信登录与新 IP 验证，clean-room 重写不现实。计划新增 apps/control/app/adapters/codar_sidecar.py 并注册进 BUILDERS（本轮受约束未改代码）。"

@@ -1,0 +1,31 @@
+services:
+  control:
+    build:
+      context: ./apps/control
+    environment:
+      UNIFIED_DATA_DIR: /data
+      UNIFIED_ADMIN_USER: ${UNIFIED_ADMIN_USER:-admin}
+      # 不提供默认口令：留空则容器首次启动随机生成，写到 /data/admin-password.txt 并打印在日志里
+      UNIFIED_ADMIN_PASSWORD: ${UNIFIED_ADMIN_PASSWORD:-}
+      UNIFIED_HOST: 0.0.0.0
+      UNIFIED_PORT: 8000
+      UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
+      UNIFIED_SESSION_TTL_SEC: ${UNIFIED_SESSION_TTL_SEC:-86400}
+      UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
+      CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
+      TRAE_SIDECAR_BASE: ${TRAE_SIDECAR_BASE:-http://host.docker.internal:7871}
+      DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:7872}
+      QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
+    volumes:
+      - ./data:/data
+    ports:
+      # 默认只映射到本机；需要局域网/公网访问时显式 UNIFIED_BIND_HOST=0.0.0.0 并前置 TLS
+      - "${UNIFIED_BIND_HOST:-127.0.0.1}:8010:8000"
+
+  web:
+    build:
+      context: ./apps/web
+    depends_on:
+      - control
+    ports:
+      - "8080:80"

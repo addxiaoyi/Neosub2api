@@ -1,0 +1,41 @@
+# 依赖与产物
+node_modules/
+.next/
+out/
+__pycache__/
+*.pyc
+
+# 本地数据与运行时
+data/
+.runtime/
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+
+# 本地环境（含部署用 env 与证书）
+.env
+.env.local
+.env.*.local
+deploy/.env
+deploy/certs/
+deploy/certbot-webroot/
+
+# 日志与临时构建产物
+*.log
+logs/
+*.tsbuildinfo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+coverage/
+dist/
+build/
+.turbo/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
