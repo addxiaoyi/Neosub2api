@@ -3,7 +3,7 @@
 依据 `apps/control/app/routers/` 下的实际路由整理（代码事实，非文档推导）。
 
 - `/api/*`：管理面，登录态鉴权（HttpOnly Cookie `u2a_session`），部分仅管理员。
-- `/v1/*`：模型网关，`Authorization: Bearer u2a_...` 密钥鉴权。
+- `/v1/*`：模型网关，`Authorization: Bearer u2a_...` 或 `x-api-key: u2a_...` 密钥鉴权。
 - `GET /healthz`：无鉴权。
 
 通用约定：
@@ -33,9 +33,11 @@
 
 鉴权规则（`routers/v1.py`）：
 
-- 请求头 `Authorization: Bearer <u2a_密钥>`（`Bearer ` 前缀可省，裸 token 也接受）。
+- 请求头 `Authorization: Bearer <u2a_密钥>`（`Bearer ` 前缀可省，裸 token 也接受），优先级最高。
+- 请求头 `x-api-key: <u2a_密钥>`（Anthropic 官方 SDK 的默认鉴权头），与 `Authorization` 等价。
+- 两个头同时带且值不同：`401 conflicting_auth_headers`（鉴权头冲突），不会静默取其一。
 - 密钥按 SHA-256 比对 `api_keys` 表，仅 `enabled = 1` 的通过；命中即更新 `last_used_at`。
-- 无鉴权头时：DB 里「网关鉴权」开关（`/api/settings/gateway`）优先；未配置过则回落到环境变量 `UNIFIED_ALLOW_ANONYMOUS_GATEWAY`（默认 false）。允许匿名时以 `anonymous` 身份记录，密钥归因为空。
+- 两个鉴权头都不带时：DB 里「网关鉴权」开关（`/api/settings/gateway`）优先；未配置过则回落到环境变量 `UNIFIED_ALLOW_ANONYMOUS_GATEWAY`（默认 false）。允许匿名时以 `anonymous` 身份记录，密钥归因为空。
 
 ### `POST /v1/chat/completions`
 
@@ -131,7 +133,7 @@ Anthropic 外壳示例（`/v1/messages`）：
 | 504 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
 | 501（能力位未实现） | 501 | `invalid_request_error` / `invalid_request_error` | `capability_unsupported` |
 
-网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）。
+网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；`Authorization` 与 `x-api-key` 同时带上且值不同 `401 conflicting_auth_headers`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）。
 
 模型解析失败（发生在转发之前，不写 `request_logs`、不产生流水）：
 
