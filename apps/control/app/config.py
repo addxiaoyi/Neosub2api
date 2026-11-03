@@ -94,6 +94,8 @@ class Settings:
     failure_window_max: int = 20
     # 上游实拉模型目录的进程内缓存时长（秒）；0 表示不缓存
     models_cache_ttl_sec: int = 60
+    # 未知模型名兜底：默认关（404 model_not_found）；打开后回到「用首家启用的、支持该能力位的 provider」
+    model_fallback_first: bool = False
 
 
 def load_settings() -> Settings:
@@ -135,6 +137,8 @@ def load_settings() -> Settings:
         failure_window_sec=int(os.getenv("UNIFIED_FAILURE_WINDOW_SEC", "60")),
         failure_window_max=int(os.getenv("UNIFIED_FAILURE_WINDOW_MAX", "20")),
         models_cache_ttl_sec=int(os.getenv("UNIFIED_MODELS_CACHE_TTL_SEC", "60")),
+        # 存量客户端逃生口：默认严格 404，不要默认打开
+        model_fallback_first=_bool("UNIFIED_MODEL_FALLBACK_FIRST", False),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

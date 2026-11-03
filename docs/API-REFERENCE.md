@@ -60,6 +60,12 @@ OpenAI Chat Completions 协议转发。
    - 一家都没有 → 404；若该 `id` 只出现在**未启用** provider 的静态声明里，返回 404 `model_unavailable`，`candidates` 带 `readiness / requires / reason`，说明「存在但不可用」；
    - 命中的 provider 不支持该端点能力位 → 501 `capability_unsupported`（与带前缀写法一致）。
 5. 解析结果直接落进 `request_logs` 既有字段 `provider` / `model`，不新增表；自动解析命中时另写一行 `unified.model_resolve` 日志便于对照。
+6. 兜底开关 `UNIFIED_MODEL_FALLBACK_FIRST`（默认 `0`）只作用在规则 4 的「一家都没有」：
+   - `0`：按上面返回 404 `model_not_found` / `model_unavailable`；
+   - `1`：改用**首家启用的、支持当前端点能力位的 provider**，模型名原样透传。此时 `request_logs.provider` 写实际承接的 provider，`model` 写原模型名；另写一行 `unified.model_fallback` 日志（含请求 id、模型名、选中的 provider、候选 provider 数）；
+   - 多家命中（400 `ambiguous_model`）不受开关影响；若没有任何启用的 provider 支持该能力位，仍返回原有 404 / 501，不会凭空造路由。
+
+**行为变化**：旧实现查不到模型名时会兜底到第一家 chat provider，现在默认**没有兜底**——名字不在聚合目录里就直接 404。依赖「随便写个模型名也能跑」的客户端必须改成 `<provider>/<model>`、带 `x-provider`，或临时设置 `UNIFIED_MODEL_FALLBACK_FIRST=1`。
 
 #### 错误契约
 

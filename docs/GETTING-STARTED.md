@@ -39,6 +39,10 @@ cp .env.example .env
 | `GROK_REGISTER_EXECUTOR_URL` | 空 | Grok 注册浏览器执行器 HTTP 入口 | 留空则注册任务以明确原因失败（不假装成功） |
 | `GROK_REGISTER_MAX_CONCURRENCY` | `2` | 注册任务全局并发上限 | 按执行器能力调整 |
 | `GROK_REGISTER_MAX_WORKERS` | `4` | 单任务 workers 上限 | 按执行器能力调整 |
+| `UNIFIED_MODELS_CACHE_TTL_SEC` | `60` | 上游实拉模型目录的进程内缓存时长（秒） | 想让模型页每次都实拉时设 `0`（关闭缓存）；缓存键含 provider、`base_url`、凭据指纹与 `models_path`/`tier` |
+| `UNIFIED_MODEL_FALLBACK_FIRST` | `0` | 未知模型名是否兜底到首家启用的、支持该端点能力位的 provider | 默认 `0`：404 `model_not_found`（严格模式）；设 `1` 恢复旧行为，只影响「一家都没命中」，多家命中仍是 400 `ambiguous_model` |
+| `UNIFIED_FAILURE_WINDOW_SEC` | `60` | 失败请求滑动窗口长度（秒） | 与下面一项同时 `> 0` 才生效；任一项为 `0` 即关闭失败限流 |
+| `UNIFIED_FAILURE_WINDOW_MAX` | `20` | 窗口内失败请求上限（按密钥计数） | 同上；调高可减少误伤，调低更早拦截刷量 |
 
 前端还有两个构建期变量（不进 `.env` 也能跑，见 `apps/web/next.config.ts`）：
 

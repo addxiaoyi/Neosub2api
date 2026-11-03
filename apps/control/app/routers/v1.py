@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -309,6 +310,9 @@ async def _resolve(request: Request, payload: dict[str, Any], capability: str):
             request.headers.get("x-provider"),
             capability,
             ttl_sec=int(getattr(request.app.state.settings, "models_cache_ttl_sec", 60)),
+            fallback_first=bool(getattr(request.app.state.settings, "model_fallback_first", False)),
+            # 兜底日志的关联 id：客户端带 x-request-id 就沿用，否则现生成一个短 id
+            request_id=(request.headers.get("x-request-id") or "").strip() or uuid.uuid4().hex[:12],
         )
     except ProviderError as exc:
         raise from_provider_error(exc) from exc

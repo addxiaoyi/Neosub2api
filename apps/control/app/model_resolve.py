@@ -7,6 +7,10 @@
 3. 「设置 → 模型别名」；
 4. 模型目录自动匹配：唯一命中直接走，多家命中 400，无命中 404。
 
+兜底开关（`UNIFIED_MODEL_FALLBACK_FIRST`，默认关）只作用在「一家都没命中」这一步：
+打开后用首家启用的、支持当前端点能力位的 provider 承接未知模型名。多家命中（歧义）
+仍返回 400，不会被兜底掩盖。
+
 解析出来的 provider / model 就是 request_logs 里写的两个字段，不新增表。
 """
 
@@ -31,6 +35,7 @@ MODE_EXPLICIT = "explicit"
 MODE_PREFIX = "prefix"
 MODE_ALIAS = "alias"
 MODE_CATALOG = "catalog"
+MODE_FALLBACK = "fallback"
 
 
 class ModelResolutionError(GatewayError):
@@ -172,12 +177,23 @@ def _missing(registry: Any, model: str) -> ModelResolutionError:
     )
 
 
+def _fallback_provider(registry: Any, capability: str) -> tuple[ProviderAdapter, int] | None:
+    """首个启用的、支持该能力位的 provider；候选数一并返回给日志。"""
+    capable = [adapter for adapter in registry.enabled() if adapter.spec.capabilities.get(capability)]
+    if not capable:
+        return None
+    return capable[0], len(capable)
+
+
 async def resolve_model(
     registry: Any,
     model: str,
     explicit: str | None = None,
     capability: str = "chat",
     ttl_sec: int = 60,
+    *,
+    fallback_first: bool = False,
+    request_id: str | None = None,
 ) -> tuple[ProviderAdapter, str, str]:
     """返回 (adapter, 上游使用的模型名, 解析模式)；ProviderError 交给调用方统一映射。"""
     pid = (explicit or "").strip()
@@ -201,6 +217,15 @@ async def resolve_model(
     entries, adapters = await _catalog(registry, ttl_sec)
     entry = next((item for item in entries if str(item.get("id") or "") == target), None)
     if entry is None:
+        if fallback_first:
+            picked = _fallback_provider(registry, capability)
+            if picked is not None:
+                adapter, candidates = picked
+                logger.info(
+                    "unified.model_fallback request_id=%s model=%s provider=%s candidates=%d",
+                    request_id or "-", mask_text(target), adapter.spec.id, candidates,
+                )
+                return adapter, target, MODE_FALLBACK
         raise _missing(registry, target)
 
     hits = _capable_hits(entry, adapters, capability)

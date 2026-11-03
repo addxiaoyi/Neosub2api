@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
 import time
 
 import httpx
 import pytest
 
+from app.adapters.base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
+from app.db import Database
+from app.model_resolve import (
+    MODE_CATALOG,
+    MODE_FALLBACK,
+    MODEL_NOT_FOUND,
+    ModelResolutionError,
+    resolve_model,
+)
+from tests.conftest import CONTROL, FAKE_PORT, PY, _port_free, _wait_up
+
 pytestmark = pytest.mark.gateway
 
 CATALOG_MODEL = "fake-chat-1"
+FALLBACK_PORT = int(os.getenv("UNIFIED_TEST_FALLBACK_PORT", "8062"))
 
 
 @pytest.fixture(scope="module")
@@ -161,3 +176,183 @@ def test_404_shell_follows_each_protocol(anon: httpx.Client, gateway_key: str) -
     assert body["type"] == "error"
     assert body["error"]["type"] == "not_found_error"
     assert body["error"]["code"] == "model_not_found"
+
+
+# --- 兜底开关：解析层单测（开关状态由 env 决定，集成实例无法运行时切换，故在此直连 resolve_model） ---
+
+
+class _StubAdapter(ProviderAdapter):
+    def __init__(
+        self,
+        pid: str,
+        *,
+        chat: bool = True,
+        models: bool = True,
+        declared: tuple[str, ...] = (),
+    ) -> None:
+        self.spec = ProviderSpec(
+            id=pid,
+            name=pid,
+            vendor="test",
+            license="MIT",
+            runtime="in-process",
+            status="stub",
+            description="",
+            default_base_url="http://127.0.0.1:1",
+            capabilities=stub_capabilities(chat=chat, models=models),
+        )
+        super().__init__()
+        self._declared = declared
+
+    def declared_models(self) -> list[dict[str, object]]:
+        return [{"id": model} for model in self._declared]
+
+
+class _StubRegistry:
+    def __init__(self, db: Database, adapters: list[ProviderAdapter]) -> None:
+        self.db = db
+        self._adapters = list(adapters)
+        self._by_id = {adapter.spec.id: adapter for adapter in adapters}
+
+    def enabled(self) -> list[ProviderAdapter]:
+        return list(self._adapters)
+
+    def get(self, pid: str) -> ProviderAdapter:
+        adapter = self._by_id.get(pid)
+        if adapter is None:
+            raise ProviderError(404, f"未知的 provider：{pid}")
+        return adapter
+
+    def list_public(self) -> list[dict[str, object]]:
+        return []
+
+
+@pytest.fixture
+def stub_db(tmp_path) -> Database:
+    return Database(tmp_path / "stub.db")
+
+
+async def test_fallback_off_unknown_model_is_404(stub_db: Database) -> None:
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha")])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "mystery-model")
+    assert caught.value.status_code == 404
+    assert caught.value.error["code"] == MODEL_NOT_FOUND
+
+
+async def test_fallback_on_routes_first_capable_provider(stub_db: Database) -> None:
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha"), _StubAdapter("beta", chat=False)])
+    adapter, effective, mode = await resolve_model(registry, "mystery-model", fallback_first=True)
+    assert mode == MODE_FALLBACK
+    assert adapter.spec.id == "alpha"
+    assert effective == "mystery-model"
+
+
+async def test_fallback_on_keeps_ambiguous_400(stub_db: Database) -> None:
+    registry = _StubRegistry(
+        stub_db,
+        [
+            _StubAdapter("alpha", declared=("shared-model",)),
+            _StubAdapter("beta", declared=("shared-model",)),
+        ],
+    )
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "shared-model", fallback_first=True)
+    assert caught.value.status_code == 400
+    assert caught.value.error["code"] == "ambiguous_model"
+
+
+async def test_fallback_log_carries_request_id_and_candidates(stub_db: Database, caplog) -> None:
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha"), _StubAdapter("beta")])
+    with caplog.at_level(logging.INFO, logger="unified.model_resolve"):
+        adapter, _, mode = await resolve_model(
+            registry, "mystery-model", fallback_first=True, request_id="req-123"
+        )
+    assert mode == MODE_FALLBACK
+    assert adapter.spec.id == "alpha"
+    line = next(r.getMessage() for r in caplog.records if "unified.model_fallback" in r.getMessage())
+    assert "request_id=req-123" in line
+    assert "model=mystery-model" in line
+    assert "provider=alpha" in line
+    assert "candidates=2" in line
+
+
+async def test_fallback_without_capable_provider_keeps_404(stub_db: Database) -> None:
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha", chat=False)])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "mystery-model", fallback_first=True)
+    assert caught.value.status_code == 404
+    assert caught.value.error["code"] == MODEL_NOT_FOUND
+
+
+async def test_catalog_entry_without_capability_still_hits_501_gate(stub_db: Database) -> None:
+    # 目录里确实有这个名字，但没有启用 provider 支持 chat → 交给 v1 的 501 能力位门槛
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha", chat=False, declared=("declared-model",))])
+    adapter, effective, mode = await resolve_model(
+        registry, "declared-model", capability="chat", fallback_first=True
+    )
+    assert mode == MODE_CATALOG
+    assert effective == "declared-model"
+    assert adapter.spec.capabilities["chat"] is False
+
+
+# --- 兜底开关：独立控制面实例端到端验证（开关只能通过 env 在启动时生效） ---
+
+
+@pytest.fixture(scope="module")
+def fallback_gateway(_bring_up_services, tmp_path_factory):
+    if not _port_free(FALLBACK_PORT):
+        pytest.skip(f"端口 {FALLBACK_PORT} 已被占用")
+    data_dir = tmp_path_factory.mktemp("fallback-data")
+    env = os.environ.copy()
+    env.update(
+        {
+            "UNIFIED_DATA_DIR": str(data_dir),
+            "UNIFIED_DB_PATH": str(data_dir / "unified.db"),
+            "UNIFIED_ADMIN_USER": "admin",
+            "UNIFIED_ADMIN_PASSWORD": "test",
+            "CODEBUDDY_BASE": f"http://127.0.0.1:{FAKE_PORT}",
+            "UNIFIED_WEB_DIR": str(data_dir / "no-web"),
+            "UNIFIED_ALLOW_ANONYMOUS_GATEWAY": "false",
+            "UNIFIED_ALLOW_PRIVATE_UPSTREAMS": "1",
+            "GROK_REGISTER_EXECUTOR_URL": "",
+            "UNIFIED_MODEL_FALLBACK_FIRST": "1",
+        }
+    )
+    proc = subprocess.Popen(
+        [str(PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
+         "--port", str(FALLBACK_PORT), "--log-level", "warning"],
+        cwd=str(CONTROL),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not _wait_up(f"http://127.0.0.1:{FALLBACK_PORT}/healthz"):
+            pytest.skip("兜底实例启动失败")
+        yield f"http://127.0.0.1:{FALLBACK_PORT}"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_fallback_on_runs_unknown_model_end_to_end(fallback_gateway: str) -> None:
+    with httpx.Client(base_url=fallback_gateway, trust_env=False, timeout=10.0) as client:
+        login = client.post("/api/login", json={"username": "admin", "password": "test"})
+        assert login.status_code == 200, f"{login.status_code} {login.text}"
+        key = client.post("/api/keys", json={"name": "fallback-suite"}).json()["key"]
+
+        model = "never-in-any-catalog"
+        r = _post(client, "/v1/chat/completions", key, model)
+        assert r.status_code == 200, f"{r.status_code} {r.text}"
+        assert model in r.json()["choices"][0]["message"]["content"], "兜底后应把原模型名透传给上游"
+
+        time.sleep(0.2)  # 旁路日志异步落库
+        rows = client.get("/api/logs", params={"model": model}).json()
+        assert rows["total"] >= 1
+        # 日志写真实承接的 provider，不写「兜底」这种虚拟值
+        assert any(row["provider"] == "codebuddy" and row["model"] == model for row in rows["items"])
