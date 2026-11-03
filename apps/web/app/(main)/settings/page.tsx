@@ -16,6 +16,9 @@ import {
   RotateCcw,
   PlugZap,
   Loader2,
+  DownloadCloud,
+  FileText,
+  KeyRound,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {getExpiryDailyGroup, setExpiryDailyGroup} from '@/lib/display-prefs';
@@ -29,7 +32,10 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
-import {ProviderPanel} from '@/components/common/providers/ProviderPanel';
+import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
+import {TokensPanel} from '@/components/common/settings/TokensPanel';
+import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
+import {ProvidersSection} from '@/components/common/settings/ProvidersSection';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
@@ -863,57 +869,61 @@ export default function SettingsPage() {
   const [upstashBusy, setUpstashBusy] = useState(false);
 
   const load = useCallback(async () => {
-    // 本地数据很快（配置/映射/用户），先取到即渲染，不被上游探测拖慢
-    const [c, mm, u] = await Promise.allSettled([
-      settingsApi.upstream(),
-      settingsApi.modelMap(),
-      settingsApi.users(),
-    ]);
-    if (c.status === 'fulfilled') {
-      const v = c.value;
-      setCfg(v);
-      if (v.available !== false) {
-        const picked = {
-          schedule: pickValues(SCHEDULE_FIELDS, v.schedule),
-          prompt: pickValues(PROMPT_FIELDS, v.prompt),
-          cooldown: pickValues(COOLDOWN_FIELDS, v.cooldown),
-          pool: pickValues(POOL_FIELDS, v.pool),
-          features: pickValues(FEATURES_FIELDS, v.features),
-          session: pickValues(SESSION_FIELDS, v.session_sticky),
-          server: pickValues(SERVER_FIELDS, v.server),
-          upstream: pickValues(UPSTREAM_FIELDS, v.upstream),
-          global: pickValues(GLOBAL_FIELDS, v.global),
-          admin: pickValues(ADMIN_FIELDS, v.admin),
-        };
-        setForm(picked);
-        original.current = {
-          schedule: {...picked.schedule},
-          prompt: {...picked.prompt},
-          cooldown: {...picked.cooldown},
-          pool: {...picked.pool},
-          features: {...picked.features},
-          session: {...picked.session},
-          server: {...picked.server},
-          upstream: {...picked.upstream},
-          global: {...picked.global},
-          admin: {...picked.admin},
-        };
-        setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
-        setCoolText(JSON.stringify(v.cooldown ?? {}, null, 2));
-        setPoolText(JSON.stringify(v.pool ?? {}, null, 2));
-        setFeatText(JSON.stringify(v.features ?? {}, null, 2));
-        setSessText(JSON.stringify(v.session_sticky ?? {}, null, 2));
-        setPromptText(JSON.stringify(v.prompt ?? {}, null, 2));
-        setServerText(JSON.stringify(v.server ?? {}, null, 2));
-        setUpText(JSON.stringify(v.upstream ?? {}, null, 2));
-        setGlobalText(JSON.stringify(v.global ?? {}, null, 2));
-        // url 可回显；token 不回显明文，留空表示不修改
-        setUpstashForm({url: v.upstash?.url || '', token: ''});
+    // viewer 没有配置权限：不去碰 admin-only 的配置/映射接口，
+    // 否则每开一次设置页都会多出几次 403（配置本身也读不到）
+    if (isAdmin) {
+      const [c, mm] = await Promise.allSettled([
+        settingsApi.upstream(),
+        settingsApi.modelMap(),
+      ]);
+      if (c.status === 'fulfilled') {
+        const v = c.value;
+        setCfg(v);
+        if (v.available !== false) {
+          const picked = {
+            schedule: pickValues(SCHEDULE_FIELDS, v.schedule),
+            prompt: pickValues(PROMPT_FIELDS, v.prompt),
+            cooldown: pickValues(COOLDOWN_FIELDS, v.cooldown),
+            pool: pickValues(POOL_FIELDS, v.pool),
+            features: pickValues(FEATURES_FIELDS, v.features),
+            session: pickValues(SESSION_FIELDS, v.session_sticky),
+            server: pickValues(SERVER_FIELDS, v.server),
+            upstream: pickValues(UPSTREAM_FIELDS, v.upstream),
+            global: pickValues(GLOBAL_FIELDS, v.global),
+            admin: pickValues(ADMIN_FIELDS, v.admin),
+          };
+          setForm(picked);
+          original.current = {
+            schedule: {...picked.schedule},
+            prompt: {...picked.prompt},
+            cooldown: {...picked.cooldown},
+            pool: {...picked.pool},
+            features: {...picked.features},
+            session: {...picked.session},
+            server: {...picked.server},
+            upstream: {...picked.upstream},
+            global: {...picked.global},
+            admin: {...picked.admin},
+          };
+          setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
+          setCoolText(JSON.stringify(v.cooldown ?? {}, null, 2));
+          setPoolText(JSON.stringify(v.pool ?? {}, null, 2));
+          setFeatText(JSON.stringify(v.features ?? {}, null, 2));
+          setSessText(JSON.stringify(v.session_sticky ?? {}, null, 2));
+          setPromptText(JSON.stringify(v.prompt ?? {}, null, 2));
+          setServerText(JSON.stringify(v.server ?? {}, null, 2));
+          setUpText(JSON.stringify(v.upstream ?? {}, null, 2));
+          setGlobalText(JSON.stringify(v.global ?? {}, null, 2));
+          // url 可回显；token 不回显明文，留空表示不修改
+          setUpstashForm({url: v.upstash?.url || '', token: ''});
+        }
       }
+      if (mm.status === 'fulfilled') setModelMap(mm.value);
     }
-    if (mm.status === 'fulfilled') setModelMap(mm.value);
-    if (u.status === 'fulfilled') setUsers(u.value);
-  }, []);
+    // 用户列表是 current_user 权限，viewer 也能看（只读）
+    const u = await Promise.allSettled([settingsApi.users()]);
+    if (u[0].status === 'fulfilled') setUsers(u[0].value);
+}, [isAdmin]);
 
   /**
    * 上游模型列表。
@@ -1085,24 +1095,24 @@ export default function SettingsPage() {
         }
       />
 
-      <Tabs id="settings-tabs" defaultValue="providers">
+      <Tabs id="settings-tabs" defaultValue="upstream">
         {/* 标签较多，手机上会撑破容器，这里允许横向滚动 */}
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
         <TabsList className="w-max">
-          <TabsTrigger value="providers"><Server className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabProviders')}</TabsTrigger>
-          <TabsTrigger value="upstream"><PlugZap className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUpstream')}</TabsTrigger>
+          <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUpstream')}</TabsTrigger>
           <TabsTrigger value="models"><Shuffle className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabModels')}</TabsTrigger>
           <TabsTrigger value="users"><Users className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUsers')}</TabsTrigger>
+          <TabsTrigger value="tokens"><KeyRound className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabTokens')}</TabsTrigger>
+          <TabsTrigger value="system"><DownloadCloud className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabSystem')}</TabsTrigger>
+          <TabsTrigger value="changelog"><FileText className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabChangelog')}</TabsTrigger>
           <TabsTrigger value="about"><Info className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabAbout')}</TabsTrigger>
         </TabsList>
         </div>
 
-        <TabsContent value="providers" className="mt-4 space-y-4">
-          <ProviderPanel />
-        </TabsContent>
-
         {/* ═══ 上游配置 ═══ */}
         <TabsContent value="upstream" className="mt-3 space-y-3">
+          {isAdmin ? (
+            <>
           {upstreamError && (
             <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
@@ -1702,10 +1712,24 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+            </>
+          ) : (
+            <section className="rounded-[20px] bg-muted px-3.5 py-4">
+              <div className="text-xs font-medium">{t('settings.adminOnlyConfig')}</div>
+              <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                {t('settings.adminOnlyConfigDesc')}
+              </div>
+            </section>
+          )}
+
+          {/* 多 provider 接入：基准版上游配置只服务单一上游，这里沿用本页表格样式承载多家上游 */}
+          <ProvidersSection />
         </TabsContent>
 
         {/* ═══ 模型映射 ═══ */}
         <TabsContent value="models" className="mt-4 space-y-4">
+          {isAdmin ? (
+            <>
           <div className="rounded-[20px] bg-muted p-4">
             <div className="mb-1 text-sm font-medium">{t('settings.mapNewAlias')}</div>
             <div className="mb-3 text-[11px] text-muted-foreground">
@@ -1784,6 +1808,15 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
+            </>
+          ) : (
+            <section className="rounded-[20px] bg-muted px-3.5 py-4">
+              <div className="text-xs font-medium">{t('settings.adminOnlyConfig')}</div>
+              <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                {t('settings.adminOnlyConfigDesc')}
+              </div>
+            </section>
+          )}
         </TabsContent>
 
         {/* ═══ 管理用户 ═══ */}
@@ -1928,12 +1961,27 @@ export default function SettingsPage() {
           </div>
         </TabsContent>
 
+        {/* ═══ 访问令牌 ═══ */}
+        <TabsContent value="tokens" className="mt-4 space-y-4">
+          <TokensPanel />
+        </TabsContent>
+
+        {/* ═══ 系统更新 ═══ */}
+        <TabsContent value="system" className="mt-4 space-y-4">
+          <UpdatePanel />
+        </TabsContent>
+
+        {/* ═══ 更新日志 ═══ */}
+        <TabsContent value="changelog" className="mt-4">
+          <ChangelogPanel />
+        </TabsContent>
+
         {/* ═══ 关于 ═══ */}
         <TabsContent value="about" className="mt-4">
           <div className="rounded-[20px] bg-muted p-5 text-xs leading-6 text-muted-foreground">
             <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
               <SettingsIcon className="h-4 w-4" />
-              unified-2api
+              WorkBuddy Manager
             </div>
             <p>
               {t('settings.aboutDesc')}

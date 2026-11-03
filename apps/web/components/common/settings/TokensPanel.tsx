@@ -15,13 +15,6 @@ import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   Table,
   TableBody,
   TableCell,
@@ -45,11 +38,7 @@ export function TokensPanel() {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<CreatedApiToken | null>(null);
-  const [form, setForm] = useState<{
-    name: string;
-    scope: 'readonly' | 'admin';
-    expires: 'never' | '30' | '90' | '365';
-  }>({name: '', scope: 'readonly', expires: 'never'});
+  const [form, setForm] = useState<{name: string}>({name: ''});
 
   const load = useCallback(async () => {
     try {
@@ -83,46 +72,14 @@ export function TokensPanel() {
       <div className="rounded-[20px] bg-muted p-4">
         <div className="mb-1 text-sm font-medium">{t('settings.tokensNew')}</div>
         <div className="mb-3 text-[11px] text-muted-foreground">{t('settings.tokensNewDesc')}</div>
-        <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
           <div className="space-y-1.5">
             <Label className="text-[11px] text-muted-foreground">{t('settings.tokensName')}</Label>
             <Input
               value={form.name}
-              onChange={(e) => setForm({...form, name: e.target.value})}
+              onChange={(e) => setForm({name: e.target.value})}
               className="bg-background"
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">{t('settings.tokensScope')}</Label>
-            <Select
-              value={form.scope}
-              onValueChange={(v) => setForm({...form, scope: v as 'readonly' | 'admin'})}
-            >
-              <SelectTrigger className="bg-background">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="readonly">{t('settings.tokensScopeReadonly')}</SelectItem>
-                <SelectItem value="admin">{t('settings.tokensScopeAdmin')}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">{t('settings.tokensExpires')}</Label>
-            <Select
-              value={form.expires}
-              onValueChange={(v) => setForm({...form, expires: v as 'never' | '30' | '90' | '365'})}
-            >
-              <SelectTrigger className="bg-background">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="never">{t('settings.tokensExpiresNever')}</SelectItem>
-                <SelectItem value="30">{t('settings.tokensExpires30')}</SelectItem>
-                <SelectItem value="90">{t('settings.tokensExpires90')}</SelectItem>
-                <SelectItem value="365">{t('settings.tokensExpires365')}</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
           <Button
             className="rounded-full"
@@ -134,18 +91,11 @@ export function TokensPanel() {
               }
               setBusy(true);
               try {
-                const r = await tokenApi.create({
-                  name: form.name.trim(),
-                  scope: form.scope,
-                  // 「永不」传 null；其余按天数换算成绝对到期时刻
-                  expires_at:
-                    form.expires === 'never'
-                      ? null
-                      : Math.floor(Date.now() / 1000) + Number(form.expires) * 86400,
-                });
+                // 后端只接受只读作用域与不设到期，表单不再提供无效选项
+                const r = await tokenApi.create({name: form.name.trim()});
                 setCreated(r);
                 notify.ok(t('settings.tokensCreated'));
-                setForm({name: '', scope: 'readonly', expires: 'never'});
+                setForm({name: ''});
                 void load();
               } catch (e) {
                 notify.err(errText(e));
@@ -157,6 +107,10 @@ export function TokensPanel() {
             <Plus />
             {t('keys.create')}
           </Button>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          <span>{t('settings.tokensScope')}: {t('settings.tokensScopeReadonly')}</span>
+          <span>{t('settings.tokensExpires')}: {t('settings.tokensExpiresNever')}</span>
         </div>
       </div>
 

@@ -2,40 +2,37 @@ import axios, {AxiosError} from 'axios';
 import {BASE_PATH} from './base-path';
 import {tp} from './i18n';
 import type {Realm} from './realm-context';
-import type {ProviderInfo} from './providers';
+import type {ProviderCredential, ProviderCredentialInput, ProviderInfo} from './providers';
 import type {
   Account,
-  CheckinLogPage,
   CreditExpiry,
   CreditsMeta,
   AccountsResponse,
   ApiKey,
   ApiToken,
   CreatedApiToken,
-  IpAccessLog,
-  IpRule,
   Me,
   AuditLogPage,
-  ModelCatalog,
+  GuardInfo,
+  LoginFailuresResponse,
   ModelListResponse,
   Page,
-  PlaygroundModels,
   ReloadState,
   RequestLog,
   Changelog,
-  SecurityConfig,
   StatsSummary,
-  TaskLogResponse,
-  TaskRunStatus,
   UpstreamConfig,
-  UpstreamStats,
   UpstreamStatus,
-  UsageBreakdown,
   UpdateCheck,
   UpdateStatus,
   UsagePoint,
   UserItem,
   Versions,
+  Sub2apiGroup,
+  Sub2apiAccount,
+  Sub2apiLedgerEntry,
+  PriceBookRow,
+  PriceResolveResult,
 } from './types';
 
 export const http = axios.create({
@@ -56,6 +53,12 @@ export const http = axios.create({
 export function errText(e: unknown): string {
   const ax = e as AxiosError<{detail?: string; error?: string}>;
   const d = ax?.response?.data;
+  // 非 JSON 响应（如后端裸 404 返回的 HTML 错误页）：body 里是一整页 HTML，
+  // 剥了标签也只剩一堆内联 JS，毫无信息量。直接给一个简短的状态提示即可。
+  const ct = String(ax?.response?.headers?.['content-type'] || '');
+  if (typeof d === 'string' && !ct.includes('application/json')) {
+    return ax.response?.status ? `${ax.response.status} ${tp('请求失败')}` : tp('请求失败');
+  }
   const raw = (typeof d === 'string' ? d : d?.detail || d?.error) || ax?.message || '';
   return raw ? tp(raw) : tp('请求失败');
 }
@@ -140,44 +143,6 @@ export const accountApi = {
       expected?: Realm;
       got?: Realm;
     }>('/api/auth/poll', {state, realm, region}),
-  /** 浏览器 OAuth 登录（国内版/国际版双版本）。version='cn' 或 'intl' */
-  oauthStart: (name: string = '', version: 'cn' | 'intl' = 'cn', keep = false) =>
-    post<{id: string; url: string; expires_at: number; interval: number}>('/api/oauth/start', {name, version, keep}),
-  /** 轮询 OAuth 登录结果 */
-  oauthPoll: (fid: string) =>
-    get<{
-      status: 'pending' | 'expired' | 'success' | 'invalid';
-      uid?: string;
-      nickname?: string;
-      updated?: boolean;
-      realm?: Realm;
-      accessToken?: string;
-      refreshToken?: string;
-      expires_at?: number;
-      domain?: string;
-    }>('/api/oauth/' + fid + '/poll'),
-  /** 取消 OAuth 登录流程 */
-  oauthCancel: (fid: string) =>
-    del<{status: string}>('/api/oauth/' + fid),
-  /** 批量 Google OAuth 启动 */
-  oauthBatchStart: (count: number, version: 'cn' | 'intl' = 'intl', namePrefix = 'batch', headless = true) =>
-    post<{job_id: string}>('/api/oauth/batch', {count, version, name_prefix: namePrefix, headless}),
-  oauthBatchStatus: (jobId: string) =>
-    get<{
-      job_id: string;
-      status: 'running' | 'done' | 'partial' | 'error';
-      count: number;
-      version: string;
-      progress: number;
-      ok: number;
-      failed: number;
-      accounts: Array<{name?: string; nickname?: string; uid?: string}>;
-      errors: Array<{name?: string; error: string}>;
-      started_at: number;
-      finished_at?: number;
-    }>('/api/oauth/batch/' + jobId),
-  oauthBatchList: () =>
-    get<{jobs: Array<{job_id: string; status: string; count: number; ok: number; failed: number; version: string; started_at: number; finished_at?: number}>}>('/api/oauth/batch'),
   remove: (file: string) => del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}`),
   /** 临时禁用 / 启用账号（issue #21）：改文件名 + 触发上游重载。 */
   setDisabled: (file: string, disabled: boolean) =>
@@ -230,17 +195,6 @@ export const accountApi = {
         code?: number; skipped?: boolean; already?: boolean;
       }[];
     }>('/api/accounts/checkin-all'),
-  /** 签到记录（分页）。days 用于时间范围筛选 */
-  checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number, realm?: Realm) =>
-    get<CheckinLogPage>('/api/checkin-logs', {limit, offset, uid, days, realm}),
-  clearCheckinLogs: () => post<{ok: boolean}>('/api/checkin-logs/clear'),
-  /** 自动任务记录（分页）。kind / days 为筛选条件 */
-  taskLogs: (limit = 20, offset = 0, kind?: string, uid?: string, days?: number, realm?: Realm) =>
-    get<TaskLogResponse>('/api/task-logs', {limit, offset, kind, uid, days, realm}),
-  collectTaskLogs: () => post<{ok: boolean; parsed: number; added: number}>('/api/task-logs/collect'),
-  clearTaskLogs: () => post<{ok: boolean}>('/api/task-logs/clear'),
-  upstreamLogs: (limit = 200) =>
-    get<{available: boolean; lines: string[]; total: number}>('/api/upstream/logs', {limit}),
   test: (file: string) =>
     post<{ok: boolean; message: string}>(`/api/accounts/${encodeURIComponent(file)}/test`),
   refresh: (file: string) =>
@@ -259,18 +213,7 @@ export const accountApi = {
       `/api/accounts/${encodeURIComponent(file)}/note`,
       {note},
     ),
-  restart: () => post<{ok: boolean; message: string}>('/api/restart'),
-
-  /* ── 成长任务一键执行（issue #19）─────────────────────
-   * 调用上游自带的 scripts/task_runner.py。full（点亮）会伪造活跃上报，
-   * 因此单独要求 confirm，与幂等的 claim 区分开。 */
-  taskRunStatus: () => get<TaskRunStatus>('/api/task-run'),
-  taskRunStart: (mode: 'preview' | 'claim' | 'full', target = 'ALL', confirm = false) =>
-    post<{ok: boolean; message: string}>('/api/task-run', {mode, target, confirm}),
-  taskRunStop: () => post<{ok: boolean; message: string}>('/api/task-run/stop'),
-  taskClaimSchedule: () => get<{enabled: boolean; hours: number[]}>('/api/task-claim-schedule'),
-  saveTaskClaimSchedule: (enabled: boolean, hours: number[]) =>
-    put<{enabled: boolean; hours: number[]}>('/api/task-claim-schedule', {enabled, hours}),
+  restart: () => post<{ok: boolean; message: string}>('/api/accounts/restart'),
 };
 
 /* ── 上游状态 ───────────────────────────────────────── */
@@ -278,20 +221,6 @@ export const upstreamApi = {
   status: () => get<UpstreamStatus>('/api/status'),
   /** 上游模型简表；realm 非空时只返回该版本的条目 */
   models: (realm?: Realm) => get<ModelListResponse>('/api/models', {realm}),
-};
-
-/* ── 模型中心 ───────────────────────────────────────── */
-export const modelApi = {
-  /** 指定版本的模型目录；force=true 绕过 5 分钟缓存 */
-  catalog: (realm: Realm = 'cn', force = false) =>
-    get<ModelCatalog>('/api/model-catalog', {realm, force}),
-};
-
-/* ── 聊天测试台 ─────────────────────────────────────── */
-export const playgroundApi = {
-  /** 指定版本的可选模型 + 各自支持的推理档位（与模型中心同源） */
-  models: (realm: Realm = 'cn') =>
-    get<PlaygroundModels>('/api/playground/models', {realm}),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */
@@ -309,13 +238,14 @@ export const keyApi = {
  * 明文只在创建时返回一次。 */
 export const tokenApi = {
   list: () => get<ApiToken[]>('/api/tokens'),
-  create: (body: {name: string; scope: 'readonly' | 'admin'; expires_at: number | null}) =>
+  /** 后端只接受只读作用域与不设到期（admin / 定时到期会被 400 拒绝） */
+  create: (body: {name: string; scope?: 'readonly'; expires_at?: null}) =>
     post<CreatedApiToken>('/api/tokens', body),
   update: (id: number, body: {
     name?: string;
-    scope?: 'readonly' | 'admin';
+    scope?: 'readonly';
     enabled?: boolean;
-    expires_at?: number | null;
+    expires_at?: null;
   }) => patch<ApiToken>(`/api/tokens/${id}`, body),
   remove: (id: number) => del<{ok: boolean}>(`/api/tokens/${id}`),
 };
@@ -326,39 +256,80 @@ export const logApi = {
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
 };
 
+/* ── sub2api 配额域（订阅分组 / 账号池 / 流水）────────── */
+export const sub2Api = {
+  groups: () => get<Sub2apiGroup[]>('/api/sub2api/groups'),
+  createGroup: (body: {id: string; name: string; platform: string; quota_limit: number}) =>
+    post<Sub2apiGroup>('/api/sub2api/groups', body),
+  patchGroup: (
+    id: string,
+    body: {name?: string; platform?: string; quota_limit?: number; enabled?: boolean; reset_quota?: boolean},
+  ) => patch<Sub2apiGroup>(`/api/sub2api/groups/${encodeURIComponent(id)}`, body),
+  removeGroup: (id: string) => del<{ok: boolean}>(`/api/sub2api/groups/${encodeURIComponent(id)}`),
+  accounts: (group_id?: string) => get<Sub2apiAccount[]>('/api/sub2api/accounts', {group_id}),
+  createAccount: (body: {
+    group_id: string;
+    name: string;
+    upstream_base: string;
+    api_key: string;
+    weight: number;
+    quota_limit: number;
+  }) => post<Sub2apiAccount>('/api/sub2api/accounts', body),
+  patchAccount: (
+    id: number,
+    body: {
+      name?: string;
+      upstream_base?: string;
+      api_key?: string;
+      weight?: number;
+      quota_limit?: number;
+      enabled?: boolean;
+      clear_cooldown?: boolean;
+    },
+  ) => patch<Sub2apiAccount>(`/api/sub2api/accounts/${id}`, body),
+  removeAccount: (id: number) => del<{ok: boolean}>(`/api/sub2api/accounts/${id}`),
+  resetAccount: (id: number) => post<Sub2apiAccount>(`/api/sub2api/accounts/${id}/reset`),
+  ledger: (group_id?: string, limit = 50) =>
+    get<Sub2apiLedgerEntry[]>('/api/sub2api/ledger', {group_id, limit}),
+};
+
+/* ── 定价（price_books / resolve / import）────────────── */
+export const pricingApi = {
+  books: (params: {provider?: string; model?: string; token_class?: string; limit?: number} = {}) =>
+    get<PriceBookRow[]>('/api/pricing/books', params),
+  create: (body: {
+    model: string;
+    token_class: string;
+    price_micro_per_1m: number;
+    provider?: string;
+    effective_from?: number;
+    note?: string;
+  }) => post<PriceBookRow>('/api/pricing/books', body),
+  resolve: (params: {provider: string; model: string; at?: number}) =>
+    get<PriceResolveResult>('/api/pricing/resolve', params),
+  // 后端的 dry_run 是查询参数（FastAPI 简单类型不读 body），放 body 里会被静默当成 false
+  importBooks: (dry_run = false) =>
+    post<{added: number; skipped: number; errors: string[]; path?: string}>(
+      `/api/pricing/import?dry_run=${dry_run}`,
+    ),
+};
+
 /* ── 用量统计 ───────────────────────────────────────── */
 export const statsApi = {
   /** realm 非空时只统计该版本（界面按版本切换时传） */
   summary: (realm?: Realm) => get<StatsSummary>('/api/stats/summary', {realm}),
   daily: (days = 30, realm?: Realm) => get<UsagePoint[]>('/api/stats/daily', {days, realm}),
-  byModel: (days = 30, realm?: Realm) =>
-    get<UsageBreakdown[]>('/api/stats/by-model', {days, realm}),
-  byKey: (days = 30, realm?: Realm) =>
-    get<UsageBreakdown[]>('/api/stats/by-key', {days, realm}),
-  /**
-   * 上游自己那份统计（issue #59）。口径与本页其它数字不同：含**直连上游**的调用，
-   * 且是自上游进程启动以来的累计（没有时段概念）。
-   */
-  upstream: () => get<UpstreamStats>('/api/stats/upstream'),
-  /** 按请求日志回填用量缺口（幂等） */
-  rebuildUsage: () =>
-    post<{rows_before: number; rows_after: number; requests_delta: number; tokens_delta: number}>(
-      '/api/stats/rebuild-usage',
-    ),
-  repairUsage: () =>
-    post<{repaired: number; requests: number; tokens: number}>('/api/stats/repair-usage'),
 };
 
-/* ── 安全 / IP ──────────────────────────────────────── */
+/* ── 安全 / 审计（只读：地址守卫、登录失败、审计事件）───────── */
 export const securityApi = {
-  config: () => get<SecurityConfig>('/api/security/config'),
-  saveConfig: (body: SecurityConfig) => post<SecurityConfig>('/api/security/config', body),
-  rules: () => get<IpRule[]>('/api/security/rules'),
-  addRule: (body: {kind: 'allow' | 'deny'; cidr: string; note?: string}) =>
-    post<IpRule>('/api/security/rules', body),
-  removeRule: (id: number) => del<{ok: boolean}>(`/api/security/rules/${id}`),
-  logs: (limit = 200) => get<IpAccessLog[]>('/api/security/logs', {limit}),
-  logsClear: () => post<{ok: boolean}>('/api/security/logs/clear'),
+  /** 上游地址守卫配置（net_guard 的封禁清单与开关），只读 */
+  guard: () => get<GuardInfo>('/api/security/guard'),
+  /** 登录失败节流状态 + 历史失败统计 */
+  loginFailures: (limit = 50) => get<LoginFailuresResponse>('/api/security/login-failures', {limit}),
+  /** 管理端审计事件（登录/改密码/清日志等），limit/offset 分页 */
+  audit: (params: {limit?: number; offset?: number; action?: string; actor?: string} = {}) =>
+    get<AuditLogPage>('/api/audit-logs', params),
 };
 
 /* ── 上游配置 / 用户 ───────────────────────────────── */
@@ -378,8 +349,6 @@ export const settingsApi = {
   saveModelMap: (body: Record<string, string>) =>
     post<Record<string, string>>('/api/settings/model-map', body),
   users: () => get<UserItem[]>('/api/users'),
-  /** 管理端审计日志（登录/改密码/增删用户等，仅管理员可读） */
-  auditLogs: (limit = 200) => get<AuditLogPage>('/api/audit-logs', {limit}),
   addUser: (body: {username: string; password: string; role: string}) =>
     post<UserItem>('/api/users', body),
   /** 改密码 / 改角色；会吊销该用户的既有会话（改自己则需重新登录） */
@@ -397,12 +366,19 @@ export const systemApi = {
   /** 检测新版本；force=true 绕过 6 小时缓存 */
   checkUpdate: (force = false) => get<UpdateCheck>('/api/system/check-update', {force}),
   versions: () => get<Versions>('/api/system/versions'),
-  /** 启动一键更新；target: manager | upstream | both */
-  startUpdate: (target: 'manager' | 'upstream' | 'both') =>
-    post<{ok: boolean; message: string}>('/api/system/update', {target}),
-  /** 固定上游版本（空串 = 取消固定，恢复跟随分支） */
-  setUpstreamRef: (ref: string) =>
-    post<{ok: boolean; upstream_ref: string}>('/api/system/upstream-ref', {ref}),
   /** 更新日志（解析仓库根目录 CHANGELOG.md，离线可用） */
   changelog: () => get<Changelog>('/api/system/changelog'),
+};
+
+/* ── 服务商凭据（统一凭据库，secret 只回掩码）────────────── */
+export const credentialApi = {
+  list: (provider?: string) =>
+    get<ProviderCredential[]>('/api/provider-credentials', provider ? {provider} : undefined),
+  create: (body: ProviderCredentialInput) =>
+    post<ProviderCredential>('/api/provider-credentials', body),
+  update: (
+    id: number,
+    body: Omit<ProviderCredentialInput, 'provider'>,
+  ) => patch<ProviderCredential>(`/api/provider-credentials/${id}`, body),
+  remove: (id: number) => del<{ok: boolean; id: number}>(`/api/provider-credentials/${id}`),
 };

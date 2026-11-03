@@ -25,7 +25,6 @@ type Row = {
   i: number;                                   // 1-based 序号
   name: string;                                // 备注（粘贴模式下就是邮箱）
   secret?: string;                             // 粘贴清单里的密码，只在内存里周转
-  fid: string;                                 // OAuth 会话 id（轮到时才建）
   url: string;                                 // 授权页地址，在新标签页里打开
   status: 'queued' | 'starting' | 'active' | 'ok' | 'failed';
   popped?: boolean;                            // 授权页是否真开出来了（被拦截时为 false）
@@ -58,7 +57,6 @@ function parseRoster(raw: string): Row[] {
       i: out.length + 1,
       name,
       secret: (cells[1] ?? '').trim(),
-      fid: '',
       url: '',
       status: 'queued',
     });
@@ -97,7 +95,7 @@ export function BatchOAuthDialog({
   /**
    * 占一个空白标签页，整批复用。
    *
-   * 必须趁「开始批量」这个点击手势**同步**调用：授权地址要等 oauthStart 返回才有，
+   * 必须趁「开始逐个添加」这个点击手势**同步**调用：授权地址要等 start 返回才有，
    * 而 await 之后手势就失效了，那时再 window.open 必被当弹窗拦掉——连第一个账号
    * 都开不出来。所以先占坑，之后每轮把地址写进去。上一批留下的标签页还活着就接着用，
    * 免得连点几次攒出一排标签页。
@@ -151,7 +149,7 @@ export function BatchOAuthDialog({
     }
   }, [open, stopPolling]);
 
-  /** 给第 i 行定案：停轮询、写结果、释放闸门、推进队列里的下一个。 */
+  /** 给第 i 行定案：停轮询、写结果、释放闸门、推进到下一个待处理行。 */
   const settle = useCallback((i: number, status: 'ok' | 'failed', detail: string) => {
     stopPolling();
     setRows((prev) => prev.map((r) => (r.i === i ? {...r, status, detail} : r)));
@@ -164,8 +162,9 @@ export function BatchOAuthDialog({
   /**
    * 跑第 i 个：轮到时才建会话 → 在新标签页开授权页 → 轮询到结果。
    *
-   * 串行的意义：会话按需创建，不会出现排队排到一半、服务端 TTL(300s) 已经
-   * 过期的情况；界面上也永远只有一个待办账号，不会一下开出十几个标签页。
+   * 串行的意义：后端只有单会话的 start/poll，没有批量端点。这里每次只建一个
+   * 会话，不会出现排到一半、服务端 TTL(300s) 已过期的情况；界面上也永远只有
+   * 一个待办账号，不会一下开出十几个标签页。
    */
   const runOne = useCallback(async (i: number) => {
     if (busyRef.current) return;
@@ -173,12 +172,12 @@ export function BatchOAuthDialog({
     stopPolling();
     setRows((prev) => prev.map((r) => (r.i === i ? {...r, status: 'starting'} : r)));
 
-    const name = `${prefix}-${String(i).padStart(2, '0')}`;
-    const version = realm === 'global' ? 'intl' : 'cn';
-
-    let flow: {id: string; url: string};
+    let flow: {url: string};
+    let sessionState = '';
     try {
-      flow = await accountApi.oauthStart(name, version, true);
+      const started = await accountApi.start(realm);
+      sessionState = started.state;
+      flow = {url: started.authUrl};
     } catch (e) {
       settle(i, 'failed', errText(e));
       return;
@@ -187,13 +186,13 @@ export function BatchOAuthDialog({
     const startedMs = Date.now();
     const popped = showAuth(flow.url);
     setRows((prev) =>
-      prev.map((r) => (r.i === i ? {...r, ...flow, status: 'active', startedMs, popped} : r)),
+      prev.map((r) => (r.i === i ? {...r, url: flow.url, status: 'active', startedMs, popped} : r)),
     );
 
     pollerRef.current = window.setInterval(async () => {
-      let s: Awaited<ReturnType<typeof accountApi.oauthPoll>>;
+      let s: Awaited<ReturnType<typeof accountApi.poll>>;
       try {
-        s = await accountApi.oauthPoll(flow.id);
+        s = await accountApi.poll(sessionState, realm);
       } catch {
         return;                                  // 网络抖动，下一轮再试
       }
@@ -202,13 +201,17 @@ export function BatchOAuthDialog({
         const detail = [s.nickname && `@${s.nickname}`, s.uid, `${sec}s`]
           .filter(Boolean).join('  ·  ');
         settle(i, 'ok', detail);
-      } else if (s.status === 'expired' || s.status === 'invalid') {
-        settle(i, 'failed', s.status);
+      } else if (s.status === 'expired') {
+        settle(i, 'failed', t('oauth.expired'));
+      } else if (s.status === 'invalid') {
+        settle(i, 'failed', t('oauth.stateLost'));
+      } else if (s.status === 'realm_mismatch') {
+        settle(i, 'failed', t('oauth.realmMismatch'));
       } else if ((Date.now() - startedMs) / 1000 > POLL_TIMEOUT_S) {
         settle(i, 'failed', `timeout ${POLL_TIMEOUT_S}s`);
       }
     }, POLL_MS);
-  }, [prefix, realm, settle, stopPolling, showAuth]);
+  }, [realm, settle, stopPolling, showAuth, t]);
 
   runRef.current = (i: number) => void runOne(i);
 
@@ -222,7 +225,7 @@ export function BatchOAuthDialog({
     stopPolling();
     busyRef.current = false;
 
-    // 粘贴了清单就按清单排队（备注直接用邮箱，登录完能一一对上号）；
+    // 粘贴了清单就按清单逐条处理（备注直接用邮箱，登录完能一一对上号）；
     // 没粘就退回「数量 + 前缀」那套
     const n = Math.max(1, Math.min(MAX_N, count));
     const fresh: Row[] = roster.length
@@ -230,7 +233,6 @@ export function BatchOAuthDialog({
       : Array.from({length: n}, (_, k) => ({
           i: k + 1,
           name: `${prefix}-${String(k + 1).padStart(2, '0')}`,
-          fid: '',
           url: '',
           status: 'queued' as const,
         }));
@@ -243,16 +245,15 @@ export function BatchOAuthDialog({
     runRef.current(1);
   };
 
-  /** 跳过当前：取消服务端会话后直接推进。会话 TTL 有 5 分钟，不能干等。 */
+  /** 跳过当前：服务端只有单会话 TTL（300s）清理，前端只推进到下一行。 */
   const skip = (row: Row) => {
-    if (row.fid) void accountApi.oauthCancel(row.fid).catch(() => {});
     settle(row.i, 'failed', t('oauth.batchSkipped'));
   };
 
   /** 重试：清掉旧会话重排回队列，空闲就直接开跑。 */
   const retry = (i: number) => {
     setRows((prev) => prev.map((r) =>
-      r.i === i ? {...r, status: 'queued', detail: undefined, fid: '', url: ''} : r));
+      r.i === i ? {...r, status: 'queued', detail: undefined, url: ''} : r));
     setPhase('running');            // 收尾后又有活了，别停在 done 态
     if (!busyRef.current) runRef.current(i);
   };
@@ -367,6 +368,11 @@ export function BatchOAuthDialog({
                 </Button>
               )}
             </div>
+          </div>
+
+          {/* 后端只有单会话 start/poll，说清楚这里没有服务端批量队列 */}
+          <div className="-mt-2 text-[10px] leading-relaxed text-muted-foreground">
+            {t('oauth.batchSerialHint')}
           </div>
 
           {/* 进度条 */}

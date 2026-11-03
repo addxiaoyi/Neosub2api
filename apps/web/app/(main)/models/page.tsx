@@ -1,16 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {
-  Boxes,
-  Brain,
-  Gauge,
-  Layers,
-  Loader2,
-  Maximize2,
-  RefreshCw,
-  Search,
-} from 'lucide-react';
+import {Boxes, Layers, Loader2, Maximize2, RefreshCw, Search} from 'lucide-react';
 
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -25,15 +16,14 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {modelApi, errText} from '@/lib/api';
-import {useRealm} from '@/lib/realm-context';
+import {upstreamApi, errText} from '@/lib/api';
 import {notify} from '@/lib/toast';
 import {useT} from '@/lib/i18n/provider';
 import {cn} from '@/lib/utils';
-import type {CatalogModel, ModelCatalog} from '@/lib/types';
+import type {ModelInfo, ModelListResponse} from '@/lib/types';
 
 /** 上下文窗口显示：131072 → 128K；1048576 → 1M；0 → — */
-function fmtCtx(n: number): string {
+function fmtCtx(n?: number | null): string {
   if (!n || n <= 0) return '—';
   if (n >= 1024 * 1024) {
     const m = n / (1024 * 1024);
@@ -43,68 +33,16 @@ function fmtCtx(n: number): string {
   return String(n);
 }
 
-/**
- * 系列标签配色（按系列名稳定取色，认不出的用中性色）。
- * 键是后端 modelcatalog 推导出的系列名，属固定的闭集。
- */
-const SERIES_STYLE: Record<string, string> = {
-  '智谱 GLM': 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400',
-  DeepSeek: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-400',
-  Kimi: 'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-400',
-  MiniMax: 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400',
-  腾讯混元: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
-  自动选择: 'border-border bg-muted text-muted-foreground',
-};
-
-function SeriesBadge({series}: {series: string}) {
-  const t = useT();
-  return (
-    <span
-      className={cn(
-        'inline-flex shrink-0 items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium',
-        SERIES_STYLE[series] ?? 'border-border bg-muted text-muted-foreground',
-      )}
-    >
-      {seriesLabel(series, t)}
-    </span>
-  );
-}
-
-/**
- * 系列名本地化。
- *
- * 后端按模型 id 前缀推导出固定的几个系列名（智谱 GLM / 腾讯混元 / 自动选择 /
- * 其他），它们是数据不是文案，所以在这里做「数据值 → 译文」的映射；
- * 未收录的系列（DeepSeek、Kimi 等本来就是英文品牌名）原样显示。
- */
-const SERIES_KEYS: Record<string, string> = {
-  '智谱 GLM': 'models.seriesGlm',
-  腾讯混元: 'models.seriesHunyuan',
-  自动选择: 'models.seriesAuto',
-  其他: 'models.seriesOther',
-};
-
-function seriesLabel(series: string, t: (key: string) => string): string {
-  const key = SERIES_KEYS[series];
-  return key ? t(key) : series;
-}
-
-/**
- * 模型数据来源的显示名。
- *
- * 后端同时给 `source`（稳定枚举 tencent / upstream / none）和 `source_label`
- * （中文说明）。界面按枚举取译文，取不到再退回后端给的说明——这样数据源文案
- * 能跟着界面语言走，将来后端加新来源也只是回退成中文而不是空白。
- */
+/** 后端 /api/models 的 source 枚举 → 界面译文 */
 const SOURCE_KEYS: Record<string, string> = {
-  tencent: 'models.sourceTencent',
-  upstream: 'models.sourceUpstream',
-  none: 'models.sourceNone',
+  dynamic: 'models.sourceLive',
+  static: 'models.sourceUpstream',
+  unknown: 'models.sourceNone',
 };
 
-function sourceLabel(source: string, fallback: string, t: (key: string) => string): string {
+function sourceLabel(source: string, t: (key: string) => string): string {
   const key = SOURCE_KEYS[source];
-  return key ? t(key) : fallback;
+  return key ? t(key) : t('models.sourceNone');
 }
 
 /** 一张统计卡 */
@@ -133,28 +71,19 @@ function StatCard({
 
 export default function ModelsPage() {
   const t = useT();
-  const {realm, label: realmName} = useRealm();
-  const [data, setData] = useState<ModelCatalog | null>(null);
+  const [data, setData] = useState<ModelListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
   const [q, setQ] = useState('');
-  const [series, setSeries] = useState('all');
-  /** 能力筛选：全部 / 支持推理 / 大上下文 / 多模态 */
-  const [cap, setCap] = useState<'all' | 'reasoning' | 'large' | 'vision'>('all');
-  /**
-   * 排序：默认按原顺序；「积分倍率从低到高」用于挑省积分的模型。
-   * 这是积分倍率最有用的用法——单看一行的倍率没概念，排一下才知道哪个最省。
-   */
-  const [sort, setSort] = useState<'default' | 'credits'>('default');
+  const [provider, setProvider] = useState('all');
 
-  // realm 变化时重新拉取：两个版本的模型清单不同，且后端已按版本分开缓存
-  const load = useCallback(async (force = false) => {
-    if (force) setRefreshing(true);
-    else setLoading(true);
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    setLoading(true);
     try {
-      const res = await modelApi.catalog(realm, force);
+      const res = await upstreamApi.models();
       setData(res);
       setError('');
     } catch (e) {
@@ -163,68 +92,53 @@ export default function ModelsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [realm]);
+  }, []);
 
   useEffect(() => {
-    // 切版本时清掉筛选状态，避免「上一版的系列筛选把新版过滤成空」
-    setSeries('all');
-    setCap('all');
-    setQ('');
     load();
   }, [load]);
 
-  const models = data?.models ?? [];
+  const models = useMemo(() => data?.models ?? [], [data]);
+
+  const providers = useMemo(() => {
+    const ids = models.map((m) => m.owned_by).filter((v): v is string => !!v);
+    return Array.from(new Set(ids)).sort();
+  }, [models]);
 
   const filtered = useMemo(() => {
     const kw = q.trim().toLowerCase();
-    const list = models.filter((m) => {
-      if (series !== 'all' && m.series !== series) return false;
-      if (cap === 'reasoning' && m.efforts.length === 0) return false;
-      if (cap === 'large' && (m.context_length || 0) < 131072) return false;
-      if (cap === 'vision' && !m.supports_images) return false;
+    return models.filter((m) => {
+      if (provider !== 'all' && m.owned_by !== provider) return false;
       if (!kw) return true;
       return (
         m.id.toLowerCase().includes(kw) ||
-        (m.name || '').toLowerCase().includes(kw) ||
-        m.series.toLowerCase().includes(kw)
+        (m.owned_by || '').toLowerCase().includes(kw)
       );
     });
-    if (sort === 'credits') {
-      // 倍率从低到高（越省越靠前）。**没有倍率的排在最后**——不是 0，
-      // 不能当成「免费」混进最前面。
-      const num = (v?: string) => {
-        const m = /x?\s*([0-9]+(?:\.[0-9]+)?)/i.exec(v || '');
-        return m ? Number(m[1]) : null;
-      };
-      return [...list].sort((a, b) => {
-        const na = num(a.credits);
-        const nb = num(b.credits);
-        if (na === null && nb === null) return 0;
-        if (na === null) return 1;
-        if (nb === null) return -1;
-        return na - nb;
-      });
-    }
-    return list;
-  }, [models, q, series, cap, sort]);
+  }, [models, q, provider]);
 
-  const summary = data?.summary;
-  const seriesOptions = summary?.series ?? [];
+  /** 最大上下文：只统计上游真的给出上下文字段的条目，避免把 0 当成结论 */
+  const maxContext = useMemo(
+    () =>
+      models.reduce((max, m) => Math.max(max, m.context_length ?? m.context_window ?? 0), 0),
+    [models],
+  );
+
+  const source = data?.source ?? 'unknown';
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title={t('models.title')}
-        description={t('models.description', {realm: realmName})}
+        description={t('models.descriptionApi')}
         actions={
           <Button
             variant="outline"
             size="sm"
             className="rounded-full"
             disabled={refreshing}
-            title={t('models.refetchTitle')}
             onClick={() => {
-              load(true);
+              load();
               notify.info(t('models.refetching'));
             }}
           >
@@ -234,57 +148,32 @@ export default function ModelsPage() {
         }
       />
 
-      {/* 来源说明：如实标注，不把回退数据说成实时数据 */}
+      {/* 来源说明：如实标注，不把上游未知来源说成实时数据 */}
       {data && !loading && (
         <div
           className={cn(
             'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[16px] border px-3.5 py-2.5 text-[11px]',
-            data.source === 'tencent'
+            source === 'dynamic'
               ? 'border-border bg-muted/60 text-muted-foreground'
               : 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400',
           )}
         >
           <span className="font-medium">
-            {t('models.source', {label: sourceLabel(data.source, data.source_label, t)})}
+            {t('models.source', {label: sourceLabel(source, t)})}
           </span>
-          {data.via && <span>{t('models.sourceVia', {via: data.via})}</span>}
-          {data.cached && <span>{t('models.sourceCached', {n: data.cache_age})}</span>}
-          {data.source !== 'tencent' && (
+          {source !== 'dynamic' && (
             <span className="basis-full text-[10px] leading-4 opacity-90">
-              {data.source === 'upstream'
-              ? t('models.fallbackNote')
-                : t('models.emptyNote')}
+              {source === 'static' ? t('models.fallbackNote') : t('models.emptyNote')}
             </span>
           )}
         </div>
       )}
 
-      {/* 统计卡 */}
-      {summary && (
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard icon={Boxes} label={t('models.available')} value={String(summary.total)} />
-          <StatCard
-            icon={Brain}
-            label={t('models.reasoning')}
-            value={String(summary.reasoning)}
-            hint={t('models.reasoningHint')}
-          />
-          <StatCard
-            icon={Maximize2}
-            label={t('models.largeContext')}
-            value={String(summary.large_context)}
-            hint="≥128K"
-          />
-          <StatCard
-            icon={Gauge}
-            label={t('models.maxContext')}
-            value={fmtCtx(summary.max_context)}
-            hint={
-              summary.series.length
-                ? t('models.seriesCount', {count: summary.series.length, n: summary.series.length})
-                : undefined
-            }
-          />
+      {/* 统计卡：只统计后端确实返回的字段 */}
+      {data && !loading && (
+        <div className="grid grid-cols-2 gap-3">
+          <StatCard icon={Boxes} label={t('models.available')} value={String(data.count)} />
+          <StatCard icon={Maximize2} label={t('models.maxContext')} value={fmtCtx(maxContext)} />
         </div>
       )}
 
@@ -296,64 +185,34 @@ export default function ModelsPage() {
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder={t('models.searchPlaceholder')}
+              placeholder={t('models.searchPlaceholderApi')}
               className="h-9 bg-background pl-8"
             />
           </div>
           <div className="-mx-0.5 flex flex-wrap items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
             <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
               <Layers className="h-3.5 w-3.5" />
-              {t('models.series')}
+              {t('playground.providerLabel')}
             </span>
             <Button
-              variant={series === 'all' ? 'default' : 'outline'}
+              variant={provider === 'all' ? 'default' : 'outline'}
               size="sm"
               className="h-7 shrink-0 rounded-full px-2.5 text-[11px]"
-              onClick={() => setSeries('all')}
+              onClick={() => setProvider('all')}
             >
               {t('common.all')}
             </Button>
-            {seriesOptions.map((s) => (
+            {providers.map((p) => (
               <Button
-                key={s}
-                variant={series === s ? 'default' : 'outline'}
+                key={p}
+                variant={provider === p ? 'default' : 'outline'}
                 size="sm"
                 className="h-7 shrink-0 rounded-full px-2.5 text-[11px]"
-                onClick={() => setSeries(s)}
+                onClick={() => setProvider(p)}
               >
-                {seriesLabel(s, t)}
+                {p}
               </Button>
             ))}
-            <span className="ml-1 h-4 w-px shrink-0 bg-border" />
-            {(
-              [
-                ['all', t('common.all')],
-                ['reasoning', t('models.reasoning')],
-                ['large', t('models.largeContext')],
-                ['vision', t('models.vision')],
-              ] as const
-            ).map(([k, label]) => (
-              <Button
-                key={k}
-                variant={cap === k ? 'default' : 'outline'}
-                size="sm"
-                className="h-7 shrink-0 rounded-full px-2.5 text-[11px]"
-                onClick={() => setCap(k)}
-              >
-                {label}
-              </Button>
-            ))}
-            {/* 排序：挑省积分模型时最实用的一项 —— 单看倍率没概念，排一下才清楚 */}
-            <span className="ml-1 h-4 w-px shrink-0 bg-border" />
-            <Button
-              variant={sort === 'credits' ? 'default' : 'outline'}
-              size="sm"
-              className="h-7 shrink-0 rounded-full px-2.5 text-[11px]"
-              title={t('models.sortByRatioTitle')}
-              onClick={() => setSort((v) => (v === 'credits' ? 'default' : 'credits'))}
-            >
-              {t('models.sortByRatio')}
-            </Button>
           </div>
         </div>
       </section>
@@ -383,99 +242,34 @@ export default function ModelsPage() {
                   <TableRow className="border-b border-border/60 hover:bg-transparent">
                     <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('models.colModel')}</TableHead>
                     <TableHead className="text-[11px] text-muted-foreground">{t('models.colContext')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('models.colMaxOutput')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('models.colEfforts')}</TableHead>
-                    <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('models.series')}</TableHead>
+                    <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('models.colMaxOutput')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filtered.map((m: CatalogModel) => (
+                  {filtered.map((m: ModelInfo) => (
                     <TableRow key={m.id} className="border-b border-border/40">
                       <TableCell className="pl-4">
-                        {/* 模型描述（腾讯的 descriptionZh）挂在名称上做悬浮提示：
-                            它通常是一两句话，铺在表格里会把行高撑开 */}
-                        <div className="flex flex-col gap-0.5 py-0.5" title={m.description || undefined}>
-                          {m.name ? (
-                            <>
-                              <span className="text-xs font-medium">{m.name}</span>
-                              <span className="font-mono text-[10px] text-muted-foreground">{m.id}</span>
-                            </>
-                          ) : (
-                            <span className="font-mono text-xs font-medium">{m.id}</span>
+                        <div className="flex flex-wrap items-center gap-1.5 py-0.5">
+                          <span className="font-mono text-xs font-medium">{m.id}</span>
+                          {m.owned_by && (
+                            <Badge variant="secondary" className="rounded-md text-[10px]">
+                              {m.owned_by}
+                            </Badge>
                           )}
                         </div>
                       </TableCell>
                       <TableCell className="text-xs tabular-nums text-muted-foreground">
-                        {fmtCtx(m.context_length)}
+                        {fmtCtx(m.context_length ?? m.context_window)}
                       </TableCell>
-                      <TableCell className="text-xs tabular-nums text-muted-foreground">
+                      <TableCell className="pr-4 text-xs tabular-nums text-muted-foreground">
                         {fmtCtx(m.max_output_tokens)}
-                      </TableCell>
-                      <TableCell>
-                        {m.efforts.length ? (
-                          <div className="flex flex-wrap items-center gap-1">
-                            {m.efforts.map((e) => (
-                              <Badge key={e} variant="secondary" className="rounded-md font-mono text-[10px]">
-                                {e}
-                              </Badge>
-                            ))}
-                            {/* 默认档位单独标出来：上游 thinking 决策用它，
-                                用户据此知道不指定档位时会走哪一档 */}
-                            {m.default_effort && (
-                              <span
-                                className="text-[10px] text-muted-foreground"
-                                title={t('models.defaultEffortTitle', {effort: m.default_effort})}
-                              >
-                                {t('models.defaultEffort', {effort: m.default_effort})}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-muted-foreground/60">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="pr-4">
-                        <div className="flex flex-wrap items-center justify-end gap-1.5">
-                          {/* 积分倍率：同一 prompt 在不同模型上的扣费倍率，
-                              挑「省积分」的模型时最有用的一项。上游把它拼进
-                              description 前缀，我们单独展示（更清楚） */}
-                          {m.credits && (
-                            <Badge
-                              variant="secondary"
-                              className="rounded-md font-mono text-[10px]"
-                              title={t('models.creditRatioTitle')}
-                            >
-                              {m.credits}
-                            </Badge>
-                          )}
-                          {m.supports_images && (
-                            <Badge variant="secondary" className="rounded-md text-[10px]" title={t('models.visionTitle')}>
-                              {t('models.vision')}
-                            </Badge>
-                          )}
-                          {m.only_reasoning && (
-                            <Badge
-                              variant="secondary"
-                              className="rounded-md text-[10px]"
-                              title={t('models.onlyReasoningTitle')}
-                            >
-                              {t('models.onlyReasoning')}
-                            </Badge>
-                          )}
-                          {m.is_default && (
-                            <Badge variant="secondary" className="rounded-md text-[10px]" title={t('models.defaultTitle')}>
-                              {t('models.default')}
-                            </Badge>
-                          )}
-                          <SeriesBadge series={m.series} />
-                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
-            {(filtered.length !== models.length || q.trim() || series !== 'all' || cap !== 'all') && (
+            {(filtered.length !== models.length || q.trim() || provider !== 'all') && (
               <div className="border-t border-border/40 px-4 py-2 text-[11px] text-muted-foreground">
                 {t('models.filteredCount', {n: filtered.length, total: models.length})}
               </div>
@@ -483,24 +277,6 @@ export default function ModelsPage() {
           </>
         )}
       </section>
-
-      {/* 失败原因：默认收起，供排查（例如某个账号凭证过期） */}
-      {!!data?.errors?.length && (
-        <details className="rounded-[16px] bg-muted/60 px-3.5 py-2.5 text-[11px] text-muted-foreground">
-          <summary className="cursor-pointer select-none">
-            {t('models.failureLog', {n: data.errors.length})}
-          </summary>
-          <ul className="mt-2 space-y-1 font-mono text-[10px] leading-4">
-            {data.errors.map((e, i) => (
-              <li key={i} className="break-all">· {e}</li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      <p className="text-[10px] leading-4 text-muted-foreground/70">
-        {t('models.footnote')}
-      </p>
     </div>
   );
 }

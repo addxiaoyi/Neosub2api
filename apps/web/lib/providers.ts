@@ -19,6 +19,34 @@ export interface ProviderCapabilities {
 
 export type ProviderStatus = 'implemented' | 'stub' | 'sidecar';
 
+/** 就绪状态：ready = 填好密钥/地址即可调用；needs_config = 还需补齐 requires 里列出的项。 */
+export type ProviderReadiness = 'ready' | 'needs_config';
+
+/** 统一凭据库里的一条记录（secret 只回掩码，明文永不下发）。 */
+export interface ProviderCredential {
+  id: number;
+  provider: string;
+  label: string;
+  base_url: string;
+  secret_masked: string;
+  has_secret: boolean;
+  enabled: boolean;
+  sort_order: number;
+  note: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ProviderCredentialInput {
+  provider: string;
+  label?: string;
+  base_url?: string;
+  secret?: string;
+  enabled?: boolean;
+  sort_order?: number;
+  note?: string;
+}
+
 /** 许可证/合规风险等级：safe = MIT/Apache/BSD 可自由合入；warn = GPL/LGPL 需传染性隔离；danger = 无 LICENSE 或非商用禁止，仅 sidecar 评估。 */
 export type RiskLevel = 'safe' | 'warn' | 'danger';
 
@@ -40,6 +68,20 @@ export interface ProviderInfo {
   options: Record<string, unknown>;
   risk_level: RiskLevel;
   risk_note: string;
+  readiness: ProviderReadiness;
+  /** needs_config 时仍缺的项，给人看的短句 */
+  requires: string[];
+  base_url_source: string;
+  /** 历史默认地址残留提示，空串表示无异常 */
+  base_url_warning: string;
+  credential_count: number;
+  credentials: {
+    id: number;
+    label: string;
+    base_url: string;
+    secret_masked: string;
+    sort_order: number;
+  }[];
 }
 
 export const CODEBUDDY_CAPS: ProviderCapabilities = {

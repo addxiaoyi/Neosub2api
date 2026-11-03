@@ -15,7 +15,6 @@ import {
   Check,
   Coins,
   RotateCcw,
-  Sparkles,
   StickyNote,
   ExternalLink,
 } from 'lucide-react';
@@ -41,7 +40,6 @@ import {OAuthDialog} from '@/components/common/accounts/OAuthDialog';
 import {BatchOAuthDialog} from '@/components/common/accounts/BatchOAuthDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {AccountNoteDialog} from '@/components/common/accounts/AccountNoteDialog';
-import {AccountTaskDialog} from '@/components/common/accounts/AccountTaskDialog';
 import {useAuth} from '@/lib/auth-context';
 import {realmLabel, useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -57,7 +55,7 @@ import {
 } from '@/components/ui/table';
 
 export default function AccountsPage() {
-  const {realm, label: realmName} = useRealm();
+  const {realm} = useRealm();
   const t = useT();
   const {isAdmin} = useAuth();
   const {providers} = useProviders();
@@ -81,8 +79,6 @@ export default function AccountsPage() {
   // 备注编辑（issue #67）：记的是**哪个账号**而不是布尔——弹窗要以该账号当前的
   // 备注为初值，否则会拿上一个账号的内容去保存。
   const [noteTarget, setNoteTarget] = useState<Account | null>(null);
-  // 活动任务（单账号执行成长任务）的目标账号；null = 对话框关闭
-  const [taskTarget, setTaskTarget] = useState<Account | null>(null);
   const [busyFile, setBusyFile] = useState<string | null>(null);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   /** 每个账号积分是实时查询还是命中缓存（含缓存已存在秒数） */
@@ -678,22 +674,6 @@ export default function AccountsPage() {
             {checkinDone ? <Check className="h-3.5 w-3.5" /> : <Gift className="h-3.5 w-3.5" />}
           </Button>
         )}
-        {/* 活动任务（单账号）：与「任务」页的一键执行是同一套（调用上游
-            task_runner.py），区别是只对这一个账号跑 —— 池子里某个号想单独
-            补一轮任务时，不必把全部账号再跑一遍。国际版不适用 CN 任务中心
-            （脚本自己会 skip），所以与签到按钮同一个可见条件。 */}
-        {(!off || viaBit) && canCheckin && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 rounded-md"
-            title={t('accounts.taskRun')}
-            disabled={busy}
-            onClick={() => setTaskTarget(a)}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-          </Button>
-        )}
         {(!off || viaBit) && (
           <>
             <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.test')} disabled={busy}
@@ -1040,12 +1020,6 @@ export default function AccountsPage() {
         open={noteTarget !== null}
         onOpenChange={(open) => { if (!open) setNoteTarget(null); }}
         onSaved={load}
-      />
-      <AccountTaskDialog
-        account={taskTarget}
-        open={taskTarget !== null}
-        onOpenChange={(open) => { if (!open) setTaskTarget(null); }}
-        onFinished={load}
       />
     </div>
   );

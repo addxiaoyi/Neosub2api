@@ -7,7 +7,6 @@ import {useT} from '@/lib/i18n/provider';
 import {useRealm} from '@/lib/realm-context';
 import {Loader2, CheckCircle2, AlertTriangle, ExternalLink} from 'lucide-react';
 import {Button} from '@/components/ui/button';
-import {Input} from '@/components/ui/input';
 import {CopyButton, ShareButton} from '@/components/ui/copy-button';
 import {
   Dialog,
@@ -40,7 +39,6 @@ export function OAuthDialog({
   const t = useT();
   const [phase, setPhase] = useState<Phase>('loading');
   const {realm, label: realmName} = useRealm();
-  const [name, setName] = useState('');
   const [authUrl, setAuthUrl] = useState('');
   const [message, setMessage] = useState('');
   const stateRef = useRef('');
@@ -76,18 +74,15 @@ export function OAuthDialog({
     setMessage(t('oauth.requesting'));
     setAuthUrl('');
 
-    const version = realm === 'global' ? 'intl' : 'cn';
-    const currentName = name;  // 捕获当前值
-
     let cancelled = false;
 
     (async () => {
       try {
-        const data = await accountApi.oauthStart(currentName, version);
+        const data = await accountApi.start(realm);
         if (cancelled) return;
 
-        stateRef.current = data.id;
-        setAuthUrl(data.url);
+        stateRef.current = data.state;
+        setAuthUrl(data.authUrl);
         setPhase('waiting');
         setMessage(t('oauth.waiting'));
 
@@ -96,7 +91,7 @@ export function OAuthDialog({
           if (pollingRef.current) return;
           pollingRef.current = true;
           try {
-            const res = await accountApi.oauthPoll(stateRef.current);
+            const res = await accountApi.poll(stateRef.current, realm);
             failsRef.current = 0;
             if (res.status === 'success') {
               stopPoll();
@@ -126,6 +121,10 @@ export function OAuthDialog({
               stopPoll();
               setPhase('error');
               setMessage(t('oauth.stateLost'));
+            } else if (res.status === 'realm_mismatch') {
+              stopPoll();
+              setPhase('error');
+              setMessage(t('oauth.realmMismatch'));
             }
           } catch (e) {
             failsRef.current += 1;
@@ -166,14 +165,12 @@ export function OAuthDialog({
     setAuthUrl('');
     failsRef.current = 0;
     stopPoll();
-    const version = realm === 'global' ? 'intl' : 'cn';
-    const currentName = name;
 
     (async () => {
       try {
-        const data = await accountApi.oauthStart(currentName, version);
-        stateRef.current = data.id;
-        setAuthUrl(data.url);
+        const data = await accountApi.start(realm);
+        stateRef.current = data.state;
+        setAuthUrl(data.authUrl);
         setPhase('waiting');
         setMessage(t('oauth.waiting'));
 
@@ -182,7 +179,7 @@ export function OAuthDialog({
           if (pollingRef.current) return;
           pollingRef.current = true;
           try {
-            const res = await accountApi.oauthPoll(stateRef.current);
+            const res = await accountApi.poll(stateRef.current, realm);
             failsRef.current = 0;
             if (res.status === 'success') {
               stopPoll();
@@ -212,6 +209,10 @@ export function OAuthDialog({
               stopPoll();
               setPhase('error');
               setMessage(t('oauth.stateLost'));
+            } else if (res.status === 'realm_mismatch') {
+              stopPoll();
+              setPhase('error');
+              setMessage(t('oauth.realmMismatch'));
             }
           } catch (e) {
             failsRef.current += 1;
@@ -248,17 +249,6 @@ export function OAuthDialog({
         </DialogHeader>
 
         <div className="flex w-full min-w-0 flex-col items-center gap-4 px-6 pb-6">
-          {/* 账号备注输入 */}
-          <div className="w-full space-y-1.5">
-            <div className="text-[11px] font-medium">{t('oauth.nameLabel')}</div>
-            <Input
-              placeholder={t('oauth.namePlaceholder')}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="h-9 rounded-full text-xs"
-            />
-          </div>
-
           {/* 固定尺寸，避免 loading/waiting/error 各阶段弹窗高度跳动 */}
           <div className="grid h-[212px] w-[212px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-white p-3 ring-1 ring-black/5">
             {phase === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}

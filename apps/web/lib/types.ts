@@ -184,83 +184,6 @@ export interface ModelListResponse {
   count: number;
 }
 
-/* ── 模型中心（模型目录）────────────────────────────────── */
-
-/** 模型目录里的一条：比 /v1/models 多显示名与推理档位 */
-export interface CatalogModel {
-  id: string;
-  /** 显示名，来自腾讯模型接口；上游回退数据为空串 */
-  name: string;
-  /** 上下文窗口（token，0 = 未知） */
-  context_length: number;
-  /** 最大输出（token，0 = 未知） */
-  max_output_tokens: number;
-  /** 支持的推理档位，如 ['low','high','max']；空数组 = 非推理模型或未提供 */
-  efforts: string[];
-  /** 模型描述（腾讯的 descriptionZh，中文）；空串 = 未提供 */
-  description?: string;
-  /**
-   * 积分倍率原文（如 "x0.05"）：同一 prompt 在不同模型上的扣费倍率。
-   * **仅展示**，不参与选号（与上游口径一致）。空串 = 未提供。
-   */
-  credits?: string;
-  /** 厂商标识（如 volc / deepseek）；空串 = 未提供 */
-  vendor?: string;
-  /** 模型标签（含 badge:限时免费 等） */
-  tags?: string[];
-  /** 是否默认模型 */
-  is_default?: boolean;
-  supports_reasoning?: boolean;
-  supports_tool_call?: boolean;
-  /** 纯推理模型（不产出正文，只出思维链） */
-  only_reasoning?: boolean;
-  /** 推理摘要模式（如 "auto"） */
-  reasoning_summary?: string;
-  /** 默认推理档位；空串 = 上游未声明（由上游自行回退到硬编码默认） */
-  default_effort: string;
-  /** 是否支持图片输入（多模态） */
-  supports_images: boolean;
-  /** 系列归属（按 id 前缀推导，仅用于分组浏览） */
-  series: string;
-}
-
-export interface CatalogSummary {
-  total: number;
-  /** 带推理档位的模型数 */
-  reasoning: number;
-  /** 上下文 ≥128K 的模型数 */
-  large_context: number;
-  /** 最大上下文（token） */
-  max_context: number;
-  /** 涉及系列 */
-  series: string[];
-  unique_ids: number;
-}
-
-/**
- * 数据来源：
- * - `tencent`：直连腾讯模型接口，字段最全（含显示名与推理档位）
- * - `upstream`：回退到上游 /v1/models，字段有限
- * - `none`：两者都拿不到
- */
-export type CatalogSourceKind = 'tencent' | 'upstream' | 'none';
-
-export interface ModelCatalog {
-  models: CatalogModel[];
-  source: CatalogSourceKind;
-  /** 来源的中文说明，直接用于界面标注 */
-  source_label: string;
-  /** 本次数据取自哪个账号（回退时为 workbuddy2api） */
-  via: string;
-  /** 逐次尝试的失败原因，便于排查（不展示给普通用户也要留着） */
-  errors: string[];
-  /** 命中缓存时为 true */
-  cached: boolean;
-  /** 缓存已存在多少秒 */
-  cache_age: number;
-  summary: CatalogSummary;
-}
-
 export interface ApiKey {
   id: number;
   name: string;
@@ -305,43 +228,32 @@ export interface RequestLog {
   ts: number;
   key_id: number | null;
   key_name: string | null;
+  /** 处理本次请求的服务商 id（codebuddy / sub2api 等） */
+  provider: string;
+  /**
+   * 来源 IP。后端 request_logs 表没有这一列，恒为 '' —— 界面显示「未采集」。
+   */
   ip: string;
   model: string | null;
+  /** 模型映射结果。后端未采集，恒为 null */
   mapped_model: string | null;
   status: number;
   prompt_tokens: number;
   completion_tokens: number;
   latency_ms: number;
-  /**
-   * 首字延迟（毫秒）：从发起上游请求到收到第一个含正文的 delta。
-   * null = 未采集（非流式请求，或升级前的历史记录）。
-   * 与 latency_ms 的区别：latency_ms 含模型生成全部内容的耗时，回答越长越大，
-   * 反映不出上游响应快慢；首字延迟才是「上游多久开始回话」。
-   */
+  /** 首字延迟（毫秒）。后端未采集，恒为 null */
   first_token_ms: number | null;
-  /**
-   * 提示词缓存的三段 token（issue #69）：上游（腾讯）在流式末帧 usage 里给。
-   * **null = 上游没给这三个字段**（老上游），与「给了 0」不是一回事——
-   * 后者代表这次请求确实没命中缓存。界面据此显示「—」而不是 0%。
-   *
-   * 前缀缓存是**按账号**存的，所以「换了号」与「没命中」常常一起出现，
-   * 与下面那个 account 列对着看才有意义。
-   */
+  /** 提示词缓存三段 token。后端未采集，恒为 null */
   cache_hit_tokens: number | null;
   cache_miss_tokens: number | null;
   cache_write_tokens: number | null;
+  /** User-Agent。后端未采集，恒为 null */
   ua: string | null;
   error: string | null;
   stream: boolean;
-  /** 本次调用的真实扣费（上游 usage.credit）；null = 上游未返回，不是 0 */
+  /** 本次调用的真实扣费。后端未采集，恒为 null */
   credit: number | null;
-  /**
-   * 本次实际用了哪个上游账号，形如 `昵称(uid8)`。
-   *
-   * 账号由上游决定、不在响应里回传，本端是**采集上游容器日志后按时间对回来的**，
-   * 所以比请求本身晚几秒——刚打完的请求这一列可能还是 null（界面显示「—」，
-   * 稍后刷新即有）。null 也可能是「日志已滚掉」或「上游没在跑容器」。
-   */
+  /** 本次实际用的上游账号。后端未采集，恒为 null */
   account: string | null;
 }
 
@@ -362,15 +274,6 @@ export interface UsagePoint {
    * 可选：老版本后端不返回该字段，界面按 0 处理（不显示失败）。
    */
   failed?: number;
-}
-
-export interface UsageBreakdown {
-  name: string;
-  requests: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  /** 该维度实际扣费合计 */
-  credit: number;
 }
 
 export interface StatsSummary {
@@ -415,38 +318,6 @@ export interface StatsSummary {
     week_4xx: number;
     week_5xx: number;
   };
-}
-
-export interface IpRule {
-  id: number;
-  kind: 'allow' | 'deny';
-  cidr: string;
-  note: string;
-  created_at: number;
-}
-
-export interface IpAccessLog {
-  id: number;
-  ts: number;
-  ip: string;
-  path: string;
-  blocked: boolean;
-  ua: string | null;
-  /**
-   * 拦截原因短码（issue #33）：missing_key / invalid_key / ip_blocked /
-   * key_disabled / key_expired / quota_exhausted / credit_quota_exhausted /
-   * ip_not_allowed / too_many_ips / realm_mismatch / model_not_allowed /
-   * rate_limited 等。
-   *
-   * 稳定短码而非散文：展示侧按语言翻译，改文案不必迁移历史数据。
-   * 存量记录为 null（那时没记原因），界面显示「未记录」。
-   */
-  reason?: string | null;
-}
-
-export interface SecurityConfig {
-  enabled: boolean;
-  mode: 'whitelist' | 'blacklist';
 }
 
 export interface UserItem {
@@ -516,91 +387,6 @@ export interface CreditsMeta {
   message?: string;
   /** 各套餐到期时间，按到期时刻升序；只含仍有余额的套餐 */
   expiries?: CreditExpiry[];
-}
-
-export interface CheckinLog {
-  id: number;
-  ts: number;
-  uid: string;
-  nickname: string;
-  /** 触发来源：manual 手动 / manual-batch 批量 / add 添加账号 / auto 上游自动 */
-  source: string;
-  /** 类型：checkin 签到 / keepalive 保活 */
-  kind: string;
-  success: boolean;
-  code: number | null;
-  message: string;
-  /** true = 来自上游自动签到（采集器落库），false = 本端触发 */
-  auto?: boolean;
-}
-
-/** 上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活） */
-export interface TaskLog {
-  id: number;
-  ts: number;
-  uid: string;
-  /** travel / activity / checkin / keepalive / user-resource / credit */
-  kind: string;
-  /** credit 有积分收益 / ok 成功 / info 跳过 / warn 警告 / error 失败 */
-  level: string;
-  credits: number;
-  /** 上游英文原文（排查用，界面上作为悬浮提示） */
-  message: string;
-  /** 中文展示文案 */
-  message_cn?: string;
-  /** 账号昵称（后端按 uid/前缀解析；上游日志只带 uid 前 8 位） */
-  nickname?: string;
-}
-
-export interface TaskLogResponse {
-  logs: TaskLog[];
-  /** 当前筛选下的总条数（分页用；与 stats.total 在未筛选时一致） */
-  total: number;
-  stats: {
-    by_kind: Record<string, {count: number; credits: number}>;
-    total: number;
-    total_credits: number;
-  };
-  kinds: Record<string, string>;
-  collector: {at?: number; parsed?: number; added?: number; error?: string};
-}
-
-/**
- * 成长任务一键执行的状态（调用上游自带的 scripts/task_runner.py）。
- *
- * 三种模式按**风险分级**，界面必须让用户看清区别：
- *   preview 只查询（dry-run，不发写请求）
- *   claim   只领已完成任务的奖励（幂等，不伪造行为）
- *   full    点亮 + 领奖（会伪造活跃上报，有风控风险，需二次确认）
- */
-export interface TaskRunStatus {
-  running: boolean;
-  mode: string;
-  target: string;
-  started_at: number;
-  finished_at: number;
-  exit_code: number | null;
-  timed_out: boolean;
-  error: string;
-  /** 输出尾部（脚本按行打印，后端只保留最近若干行） */
-  lines: string[];
-  /** 上游脚本与账号目录是否就位；false 时 unavailable_reason 说明原因与做法 */
-  available: boolean;
-  unavailable_reason: string;
-  /** 定时领奖配置（只有幂等的认领，不含点亮） */
-  schedule: {enabled?: boolean; hours?: number[]};
-}
-
-
-/** 签到记录分页返回 */
-export interface CheckinLogPage {
-  items: CheckinLog[];
-  /** 当前筛选下的总条数（本端触发 + 上游自动） */
-  total: number;
-  /** 其中本端触发的条数 */
-  local_total?: number;
-  /** 其中上游自动签到的条数 */
-  auto_total?: number;
 }
 
 export interface UpdateLogLine {
@@ -689,6 +475,14 @@ export interface UpdateCheck {
   checked_at: number;
   /** 是否为缓存结果 */
   cached: boolean;
+  /**
+   * 是否具备在线更新能力。
+   * false = 本部署不提供在线更新（reason 说明原因）；此时 has_any 恒为 false，
+   * 界面不能据此显示「已是最新」——那是在骗用户。
+   */
+  available?: boolean;
+  /** available=false 时的原因文案（后端给的中文说明） */
+  reason?: string;
   manager: ManagerVersion;
   upstream: UpstreamVersion;
   /** 任一组件有更新 */
@@ -757,22 +551,6 @@ export interface Page<T> {
   items: T[];
 }
 
-/* ── 聊天测试台 ─────────────────────────────────────── */
-
-export interface PlaygroundModel {
-  id: string;
-  name: string;
-  /** 支持的推理档位；空数组 = 该模型不支持调整 */
-  efforts: string[];
-  series: string;
-}
-
-export interface PlaygroundModels {
-  models: PlaygroundModel[];
-  source: CatalogSourceKind;
-  source_label: string;
-}
-
 /* ── 管理端审计日志 ─────────────────────────────────── */
 
 export interface AuditLog {
@@ -792,33 +570,133 @@ export interface AuditLogPage {
   total: number;
 }
 
-/**
- * 上游自己那份统计（`/v1/stats`，issue #59）。
- *
- * 字段名照上游 JSON。**口径与面板的用量统计不同**：这份含直连上游的调用，
- * 且自上游进程启动累计——界面必须标注清楚，别与按时段统计的数字混着看。
- */
-export interface UpstreamStatRow {
-  model?: string;
-  requests?: number;
-  success?: number;
-  failed?: number;
-  total_tokens?: number;
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  credit?: number;
-  cache_hit_rate?: number;
+/* ── 安全面（net_guard 地址守卫 / 登录失败节流）───────────── */
+
+/** 上游地址守卫配置（/api/security/guard）。全部只读——清单是代码常量，不是库表。 */
+export interface GuardInfo {
+  /** 是否允许私网/环回地址作为上游（settings.allow_private_upstreams） */
+  allow_private_upstreams: boolean;
+  /** 恒定封禁的主机名（如元数据服务域名） */
+  blocked_hostnames: string[];
+  /** 恒定封禁的网段（CIDR 字符串） */
+  blocked_addresses: string[];
+  /** 封禁的地址类别（loopback/private/link_local/...） */
+  blocked_categories: string[];
+  /** 允许的上游协议 */
+  allowed_schemes: string[];
 }
 
-export interface UpstreamStats {
-  /** 取不到时为 false，此时只有 error */
-  available: boolean;
-  error?: string;
-  /** 上游可关闭统计采集；关闭时 enabled=false 且 message 说明原因 */
-  enabled?: boolean;
-  message?: string;
-  since?: string;
-  uptime_sec?: number;
-  total?: UpstreamStatRow;
-  models?: UpstreamStatRow[];
+/** 仍在节流窗口内的一条登录失败记录（进程内存态） */
+export interface LoginFailureActive {
+  ip: string;
+  username: string;
+  /** 窗口内失败次数 */
+  failures: number;
+  first_ts: number;
+  last_ts: number;
+  /** 达到上限 = 已锁定 */
+  locked: boolean;
+  /** 锁定剩余秒数（未锁定为 0） */
+  retry_after: number;
+}
+
+export interface LoginFailuresResponse {
+  window_sec: number;
+  max_failures: number;
+  /** 窗口内仍在计数的 IP+用户名组合 */
+  active: LoginFailureActive[];
+  /** audit_logs 里 login_failed 的历史统计 */
+  stats: {total: number; today: number};
+  /** 最近的失败审计记录 */
+  recent: AuditLog[];
+}
+
+/* ── sub2api 配额域（订阅账号池 / 分组 / 扣减流水）──────── */
+
+export interface Sub2apiGroup {
+  id: string;
+  name: string;
+  platform: string;
+  /** 订阅总额度（token 数），0 表示不限 */
+  quota_limit: number;
+  /** 已用量 */
+  quota_used: number;
+  /** 剩余额度；limit=0 时为 null（不限） */
+  quota_remaining: number | null;
+  /** 上次重置时刻（epoch 秒） */
+  reset_at: number;
+  enabled: boolean;
+  /** 该分组下的账号总数 */
+  accounts: number;
+  /** 当前可用（启用 + 未耗尽 + 未冷却）的账号数 */
+  active_accounts: number;
+}
+
+export interface Sub2apiAccount {
+  id: number;
+  group_id: string;
+  name: string;
+  upstream_base: string;
+  /** 分发权重 */
+  weight: number;
+  quota_limit: number;
+  quota_used: number;
+  quota_remaining: number | null;
+  enabled: boolean;
+  /** 冷却截止时刻（epoch 秒），0 表示未冷却 */
+  cooldown_until: number;
+  last_used_at: number;
+  has_api_key: boolean;
+}
+
+export interface Sub2apiLedgerEntry {
+  id: number;
+  ts: number;
+  group_id: string;
+  account_id: number | null;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  /** 本次扣减的 token 数（prompt + completion） */
+  cost: number;
+  status: number;
+  note: string;
+  reason: string | null;
+}
+
+/* ── 定价（price_books）────────────────────────────────── */
+
+export interface PriceBookRow {
+  id: number;
+  provider: string;
+  model: string;
+  /** input / output / cache_read / cache_write 等 */
+  token_class: string;
+  /** 每百万 token 的微美元价（1e-6 USD） */
+  price_micro_per_1m: number;
+  /** 每百万 token 的美元价（展示用） */
+  price_usd_per_1m: number;
+  currency: string;
+  effective_from: number;
+  created_by: string;
+  note: string;
+}
+
+export interface PriceResolveResult {
+  provider: string;
+  model: string;
+  at: number;
+  /** 各 token_class 对应的命中行 */
+  lines: Record<
+    string,
+    {
+      price_id: number;
+      provider: string;
+      model: string;
+      price_micro_per_1m: number;
+      price_usd_per_1m: number;
+    }
+  >;
+  /** 未命中价格的 token_class 列表 */
+  missing: string[];
 }

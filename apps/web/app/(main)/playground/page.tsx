@@ -3,79 +3,162 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Bot,
-  Coins,
   Eraser,
   Info,
+  KeyRound,
   Loader2,
   RefreshCw,
-  ThumbsDown,
-  ThumbsUp,
   User as UserIcon,
 } from 'lucide-react';
 
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
+import {Input} from '@/components/ui/input';
+import {Label} from '@/components/ui/label';
 import {AiChatInput, type ChatModelOption} from '@/components/ui/ai-chat-input';
 import {CopyButton} from '@/components/ui/copy-button';
-import {playgroundApi, errText} from '@/lib/api';
 import {withBasePath} from '@/lib/base-path';
 import {notify} from '@/lib/toast';
-import {useT} from '@/lib/i18n/provider';
-import {fmtCredit} from '@/lib/format';
+import {useT, type TFn} from '@/lib/i18n/provider';
+import {fmtNumber, fmtDateTime, fmtMicroUsd} from '@/lib/format';
 import {cn} from '@/lib/utils';
-import {useAuth} from '@/lib/auth-context';
-import {useRealm} from '@/lib/realm-context';
 
 interface Msg {
   role: 'user' | 'assistant';
   content: string;
-  /** 本条回答的实测消耗（上游 usage.credit） */
-  credit?: number | null;
   tokens?: number;
-  /** 是否由流式拼出来的（用于显示光标/反馈按钮） */
+  /** 是否由流式拼出来的（用于显示光标） */
   done?: boolean;
   error?: boolean;
 }
 
+/** 网关密钥只在当前标签页会话内有效，关掉即清 */
+const KEY_STORE = 'u2a_playground_key';
+
+/** 状态码 → 本地化文案键；没覆盖到的直接透传后端 detail */
+function statusKey(status: number): string | null {
+  if (status === 401) return 'playground.err401';
+  if (status === 429) return 'playground.err429';
+  if (status === 502) return 'playground.err502';
+  if (status === 503) return 'playground.err503';
+  return null;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** 把 detail 归一成可读文本：字符串直用，数组取 msg，对象取 message */
+function readableDetail(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (isRecord(item) && typeof item.msg === 'string') return item.msg;
+        return '';
+      })
+      .filter(Boolean)
+      .join('；');
+  }
+  if (isRecord(raw) && typeof raw.message === 'string') return raw.message;
+  return '';
+}
+
+/**
+ * 配额超限的 detail 是结构化对象（含 used/limit/reset_at），直接当字符串渲染
+ * 会显示成 [object Object]。这里只取字段拼文案，并跳过含原始 micro 数的 message。
+ */
+function quotaMessage(raw: Record<string, unknown>, t: TFn): string | null {
+  const isQuota = raw.type === 'quota_exceeded' || raw.unit === 'micro_usd' || raw.metric === 'micro';
+  if (!isQuota) return null;
+  const money = raw.unit === 'micro_usd' || raw.metric === 'micro';
+  const used = money ? fmtMicroUsd(raw.used) : typeof raw.used === 'number' ? fmtNumber(raw.used) : '—';
+  const limit =
+    money ? fmtMicroUsd(raw.limit) : typeof raw.limit === 'number' ? fmtNumber(raw.limit) : '—';
+  const resetAt =
+    typeof raw.reset_at === 'number' && raw.reset_at > 0
+      ? raw.reset_at
+      : typeof raw.reset_after === 'number'
+        ? Date.now() / 1000 + raw.reset_after
+        : null;
+  return t('playground.quota429', {
+    used,
+    limit,
+    reset: resetAt ? fmtDateTime(resetAt) : '—',
+  });
+}
+
+/** 429 优先用结构化字段；其余状态码优先用状态码文案，避免把 HTML 错误页塞进气泡 */
+function errorMessage(status: number, raw: unknown, t: TFn): string {
+  if (status === 429 && isRecord(raw)) {
+    const quota = quotaMessage(raw, t);
+    if (quota) return quota;
+  }
+  const k = statusKey(status);
+  if (k) return t(k);
+  return readableDetail(raw) || `HTTP ${status}`;
+}
+
 export default function PlaygroundPage() {
   const t = useT();
-  const {isAdmin} = useAuth();
-  const {realm, label: realmName} = useRealm();
+  const [apiKey, setApiKey] = useState('');
+  const [keyDraft, setKeyDraft] = useState('');
   const [models, setModels] = useState<ChatModelOption[]>([]);
+  /** 模型归属的服务商（owned_by 去重），auto = 交给网关路由 */
+  const [providers, setProviders] = useState<string[]>([]);
+  const [provider, setProvider] = useState('auto');
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
   const [input, setInput] = useState('');
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [streaming, setStreaming] = useState(false);
-  /** 本次会话累计消耗，实时显示在右下角 */
-  const [sessionCredit, setSessionCredit] = useState(0);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [sessionTokens, setSessionTokens] = useState(0);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const pinToBottom = useRef(true);
 
-  const loadModels = useCallback(async () => {
+  const loadModels = useCallback(async (key: string) => {
+    if (!key) return;
+    setLoadingModels(true);
     try {
-      const r = await playgroundApi.models(realm);
-      setModels(r.models || []);
-      // 切版本后旧模型多半不在新列表里，直接选第一个，避免发出去被上游拒
-      setModel(r.models?.[0]?.id || '');
+      const res = await fetch(withBasePath('/v1/models'), {
+        headers: {Authorization: `Bearer ${key}`},
+      });
+      if (!res.ok) {
+        const k = statusKey(res.status);
+        notify.err(k ? t(k) : `HTTP ${res.status}`);
+        // 401 基本是密钥错了，直接退回输入页让人重填
+        if (res.status === 401) {
+          sessionStorage.removeItem(KEY_STORE);
+          setApiKey('');
+        }
+        return;
+      }
+      const j = (await res.json()) as {data?: {id: string; owned_by?: string}[]};
+      const rows = j.data || [];
+      setModels(rows.map((m) => ({id: m.id, name: m.id, efforts: [], series: m.owned_by || ''})));
+      setProviders([...new Set(rows.map((m) => m.owned_by).filter((v): v is string => !!v))]);
+      setModel((cur) => (rows.some((m) => m.id === cur) ? cur : rows[0]?.id || ''));
       setEffort('');
     } catch (e) {
-      notify.err(errText(e));
+      notify.err(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingModels(false);
     }
-  }, [realm]);
+  }, [t]);
 
+  // 进入页面时恢复会话内保存的密钥
   useEffect(() => {
-    loadModels();
+    const saved = sessionStorage.getItem(KEY_STORE) || '';
+    if (saved) {
+      setApiKey(saved);
+      loadModels(saved);
+    }
   }, [loadModels]);
-
-  // 切换版本 = 换了一套账号池与模型，旧对话留着会造成误解（模型不同、额度不同）
-  useEffect(() => {
-    setMsgs([]);
-    setSessionCredit(0);
-  }, [realm]);
 
   // 自动滚到底部，但用户主动向上翻看时不要抢滚动位置
   useEffect(() => {
@@ -90,9 +173,29 @@ export default function PlaygroundPage() {
     pinToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
+  const saveKey = () => {
+    const v = keyDraft.trim();
+    if (!v) return;
+    sessionStorage.setItem(KEY_STORE, v);
+    setApiKey(v);
+    setKeyDraft('');
+    loadModels(v);
+  };
+
+  const resetKey = () => {
+    if (streaming) return;
+    sessionStorage.removeItem(KEY_STORE);
+    setApiKey('');
+    setModels([]);
+    setProviders([]);
+    setModel('');
+    setMsgs([]);
+    setSessionTokens(0);
+  };
+
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || streaming) return;
+    if (!text || streaming || !apiKey || !model) return;
     setInput('');
     pinToBottom.current = true;
 
@@ -104,31 +207,37 @@ export default function PlaygroundPage() {
     abortRef.current = ac;
     try {
       // 流式对话必须用原生 fetch（axios 拿不到 ReadableStream），
-      // 因此这里不走 axios 的 baseURL，要自己补 basePath。
-      const res = await fetch(withBasePath('/api/playground/chat'), {
+      // 因此不走 axios 的 baseURL，自己补 basePath。
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      };
+      if (provider !== 'auto') headers['x-provider'] = provider;
+
+      const res = await fetch(withBasePath('/v1/chat/completions'), {
         method: 'POST',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
+        headers,
         signal: ac.signal,
         body: JSON.stringify({
           model,
-          realm,
-          reasoning_effort: effort,
           stream: true,
           messages: nextMsgs.map((m) => ({role: m.role, content: m.content})),
         }),
       });
       if (!res.ok) {
-        let detail = `HTTP ${res.status}`;
+        let detail: unknown = '';
         try {
-          const j = await res.json();
-          detail = j.detail || j.error?.message || detail;
+          const j: unknown = await res.json();
+          if (isRecord(j)) {
+            detail = j.detail ?? (isRecord(j.error) ? j.error.message : j.error) ?? '';
+          }
         } catch {
-          /* 响应不是 JSON，保留状态码 */
+          /* 响应不是 JSON，用状态码文案 */
         }
+        const text2 = errorMessage(res.status, detail, t);
         setMsgs((cur) => {
           const copy = [...cur];
-          copy[copy.length - 1] = {role: 'assistant', content: detail, error: true, done: true};
+          copy[copy.length - 1] = {role: 'assistant', content: text2, error: true, done: true};
           return copy;
         });
         return;
@@ -139,7 +248,6 @@ export default function PlaygroundPage() {
       const decoder = new TextDecoder();
       let buf = '';
       let answer = '';
-      let credit: number | null = null;
       let tokens = 0;
 
       // 边读边解析 SSE，逐段追加到气泡上（真实流式体验）
@@ -166,7 +274,6 @@ export default function PlaygroundPage() {
               });
             }
             if (obj?.usage) {
-              if (typeof obj.usage.credit === 'number') credit = obj.usage.credit;
               tokens = (obj.usage.prompt_tokens || 0) + (obj.usage.completion_tokens || 0);
             }
           } catch {
@@ -180,13 +287,12 @@ export default function PlaygroundPage() {
         copy[copy.length - 1] = {
           role: 'assistant',
           content: answer || t('playground.emptyAnswer'),
-          credit,
           tokens,
           done: true,
         };
         return copy;
       });
-      if (typeof credit === 'number') setSessionCredit((v) => v + credit!);
+      if (tokens) setSessionTokens((v) => v + tokens);
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
         setMsgs((cur) => {
@@ -200,7 +306,7 @@ export default function PlaygroundPage() {
           const copy = [...cur];
           copy[copy.length - 1] = {
             role: 'assistant',
-            content: errText(e),
+            content: e instanceof Error ? e.message : String(e),
             error: true,
             done: true,
           };
@@ -211,39 +317,76 @@ export default function PlaygroundPage() {
       setStreaming(false);
       abortRef.current = null;
     }
-  }, [input, msgs, model, effort, realm, streaming]);
+  }, [input, msgs, model, provider, apiKey, streaming, t]);
 
   const stop = () => abortRef.current?.abort();
 
   const clear = () => {
     if (streaming) return;
     setMsgs([]);
-    setSessionCredit(0);
+    setSessionTokens(0);
   };
 
   const currentModel = useMemo(() => models.find((m) => m.id === model), [models, model]);
 
+  // 密钥输入门：没有密钥就没有模型列表，直接给一个收敛的输入卡片
+  if (!apiKey) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-4 md:gap-6">
+        <PageHeader title={t('playground.title')} description={t('playground.description')} />
+        <div className="flex flex-1 items-center justify-center">
+          <div className="w-full max-w-sm space-y-4 rounded-[20px] border p-6">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted">
+                <KeyRound className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div>
+                <div className="text-sm font-medium">{t('playground.keyTitle')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('playground.keyHint')}</div>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="pg-key" className="text-xs">{t('playground.keyLabel')}</Label>
+              <Input
+                id="pg-key"
+                type="password"
+                value={keyDraft}
+                autoComplete="off"
+                placeholder="u2a_…"
+                onChange={(e) => setKeyDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveKey();
+                }}
+              />
+            </div>
+            <Button className="w-full rounded-full" disabled={!keyDraft.trim()} onClick={saveKey}>
+              {t('playground.keySave')}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    // flex-1 + min-h-0：让页面占满可用高度，对话区随剩余空间自适应。
-    // 原先给对话区写死 calc(100dvh-290px)，一旦底部再加说明块就会顶到浮动
-    // 底栏下面被遮住（实测遮了 43px）。改用 flex 后不再依赖魔法数字，
-    // 任何视口高度都不会重叠。
+    // flex-1 + min-h-0：让页面占满可用高度，对话区随剩余空间自适应
     <div className="flex min-h-0 flex-1 flex-col gap-4 md:gap-6">
       <PageHeader
         title={t('playground.title')}
-        description={t('playground.description', {realm: realmName})}
+        description={t('playground.description')}
         actions={
           <>
             <Button
               variant="outline"
               size="sm"
               className="rounded-full"
+              disabled={loadingModels}
               onClick={() => {
-                loadModels();
+                loadModels(apiKey);
                 notify.info(t('playground.modelsRefreshed'));
               }}
             >
-              <RefreshCw />
+              <RefreshCw className={cn(loadingModels && 'animate-spin')} />
               {t('playground.refreshModels')}
             </Button>
             <Button
@@ -256,182 +399,149 @@ export default function PlaygroundPage() {
               <Eraser />
               {t('playground.clearChat')}
             </Button>
+            <Button variant="outline" size="sm" className="rounded-full" disabled={streaming} onClick={resetKey}>
+              <KeyRound />
+              {t('playground.keyChange')}
+            </Button>
           </>
         }
       />
 
-      {!isAdmin ? (
-        <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4 text-xs">
-          <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-          <div className="space-y-1">
-            <div className="font-medium">{t('playground.adminRequired')}</div>
-            <div className="text-muted-foreground">
-              {t('playground.adminRequiredDesc')}
+      {/* 服务商选择：auto 交给网关按模型路由；指定后通过 x-provider 头强制走该上游 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">{t('playground.providerLabel')}</span>
+        <div className="flex flex-wrap gap-1.5">
+          {['auto', ...providers].map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setProvider(p)}
+              className={cn(
+                'rounded-full border px-3 py-1 text-[11px] font-medium transition-colors',
+                provider === p
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-border/60 text-muted-foreground hover:bg-muted',
+              )}
+            >
+              {p === 'auto' ? t('playground.providerAuto') : p}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 对话区。不加卡片底色：消息直接落在页面背景上更清爽 */}
+      <section className="flex min-h-[240px] min-w-0 flex-1 flex-col overflow-hidden">
+        <div ref={scrollerRef} onScroll={onScroll} className="scroll-slim min-h-0 flex-1 overflow-y-auto px-1 py-4">
+          {msgs.length === 0 ? (
+            <div className="flex h-full items-center justify-center">
+              <div className="max-w-md space-y-2 text-center">
+                <Bot className="mx-auto h-7 w-7 text-muted-foreground/60" />
+                <div className="text-sm font-medium">{t('playground.startTitle')}</div>
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  {t('playground.startDesc')}
+                </p>
+                {currentModel && (
+                  <p className="text-[10px] text-muted-foreground/70">
+                    {t('playground.currentModel')}{' '}
+                    <span className="font-mono">{currentModel.id}</span>
+                    {currentModel.series && ` · ${currentModel.series}`}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mx-auto w-full max-w-3xl space-y-4">
+              {msgs.map((m, i) => (
+                <div
+                  key={i}
+                  className={cn('flex gap-2.5', m.role === 'user' ? 'justify-end' : 'justify-start')}
+                >
+                  {m.role === 'assistant' && (
+                    <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted">
+                      <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+                    </div>
+                  )}
+                  <div className={cn('min-w-0 max-w-[82%]', m.role === 'user' && 'flex flex-col items-end')}>
+                    <div
+                      className={cn(
+                        'whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2 text-xs leading-5',
+                        m.role === 'user'
+                          ? 'bg-foreground text-background'
+                          : m.error
+                            ? 'border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400'
+                            : 'bg-muted',
+                      )}
+                    >
+                      {m.content || <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                      {m.role === 'assistant' && !m.done && m.content && (
+                        <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-foreground/50 align-middle" />
+                      )}
+                    </div>
+
+                    {m.role === 'assistant' && m.done && !m.error && (
+                      <div className="mt-1.5 flex items-center gap-2.5 px-1 text-muted-foreground">
+                        <CopyButton
+                          value={m.content}
+                          label=""
+                          title={t('playground.copyAnswer')}
+                          className="h-6 w-6"
+                        />
+                        {!!m.tokens && (
+                          <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                            {fmtNumber(m.tokens)} tokens
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {m.role === 'user' && (
+                    <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted">
+                      <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="shrink-0 px-3 pb-3 pt-2.5">
+          <div className="mx-auto w-full max-w-3xl">
+            <AiChatInput
+              value={input}
+              onChange={setInput}
+              onSend={send}
+              onStop={stop}
+              streaming={streaming}
+              disabled={!model}
+              models={models}
+              model={model}
+              onModelChange={setModel}
+              effort={effort}
+              onEffortChange={setEffort}
+            />
+            <div className="mt-1.5 flex items-center justify-between gap-2 px-1">
+              <span className="truncate text-[11px] text-muted-foreground">
+                {models.length > 0
+                  ? t('playground.modelsAvailable', {count: models.length, n: models.length})
+                  : t('playground.noModels')}
+              </span>
+              <Badge
+                variant="secondary"
+                className="shrink-0 rounded-full text-[10px] tabular-nums"
+                title={t('playground.sessionTokensTitle')}
+              >
+                {t('playground.sessionTokens', {v: fmtNumber(sessionTokens)})}
+              </Badge>
             </div>
           </div>
         </div>
-      ) : (
-        <>
-          {/* 对话区。不加卡片底色：消息直接落在页面背景上更清爽，
-              也让输入框成为视觉焦点（原先整块 bg-muted 显得很重）。 */}
-          <section className="flex min-h-[240px] min-w-0 flex-1 flex-col overflow-hidden">
-            <div ref={scrollerRef} onScroll={onScroll} className="scroll-slim min-h-0 flex-1 overflow-y-auto px-1 py-4">
-              {msgs.length === 0 ? (
-                <div className="flex h-full items-center justify-center">
-                  <div className="max-w-md space-y-2 text-center">
-                    <Bot className="mx-auto h-7 w-7 text-muted-foreground/60" />
-                    <div className="text-sm font-medium">{t('playground.startTitle')}</div>
-                    <p className="text-[11px] leading-5 text-muted-foreground">
-                      {t('playground.startDesc')}
-                    </p>
-                    {currentModel && (
-                      <p className="text-[10px] text-muted-foreground/70">
-                        {t('playground.currentModel')}{' '}
-                        <span className="font-mono">{currentModel.id}</span>
-                        {currentModel.efforts.length > 0 &&
-                          t('playground.supportsEfforts', {efforts: currentModel.efforts.join(' / ')})}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="mx-auto w-full max-w-3xl space-y-4">
-                  {msgs.map((m, i) => (
-                    <div
-                      key={i}
-                      className={cn('flex gap-2.5', m.role === 'user' ? 'justify-end' : 'justify-start')}
-                    >
-                      {m.role === 'assistant' && (
-                        <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted">
-                          <Bot className="h-3.5 w-3.5 text-muted-foreground" />
-                        </div>
-                      )}
-                      <div className={cn('min-w-0 max-w-[82%]', m.role === 'user' && 'flex flex-col items-end')}>
-                        <div
-                          className={cn(
-                            'whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2 text-xs leading-5',
-                            m.role === 'user'
-                              ? 'bg-foreground text-background'
-                              : m.error
-                                ? 'border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400'
-                                // 助手气泡用 muted 底：对话区去掉灰色卡片后，
-                                // 若仍是 bg-background 就会与页面同色而「隐形」
-                                : 'bg-muted',
-                          )}
-                        >
-                          {m.content || <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                          {m.role === 'assistant' && !m.done && m.content && (
-                            <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-foreground/50 align-middle" />
-                          )}
-                        </div>
+      </section>
 
-                        {/* 回答下方：消耗与反馈（对齐参考图里的操作条） */}
-                        {m.role === 'assistant' && m.done && !m.error && (
-                          <div className="mt-1.5 flex items-center gap-2.5 px-1 text-muted-foreground">
-                            <CopyButton
-                              value={m.content}
-                              label=""
-                              title={t('playground.copyAnswer')}
-                              className="h-6 w-6"
-                            />
-                            <button
-                              type="button"
-                              title={t('playground.goodAnswer')}
-                              className="transition-colors hover:text-foreground"
-                              onClick={() => notify.ok(t('playground.feedbackRecorded'))}
-                            >
-                              <ThumbsUp className="h-3 w-3" />
-                            </button>
-                            <button
-                              type="button"
-                              title={t('playground.badAnswer')}
-                              className="transition-colors hover:text-foreground"
-                              onClick={() =>
-                                notify.info(t('playground.feedbackRecorded'), t('playground.feedbackDetail'))
-                              }
-                            >
-                              <ThumbsDown className="h-3 w-3" />
-                            </button>
-                            {typeof m.credit === 'number' && (
-                              <span
-                                className="inline-flex items-center gap-1 text-[10px] tabular-nums"
-                                title={t('playground.creditTitle')}
-                              >
-                                <Coins className="h-3 w-3" />
-                                {fmtCredit(m.credit)}
-                              </span>
-                            )}
-                            {!!m.tokens && (
-                              <span className="text-[10px] tabular-nums text-muted-foreground/70">
-                                {m.tokens} tokens
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      {m.role === 'user' && (
-                        <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted">
-                          <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* 输入区 + 右下角实时累计消耗。不再画顶部分隔线：对话区已无卡片底色，
-                一条横贯的线会显得多余。 */}
-            <div className="shrink-0 px-3 pb-3 pt-2.5">
-              <div className="mx-auto w-full max-w-3xl">
-                <AiChatInput
-                  value={input}
-                  onChange={setInput}
-                  onSend={send}
-                  onStop={stop}
-                  streaming={streaming}
-                  disabled={!isAdmin}
-                  models={models}
-                  model={model}
-                  onModelChange={setModel}
-                  effort={effort}
-                  onEffortChange={setEffort}
-                />
-                <div className="mt-1.5 flex items-center justify-between gap-2 px-1">
-                  <span className="truncate text-[11px] text-muted-foreground">
-                    {models.length > 0
-                      ? t('playground.modelsAvailable', {count: models.length, n: models.length})
-                      : t('playground.noModels')}
-                  </span>
-                  {/* 实时消耗：本次会话累计 */}
-                  <Badge
-                    variant="secondary"
-                    className="shrink-0 rounded-full text-[10px] tabular-nums"
-                    title={t('playground.sessionCreditTitle')}
-                  >
-                    <Coins className="mr-1 h-3 w-3" />
-                    {t('playground.sessionCredit', {v: fmtCredit(sessionCredit)})}
-                  </Badge>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/*
-            说明文字：居中的一段小字，限制宽度让它自然折行。
-            不做成通栏宽度的卡片——那样在宽屏下就是「一条横」，
-            既占地方又不好读；居中窄栏反而更像一句注脚。
-            字号 11px / 行高 20px：中文在这个组合下不挤，也不至于淡到看不清。
-          */}
-          <p className="mx-auto max-w-lg shrink-0 text-center text-[11px] leading-5 text-muted-foreground">
-            {t('playground.footnote1')}
-            <span className="mx-1.5 text-muted-foreground/40">·</span>
-            {t('playground.footnote2')}
-            <span className="mx-1.5 text-muted-foreground/40">·</span>
-            {t('playground.footnote3')}
-          </p>
-        </>
-      )}
+      <p className="mx-auto flex max-w-lg shrink-0 items-start justify-center gap-1.5 text-center text-[11px] leading-5 text-muted-foreground">
+        <Info className="mt-0.5 h-3 w-3 shrink-0" />
+        <span>{t('playground.footnote')}</span>
+      </p>
     </div>
   );
 }

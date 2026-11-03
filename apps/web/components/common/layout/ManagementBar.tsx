@@ -5,15 +5,22 @@ import {
   MessageCircleIcon,
   BarChart3,
   Users,
-  Server,
+  KeyRound,
+  Boxes,
+  MessageSquare,
+  ScrollText,
+  TrendingUp,
+  ShieldCheck,
   Settings,
+  PlusCircle,
   User,
   LogOut as LogOutIcon,
   ShieldAlert as ShieldAlertIcon,
   Link2,
   FolderGit2,
   ChevronRight,
-  KeyRound,
+  Coins,
+  Tags,
 } from 'lucide-react';
 import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
@@ -36,6 +43,7 @@ import {
 } from '@/components/animate-ui/radix/dialog';
 import {Avatar, AvatarFallback} from '@/components/ui/avatar';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 
 const IconOptions = {
   className: 'h-4 w-4',
@@ -75,11 +83,12 @@ const SystemTheme = {
 
 export function ManagementBar() {
   const themeUtils = useThemeUtils();
-  const {me, logout} = useAuth();
+  const {me, isAdmin, logout} = useAuth();
   const t = useT();
   const [mounted, setMounted] = useState(false);
   const [dockViewport, setDockViewport] = useState<DockViewport>('desktop');
   const [profileOpen, setProfileOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [dockPosition, setDockPosition] = useState<DockPosition | null>(null);
   const [showDockTip, setShowDockTip] = useState(false);
   const [dockTipStep, setDockTipStep] = useState(0);
@@ -305,6 +314,17 @@ export function ManagementBar() {
     };
   }, [getDefaultDockPosition, getScaledDockPosition, getViewport, mounted, readDockPositions, syncDockPosition]);
 
+  useEffect(() => {
+    const openAdd = () => {
+      setProfileOpen(false);
+      setAddOpen(true);
+    };
+    window.addEventListener('workbuddy-manager:open-add-account', openAdd);
+    return () => {
+      window.removeEventListener('workbuddy-manager:open-add-account', openAdd);
+    };
+  }, []);
+
   const handleLogout = () => {
     logout();
   };
@@ -425,9 +445,16 @@ export function ManagementBar() {
       href: '/accounts',
     },
     {
-      title: t('nav.providers'),
-      icon: <Server {...IconOptions} />,
-      href: '/providers',
+      // 配额（sub2api 订阅账号池）紧挨着账号：都是「管号」域，只是计费口径不同
+      title: t('nav.quota'),
+      icon: <Coins {...IconOptions} />,
+      href: '/quota',
+    },
+    {
+      // 定价紧跟配额：同属计费域
+      title: t('nav.pricing'),
+      icon: <Tags {...IconOptions} />,
+      href: '/pricing',
     },
     {
       title: t('nav.keys'),
@@ -435,13 +462,52 @@ export function ManagementBar() {
       href: '/keys',
     },
     {
+      title: t('nav.models'),
+      icon: <Boxes {...IconOptions} />,
+      href: '/models',
+    },
+    {
+      title: t('nav.playground'),
+      icon: <MessageSquare {...IconOptions} />,
+      href: '/playground',
+    },
+    {
       title: 'divider',
       icon: <div />,
+    },
+    {
+      title: t('nav.stats'),
+      icon: <TrendingUp {...IconOptions} />,
+      href: '/stats',
+    },
+    {
+      title: t('nav.logs'),
+      icon: <ScrollText {...IconOptions} />,
+      href: '/logs',
+    },
+    {
+      title: t('nav.security'),
+      icon: <ShieldCheck {...IconOptions} />,
+      href: '/security',
     },
     {
       title: t('nav.settings'),
       icon: <Settings {...IconOptions} />,
       href: '/settings',
+    },
+    {
+      title: t('nav.quickAdd'),
+      icon: <PlusCircle {...IconOptions} />,
+      customComponent: (
+        <div
+          onClick={() => {
+            if (isAdmin) setAddOpen(true);
+          }}
+          className="w-full h-full flex items-center justify-center cursor-pointer rounded transition-colors"
+        >
+          <PlusCircle className="h-4 w-4" />
+        </div>
+      ),
     },
     {
       title: t('nav.profile'),
@@ -730,6 +796,14 @@ export function ManagementBar() {
           mobileButtonClassName="bg-background/70 backdrop-blur-md border border-border/40 shadow-lg shadow-black/10 dark:shadow-white/5 h-12 w-12"
         />
       </div>
+
+      <AddAccountDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onSuccess={() => {
+          /* 账号页会在打开时自行刷新 */
+        }}
+      />
     </>
   );
 }

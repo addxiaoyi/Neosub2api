@@ -251,6 +251,38 @@ export async function copyText(text: string): Promise<boolean> {
   return ok;
 }
 
+/** 后端计费一律以 micro-USD 存储，1 USD = 1e6 micro */
+export const MICRO_PER_USD = 1_000_000;
+
+export function microToUsd(micro: number): number {
+  return micro / MICRO_PER_USD;
+}
+
+export function usdToMicro(usd: number): number {
+  return Math.round(usd * MICRO_PER_USD);
+}
+
+/**
+ * 金额展示的唯一入口：入参是 micro-USD。
+ * 直接把整数 micro 印出来会差 6 个数量级，任何展示金额的地方都必须走这里。
+ * 取不到值给「—」，不拿 0 冒充真实金额。
+ */
+export function fmtMicroUsd(micro: unknown): string {
+  if (typeof micro !== 'number' || !Number.isFinite(micro)) return '—';
+  return microToUsd(micro).toLocaleString(intlLocale(), {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+}
+
+/** 后端已折算成美元浮点的字段，按同一口径展示 */
+export function fmtUsd(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined || !Number.isFinite(usd)) return '—';
+  return fmtMicroUsd(usdToMicro(usd));
+}
+
 /**
  * 扣费金额格式化（上游 usage.credit）。
  * 单次调用常是 0.0x 量级，直接 toLocaleString 会显示成 0，因此小数值保留

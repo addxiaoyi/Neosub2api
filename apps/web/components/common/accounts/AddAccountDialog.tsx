@@ -184,8 +184,7 @@ export function AddAccountDialog({
       document.addEventListener('visibilitychange', tick);
     } catch (e) {
       setPhase('error');
-      // 明确错误态：带上原因，不留空白二维码；重试按钮由下方按钮区提供
-      setMessage(t('addAccount.startFailed', {reason: errText(e)}));
+      setMessage(errText(e));
     }
   }, [onOpenChange, onSuccess, stopPoll, realm, region, t]);
 
@@ -241,12 +240,7 @@ export function AddAccountDialog({
           {/* 固定尺寸，避免 loading/waiting/error 各阶段弹窗高度跳动 */}
           <div className="grid h-[212px] w-[212px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-white p-3 ring-1 ring-black/5">
             {phase === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}
-            {phase === 'error' && (
-              <div className="flex flex-col items-center gap-1.5 px-2 text-center">
-                <AlertTriangle className="h-7 w-7 text-amber-500" />
-                <span className="text-[11px] leading-4 text-muted-foreground">{t('addAccount.qrUnavailable')}</span>
-              </div>
-            )}
+            {phase === 'error' && <AlertTriangle className="h-7 w-7 text-amber-500" />}
             {(phase === 'waiting' || phase === 'success') && authUrl && (
               <QRCodeSVG value={authUrl} size={188} level="M" />
             )}
