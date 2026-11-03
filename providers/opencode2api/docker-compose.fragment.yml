@@ -1,0 +1,25 @@
+# opencode2api 可选对照实现（上游 GPL-3.0，独立进程，源码不进本仓）
+# 主仓已不依赖该进程；仅在需要与上游做 A/B 对照时手工启动。
+#
+# 用法（单独启动，与主 compose 解耦）：
+#   docker compose -f providers/opencode2api/docker-compose.fragment.yml up -d
+#
+# 镜像名与端口按上游项目自述为准，接入前请自行确认 tag。
+
+services:
+  opencode2api:
+    image: ghcr.io/jasonxu114514/opencode2api:latest
+    container_name: u2a-opencode2api
+    restart: unless-stopped
+    ports:
+      - "7869:8000"
+    environment:
+      # 上游自身的配置项，按其 README 填写
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+    networks:
+      - u2a
+
+networks:
+  u2a:
+    external: true
+    name: unified-2api_default

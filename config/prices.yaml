@@ -1,0 +1,408 @@
+# 价格表种子数据（M3 计费）
+# 结构对应 docs/m3-billing-plan.md §3：provider × model × token_class，金额单位 micro-USD。
+# 只收录厂商官网或上游文档里明确写出的美元价；没有公开美元价的模型放入 unpriced，不估算。
+#
+# 约定：
+# 1. provider 统一写 "*"：当前上游（muse / gptgrok / opencode / codebuddy / zcode / trae 等）
+#    都是转售或逆向网关，不公开自己的结算价；这里记录的是模型厂商官网标价，
+#    作为 M3 定价基准，不声称等于上游结算价。M3 解析时 "*" 是通配行（见方案 §3.1）。
+# 2. price_per_mtok 用字符串保留原始小数位；price_micro_per_1m = price_per_mtok × 1_000_000（整数）。
+# 3. effective_from 是"本仓首次确认该价格的抓取时间"，不是厂商公告的调价时间；
+#    全部种子行统一为 2026-11-02 00:00:00 +08:00。后续改价只追加新行，不修改旧行。
+# 4. reasoning 不单独建行：方案 §2.1 规定缺省回落到 output 价。
+# 5. 上下文分档 / 峰谷价 / 缓存写入 TTL 无法用单行表达，取基准档并在 note 注明差异。
+
+version: 1
+currency: USD
+unit: per_1m_tokens
+captured_at: "2026-11-02"
+default_effective_from: 1793548800
+
+prices:
+  # ---------- Anthropic Claude Sonnet 4 ----------
+  - provider: "*"
+    model: claude-sonnet-4
+    token_class: input
+    price_per_mtok: "3.00"
+    price_micro_per_1m: 3000000
+    effective_from: 1793548800
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    note: "Claude Sonnet 4 标准输入价；美元/百万 token。"
+
+  - provider: "*"
+    model: claude-sonnet-4
+    token_class: output
+    price_per_mtok: "15.00"
+    price_micro_per_1m: 15000000
+    effective_from: 1793548800
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    note: "Claude Sonnet 4 标准输出价。"
+
+  - provider: "*"
+    model: claude-sonnet-4
+    token_class: cache_read
+    price_per_mtok: "0.30"
+    price_micro_per_1m: 300000
+    effective_from: 1793548800
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    note: "缓存命中价为输入价的 0.1 倍。"
+
+  - provider: "*"
+    model: claude-sonnet-4
+    token_class: cache_write
+    price_per_mtok: "3.75"
+    price_micro_per_1m: 3750000
+    effective_from: 1793548800
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    note: "5 分钟缓存写入价（输入价 1.25 倍）；1 小时写入为 6.00，M3 无 TTL 维度。"
+
+  # ---------- OpenAI GPT-4o ----------
+  - provider: "*"
+    model: gpt-4o
+    token_class: input
+    price_per_mtok: "2.50"
+    price_micro_per_1m: 2500000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-4o"
+    note: "GPT-4o 标准输入价；该模型在 OpenAI 侧已标记 Deprecated，价格仍公开。"
+
+  - provider: "*"
+    model: gpt-4o
+    token_class: output
+    price_per_mtok: "10.00"
+    price_micro_per_1m: 10000000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-4o"
+    note: "GPT-4o 标准输出价。"
+
+  - provider: "*"
+    model: gpt-4o
+    token_class: cache_read
+    price_per_mtok: "1.25"
+    price_micro_per_1m: 1250000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-4o"
+    note: "Cached input 价；OpenAI 不单独收取缓存写入费。"
+
+  # ---------- OpenAI GPT-5 ----------
+  - provider: "*"
+    model: gpt-5
+    token_class: input
+    price_per_mtok: "1.25"
+    price_micro_per_1m: 1250000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-5"
+    note: "GPT-5 标准输入价；该模型在 OpenAI 侧已标记 Deprecated，价格仍公开。"
+
+  - provider: "*"
+    model: gpt-5
+    token_class: output
+    price_per_mtok: "10.00"
+    price_micro_per_1m: 10000000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-5"
+    note: "GPT-5 标准输出价。"
+
+  - provider: "*"
+    model: gpt-5
+    token_class: cache_read
+    price_per_mtok: "0.125"
+    price_micro_per_1m: 125000
+    effective_from: 1793548800
+    source: "https://developers.openai.com/api/docs/models/gpt-5"
+    note: "Cached input 价；OpenAI 不单独收取缓存写入费。"
+
+  # ---------- 智谱 GLM-5.2 ----------
+  - provider: "*"
+    model: glm-5.2
+    token_class: input
+    price_per_mtok: "1.40"
+    price_micro_per_1m: 1400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Z.AI 美元价目表；人民币表为 8 元/百万，两者按同一档位。"
+
+  - provider: "*"
+    model: glm-5.2
+    token_class: output
+    price_per_mtok: "4.40"
+    price_micro_per_1m: 4400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Z.AI 美元价目表；人民币表为 28 元/百万。"
+
+  - provider: "*"
+    model: glm-5.2
+    token_class: cache_read
+    price_per_mtok: "0.26"
+    price_micro_per_1m: 260000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Cached input 价；缓存存储当前限时免费，无单独 cache_write 报价。"
+
+  # ---------- 智谱 GLM-5.3（opencode 用小写） ----------
+  - provider: "*"
+    model: glm-5.3
+    token_class: input
+    price_per_mtok: "1.40"
+    price_micro_per_1m: 1400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Z.AI 美元价目表；人民币表为 8 元/百万。模型名大小写随上游而异。"
+
+  - provider: "*"
+    model: glm-5.3
+    token_class: output
+    price_per_mtok: "4.40"
+    price_micro_per_1m: 4400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Z.AI 美元价目表；人民币表为 28 元/百万。"
+
+  - provider: "*"
+    model: glm-5.3
+    token_class: cache_read
+    price_per_mtok: "0.26"
+    price_micro_per_1m: 260000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "Cached input 价；缓存存储当前限时免费，无单独 cache_write 报价。"
+
+  # ---------- 智谱 GLM-5.3（zcode 用大写） ----------
+  - provider: "*"
+    model: GLM-5.3
+    token_class: input
+    price_per_mtok: "1.40"
+    price_micro_per_1m: 1400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "与 glm-5.3 同价；单独建行是因为 price_books.model 按精确字符串匹配。"
+
+  - provider: "*"
+    model: GLM-5.3
+    token_class: output
+    price_per_mtok: "4.40"
+    price_micro_per_1m: 4400000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "与 glm-5.3 同价；model 字符串大小写不同。"
+
+  - provider: "*"
+    model: GLM-5.3
+    token_class: cache_read
+    price_per_mtok: "0.26"
+    price_micro_per_1m: 260000
+    effective_from: 1793548800
+    source: "https://docs.z.ai/guides/overview/pricing"
+    note: "与 glm-5.3 同价；model 字符串大小写不同。"
+
+  # ---------- 阿里云 Qwen3.8-Max ----------
+  - provider: "*"
+    model: qwen3.8-max
+    token_class: input
+    price_per_mtok: "2.00"
+    price_micro_per_1m: 2000000
+    effective_from: 1793548800
+    source: "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max"
+    note: "Global 范围美元价；中国范围人民币表为 12 元/百万。"
+
+  - provider: "*"
+    model: qwen3.8-max
+    token_class: output
+    price_per_mtok: "6.00"
+    price_micro_per_1m: 6000000
+    effective_from: 1793548800
+    source: "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max"
+    note: "Global 范围美元价；中国范围人民币表为 36 元/百万。"
+
+  - provider: "*"
+    model: qwen3.8-max
+    token_class: cache_read
+    price_per_mtok: "0.25"
+    price_micro_per_1m: 250000
+    effective_from: 1793548800
+    source: "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max"
+    note: "Implicit Cache 读取价；对应人民币表 1.5 元/百万。"
+
+  - provider: "*"
+    model: qwen3.8-max
+    token_class: cache_write
+    price_per_mtok: "2.50"
+    price_micro_per_1m: 2500000
+    effective_from: 1793548800
+    source: "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max"
+    note: "Explicit Cache Creation 价；对应人民币表 15 元/百万。"
+
+  # ---------- Moonshot Kimi K3 ----------
+  - provider: "*"
+    model: kimi-k3
+    token_class: input
+    price_per_mtok: "3.00"
+    price_micro_per_1m: 3000000
+    effective_from: 1793548800
+    source: "https://platform.kimi.ai/docs/pricing/chat"
+    note: "Kimi 国际站美元价；缓存命中 0.30。"
+
+  - provider: "*"
+    model: kimi-k3
+    token_class: output
+    price_per_mtok: "15.00"
+    price_micro_per_1m: 15000000
+    effective_from: 1793548800
+    source: "https://platform.kimi.ai/docs/pricing/chat"
+    note: "Kimi 国际站美元价。"
+
+  - provider: "*"
+    model: kimi-k3
+    token_class: cache_read
+    price_per_mtok: "0.30"
+    price_micro_per_1m: 300000
+    effective_from: 1793548800
+    source: "https://platform.kimi.ai/docs/pricing/chat"
+    note: "Cached Input 价。"
+
+  - provider: "*"
+    model: kimi-k3
+    token_class: cache_write
+    price_per_mtok: "3.00"
+    price_micro_per_1m: 3000000
+    effective_from: 1793548800
+    source: "https://platform.kimi.ai/docs/pricing/chat"
+    note: "5 分钟缓存写入价；1 小时写入为 6.00，M3 无 TTL 维度。"
+
+  # ---------- xAI Grok 4.6 ----------
+  - provider: "*"
+    model: grok-4.6
+    token_class: input
+    price_per_mtok: "2.00"
+    price_micro_per_1m: 2000000
+    effective_from: 1793548800
+    source: "https://docs.x.ai/developers/pricing"
+    note: "短上下文（<200k 输入）标准价；≥200k 为 4.00，M3 无上下文分档。"
+
+  - provider: "*"
+    model: grok-4.6
+    token_class: output
+    price_per_mtok: "6.00"
+    price_micro_per_1m: 6000000
+    effective_from: 1793548800
+    source: "https://docs.x.ai/developers/pricing"
+    note: "短上下文标准价；≥200k 输入时为 12.00。"
+
+  - provider: "*"
+    model: grok-4.6
+    token_class: cache_read
+    price_per_mtok: "0.50"
+    price_micro_per_1m: 500000
+    effective_from: 1793548800
+    source: "https://docs.x.ai/developers/pricing"
+    note: "短上下文 Cached 价；≥200k 输入时为 1.00。"
+
+  # ---------- MiniMax-M3 ----------
+  - provider: "*"
+    model: minimax-m3
+    token_class: input
+    price_per_mtok: "0.30"
+    price_micro_per_1m: 300000
+    effective_from: 1793548800
+    source: "https://platform.minimax.io/docs/guides/pricing-paygo"
+    note: "≤512k 输入、标准档、永久五折后的现价；原价 0.60。"
+
+  - provider: "*"
+    model: minimax-m3
+    token_class: output
+    price_per_mtok: "1.20"
+    price_micro_per_1m: 1200000
+    effective_from: 1793548800
+    source: "https://platform.minimax.io/docs/guides/pricing-paygo"
+    note: "≤512k 输入、标准档现价；>512k 为 2.40。"
+
+  - provider: "*"
+    model: minimax-m3
+    token_class: cache_read
+    price_per_mtok: "0.06"
+    price_micro_per_1m: 60000
+    effective_from: 1793548800
+    source: "https://platform.minimax.io/docs/guides/pricing-paygo"
+    note: "≤512k 输入、标准档缓存读取价；>512k 为 0.12。"
+
+  # ---------- DeepSeek（deepseek-chat 旧名） ----------
+  - provider: "*"
+    model: deepseek-chat
+    token_class: input
+    price_per_mtok: "0.15"
+    price_micro_per_1m: 150000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "官方已弃用该名（2026-07-24），按 deepseek-v4-flash 非思考模式计价；此处取非高峰价，高峰为 0.30。"
+
+  - provider: "*"
+    model: deepseek-chat
+    token_class: output
+    price_per_mtok: "0.60"
+    price_micro_per_1m: 600000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "非高峰输出价；高峰为 1.20。"
+
+  - provider: "*"
+    model: deepseek-chat
+    token_class: cache_read
+    price_per_mtok: "0.003"
+    price_micro_per_1m: 3000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "非高峰缓存命中价；高峰为 0.006。"
+
+  # ---------- DeepSeek（opencode 的 deepseek-v4.1-flash） ----------
+  - provider: "*"
+    model: deepseek-v4.1-flash
+    token_class: input
+    price_per_mtok: "0.15"
+    price_micro_per_1m: 150000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "官方现用模型名为 deepseek-flash（版本 DeepSeek-V4.1-Flash-1017）；上游 README 的写法不是官方 id，M3 需归一化。取非高峰价，高峰 0.30。"
+
+  - provider: "*"
+    model: deepseek-v4.1-flash
+    token_class: output
+    price_per_mtok: "0.60"
+    price_micro_per_1m: 600000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "按 deepseek-flash 非高峰输出价；高峰 1.20。"
+
+  - provider: "*"
+    model: deepseek-v4.1-flash
+    token_class: cache_read
+    price_per_mtok: "0.003"
+    price_micro_per_1m: 3000
+    effective_from: 1793548800
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    note: "按 deepseek-flash 非高峰缓存命中价；高峰 0.006。"
+
+unpriced:
+  - provider: "*"
+    model: kimi-k2.7
+    reason: "官方价目表只有 kimi-k2.7-code（0.95/4.00，缓存 0.19）与 kimi-k2.6，没有 kimi-k2.7 这一条目；无法确认 codebuddy 的 kimi-k2.7 是否等同 kimi-k2.7-code。"
+    source: "https://platform.kimi.ai/docs/pricing/chat"
+    checked_at: "2026-11-02"
+
+  - provider: "*"
+    model: hy3
+    reason: "腾讯云只公布人民币价（输入 1.2 元、输出 4 元、缓存命中 0.4 元/百万），未公布官方美元价目表；OpenRouter 的美元价属第三方市场报价，不作为厂商标价。"
+    source: "https://cloud.tencent.com/document/product/1759/127342"
+    checked_at: "2026-11-02"
+
+  - provider: "*"
+    model: hy3-preview
+    reason: "同上，腾讯官方仅人民币报价，无官方美元价；且 preview 与正式版价格是否一致未说明。"
+    source: "https://cloud.tencent.com/document/product/1759/127342"
+    checked_at: "2026-11-02"
+
+  - provider: "*"
+    model: DeepSeek-V4-Flash-Official
+    reason: "这是 trae 适配器的内部模型标识（apps/control/app/adapters/trae.py 的 DEFAULT_WORK_MODEL），不是 DeepSeek 官方价目表里的模型 id；无法证明与 deepseek-flash 同价。"
+    source: "apps/control/app/adapters/trae.py"
+    checked_at: "2026-11-02"

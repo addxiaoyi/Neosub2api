@@ -1,0 +1,104 @@
+# 生产编排：在开发用 docker-compose.yml 之上加 nginx 入口、健康检查、资源限制与日志轮转。
+# 启动：docker compose -f deploy/docker-compose.prod.yml up -d --build
+# 变量：从 deploy/.env.example 复制为 deploy/.env（与 compose 同目录，支持 ${VAR} 插值）
+
+name: unified-2api-prod
+
+services:
+  control:
+    build:
+      context: ../apps/control
+    env_file:
+      - path: ./.env
+        required: false          # 缺文件时仍能 config/构建，但上线前必须准备好
+    environment:
+      # 容器内固定路径，覆盖 .env 里给本机开发用的相对路径
+      UNIFIED_DATA_DIR: /data
+      UNIFIED_DB_PATH: /data/unified.db
+      # nginx 终止 TLS，会话 Cookie 必须只走 HTTPS；纯 HTTP 调试时再临时改回 false
+      UNIFIED_COOKIE_SECURE: "true"
+    volumes:
+      - unified_data:/data
+    ports:
+      - "127.0.0.1:8010:8000"    # 只绑本机，绕过 nginx 直连仅用于排障
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 下也能访问宿主机 sidecar
+    restart: unless-stopped
+    stop_grace_period: 30s       # 给 SQLite 收尾留时间，避免 WAL 未落盘就 kill
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).getcode()==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"          # 单文件上限，防止日志写满磁盘
+        max-file: "3"
+
+  web:
+    build:
+      context: ../apps/web
+    depends_on:
+      control:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:80"      # 容器是 nginx:alpine 监听 80（apps/web/Dockerfile），3000 只是宿主机端口
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:stable-alpine   # 沿用 stable 通道，避免 :latest 漂移
+    depends_on:
+      control:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./certbot-webroot:/var/www/certbot:ro   # HTTP-01 续期用；未签发证书前可为空目录
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  unified_data:                  # 数据卷用命名卷：compose 重建/改名不会误删 SQLite

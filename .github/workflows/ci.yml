@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install backend deps
+        working-directory: apps/control
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Pytest
+        working-directory: apps/control
+        run: python -m pytest tests/ -v
+
+      - name: Compile-check
+        working-directory: apps/control
+        run: python -m compileall app tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: apps/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint (warn-only)
+        working-directory: apps/web
+        run: npm run lint || echo "lint 有警告但放行"
+
+      - name: Build export
+        working-directory: apps/web
+        run: npm run build:export

@@ -1,0 +1,667 @@
+"""计费旁路：M2 直通用量，M3-1 追加定价换算（只算钱，不拦人）。
+
+M2 的 record_usage 把上游 usage 原样落 usage_records.usage_json；
+M3-1 在同一事务里追加 billing_ledger，金额定格为整数 micro-USD。
+网关响应路径不受影响：任何计费异常都不能打挂请求。
+"""
+
+import datetime as dt
+import json
+import logging
+import sqlite3
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any, Iterator
+
+MICRO_PER_USD = 1_000_000
+# token 分类与 usage 字段的对应关系见 split_usage
+TOKEN_CLASSES = ("input", "output", "cache_read", "cache_write", "reasoning")
+# 四舍五入到 1 micro 的补偿项：cost = (tokens * price + _ROUND_HALF) // MICRO_PER_USD
+_ROUND_HALF = MICRO_PER_USD // 2
+
+# 配额窗口按固定 UTC+8 解释日/月界（Asia/Shanghai 无夏令时）。
+# 不引入 zoneinfo：Windows 上缺 tzdata 时 IANA 时区会直接查不到。
+WINDOW_TZ_OFFSET = 8 * 3600
+QUOTA_WINDOWS = ("day", "month")
+_WINDOW_LABELS = {"day": "日额度", "month": "月额度"}
+
+logger = logging.getLogger("unified.billing")
+
+
+def record_usage(
+    conn: sqlite3.Connection,
+    *,
+    key_id: int | None,
+    key_name: str,
+    provider: str,
+    model: str,
+    status: int,
+    stream: bool,
+    usage: dict[str, Any] | None,
+    latency_ms: int,
+    ts: int,
+) -> None:
+    # 匿名/失效密钥没有归属，显式写 NULL 而不是 0；聚合侧统一用 COALESCE 分桶
+    normalized = int(key_id) if key_id is not None else None
+    conn.execute(
+        "INSERT INTO usage_records(ts, key_id, key_name, provider, model, status, stream, usage_json, latency_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            ts,
+            normalized,
+            key_name,
+            provider,
+            model,
+            status,
+            1 if stream else 0,
+            json.dumps(usage, ensure_ascii=False) if usage else "",
+            latency_ms,
+        ),
+    )
+
+
+def usage_by_key(conn: sqlite3.Connection, *, since: int = 0) -> list[dict[str, Any]]:
+    """按 key 归因用量。key_id 为 NULL 的记录单独归到「未归属」，不参与整数主键运算。"""
+    rows = conn.execute(
+        "SELECT CASE WHEN key_id IS NULL THEN NULL ELSE key_id END AS key_id, "
+        "COALESCE(NULLIF(key_name, ''), CASE WHEN key_id IS NULL THEN '未归属' ELSE '已删除密钥' END) AS key_name, "
+        "COUNT(*) AS requests "
+        "FROM usage_records WHERE ts >= ? "
+        "GROUP BY key_id, key_name ORDER BY requests DESC",
+        (since,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _sse_objects(chunk: bytes) -> Iterator[dict[str, Any]]:
+    """逐行解析 SSE 的 data: 负载，解析不成 JSON 的行直接丢掉。"""
+    for line in chunk.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == b"[DONE]":
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
+def usage_in_chunk(chunk: bytes) -> dict[str, Any] | None:
+    """一个 SSE 分片里的 usage：OpenAI 放顶层，Anthropic 放 message.usage / 顶层。
+
+    必须先解析 JSON 再判断，不能靠正文里出现 "usage" 字样猜。
+    """
+    found: dict[str, Any] | None = None
+    for data in _sse_objects(chunk):
+        usage = data.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            message = data.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+        if isinstance(usage, dict) and usage:
+            # Anthropic 把 input_tokens 放 message_start、output_tokens 放 message_delta，合并才完整
+            found = {**(found or {}), **usage}
+    return found
+
+
+def extract_usage(payload: bytes) -> dict[str, Any] | None:
+    """非流式响应体里取原始 usage 对象（OpenAI 与 Anthropic 都叫 usage）。"""
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return usage if isinstance(usage, dict) else None
+
+
+def usage_from_stream(chunks: list[bytes]) -> dict[str, Any] | None:
+    """流式响应里捞 usage：OpenAI 在末个 chunk（需 include_usage），Anthropic 在 message_start/message_delta。"""
+    found: dict[str, Any] | None = None
+    for chunk in chunks:
+        part = usage_in_chunk(chunk)
+        if part:
+            found = {**(found or {}), **part}
+    return found
+
+
+def totals(usage: dict[str, Any] | None) -> tuple[int, int]:
+    """从原始 usage 折算 prompt/completion 计数，供 request_logs 汇总列使用。"""
+    if not usage:
+        return 0, 0
+    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    return prompt, completion
+
+
+def to_usd(micro: int | None) -> float:
+    """micro-USD → 美元。只在展示层用；落库一律整数。"""
+    return round(int(micro or 0) / MICRO_PER_USD, 6)
+
+
+def _int(value: Any) -> int:
+    """上游 usage 字段可能是 None / 字符串 / 浮点，统一成非负整数。"""
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def split_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    """把上游 usage 拆成五类 token，供按类计价。
+
+    OpenAI（chat/legacy responses）：prompt_tokens 含缓存命中，扣出来按 cache_read 单独计价；
+    completion_tokens 含 reasoning，扣出来按 reasoning 计价（缺价格行时回落 output 价）。
+    Anthropic：input_tokens 本身不含缓存，cache_read / cache_write 有独立字段。
+    细节字段按「存在即判定」，不靠 provider 名猜，避免 responses 的 input_tokens 走错分支。
+    """
+    empty = {name: 0 for name in TOKEN_CLASSES}
+    if not usage:
+        return empty
+
+    prompt = usage.get("prompt_tokens")
+    if prompt is None:
+        prompt = usage.get("input_tokens")
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        completion = usage.get("output_tokens")
+    prompt = _int(prompt)
+    completion = _int(completion)
+
+    in_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    out_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    cached = _int(in_details.get("cached_tokens")) if isinstance(in_details, dict) else 0
+    reasoning = _int(out_details.get("reasoning_tokens")) if isinstance(out_details, dict) else 0
+
+    is_anthropic = "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage
+    cache_read = _int(usage.get("cache_read_input_tokens")) if is_anthropic else cached
+    cache_write = _int(usage.get("cache_creation_input_tokens")) if is_anthropic else 0
+    # Anthropic 的 input_tokens 不含缓存；OpenAI 的 prompt_tokens 含 cached，必须扣掉才不重复计费
+    input_tokens = prompt if is_anthropic else max(prompt - cached, 0)
+
+    return {
+        "input": input_tokens,
+        "output": max(completion - reasoning, 0),
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "reasoning": reasoning,
+    }
+
+
+def resolve_prices(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    model: str,
+    at: int,
+    token_classes: tuple[str, ...] = TOKEN_CLASSES,
+) -> dict[str, dict[str, Any]]:
+    """解析某模型在 at 时刻生效的价格行：精确 provider/model 优先于 '*'，同精度取最新。
+
+    at 传请求准入时刻（不是落库时刻），配合 append-only 让在途请求不受改价影响。
+    """
+    lines: dict[str, dict[str, Any]] = {}
+    for token_class in token_classes:
+        row = conn.execute(
+            "SELECT id, provider, model, price_micro_per_1m FROM price_books "
+            "WHERE token_class = ? AND effective_from <= ? "
+            "AND provider IN (?, '*') AND model IN (?, '*') "
+            "ORDER BY (provider <> '*') DESC, (model <> '*') DESC, effective_from DESC "
+            "LIMIT 1",
+            (token_class, at, provider, model),
+        ).fetchone()
+        if row is None:
+            continue
+        lines[token_class] = {
+            "price_id": row["id"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "price_micro_per_1m": int(row["price_micro_per_1m"]),
+        }
+    return lines
+
+
+def compute_cost_micro(
+    tokens: dict[str, int], prices: dict[str, dict[str, Any]]
+) -> tuple[int, list[str]]:
+    """按类换算金额，返回 (总额 micro-USD, 缺价的 token 类)。
+
+    每类单独算再相加，整数四位舍五入，单请求最大误差 ≤ 2.5 micro，且两方言行为一致。
+    """
+    total = 0
+    unpriced: list[str] = []
+    for name in TOKEN_CLASSES:
+        count = int(tokens.get(name) or 0)
+        if count <= 0:
+            continue
+        line = prices.get(name)
+        if line is None and name == "reasoning":
+            line = prices.get("output")  # 推理没有单独报价时按输出价计
+        if line is None:
+            unpriced.append(name)
+            continue
+        total += (count * int(line["price_micro_per_1m"]) + _ROUND_HALF) // MICRO_PER_USD
+    return total, unpriced
+
+
+def record_price_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    at: int,
+    provider: str,
+    model: str,
+    prices: dict[str, dict[str, Any]],
+) -> int | None:
+    """冻结本次解析结果；没有解析到任何价格行时不写空快照。"""
+    if not prices:
+        return None
+    payload = {
+        name: {
+            "price_id": line.get("price_id"),
+            "provider": line.get("provider"),
+            "model": line.get("model"),
+            "price_micro_per_1m": int(line.get("price_micro_per_1m") or 0),
+        }
+        for name, line in prices.items()
+    }
+    cur = conn.execute(
+        "INSERT INTO price_book_snapshots(resolved_at, provider, model, lines_json) VALUES(?,?,?,?)",
+        (at, provider, model, json.dumps(payload, ensure_ascii=False)),
+    )
+    return cur.lastrowid
+
+
+def settle(
+    conn: sqlite3.Connection,
+    *,
+    ts: int,
+    key_id: int | None,
+    key_name: str,
+    provider: str,
+    model: str,
+    status: int,
+    usage: dict[str, Any] | None,
+    pricing: dict[str, Any] | None = None,
+    billing_account_id: int | None = None,
+) -> dict[str, Any]:
+    """把一次请求的用量折成金额写流水；不 commit，由调用方与 request_logs 同一事务提交。
+
+    pricing 是准入时 resolve_prices 的结果（{"at", "provider", "model", "lines"}）；
+    缺失时按"未定价"处理（金额 0、estimated=1），不是错误。
+    """
+    zeros = {name: 0 for name in TOKEN_CLASSES}
+    if not usage and status >= 400:
+        # 失败请求没有可计量用量，留痕交给 request_logs，不在这里造零金额行
+        return {"written": False, "billed_micro": 0, "estimated": 0, "note": "", "tokens": zeros}
+
+    tokens = split_usage(usage)
+    lines = (pricing or {}).get("lines") or {}
+    if usage:
+        billed_micro, unpriced = compute_cost_micro(tokens, lines)
+        if any(tokens.values()):
+            note = f"unpriced:{','.join(unpriced)}" if unpriced else ""
+        else:
+            # 上游回了全零 usage（muse 等无计量通道）：0 元但必须能和真实免费请求区分
+            note = f"usage_zero:{provider}" if provider else "usage_zero"
+    else:
+        billed_micro, unpriced = 0, []
+        note = "usage_missing"
+    estimated = 1 if unpriced else 0
+    snapshot_id = (
+        record_price_snapshot(
+            conn,
+            at=int((pricing or {}).get("at") or ts),
+            provider=provider,
+            model=model,
+            prices=lines,
+        )
+        if lines
+        else None
+    )
+    conn.execute(
+        "INSERT INTO billing_ledger(ts, key_id, key_name, billing_account_id, provider, model, status, "
+        "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "billed_micro, price_snapshot_id, estimated, note) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            ts,
+            key_id,
+            key_name,
+            billing_account_id,
+            provider,
+            model,
+            status,
+            tokens["input"],
+            tokens["output"],
+            tokens["cache_read"],
+            tokens["cache_write"],
+            tokens["reasoning"],
+            billed_micro,
+            snapshot_id,
+            estimated,
+            note,
+        ),
+    )
+    # 用量刚发生变化，顺带评估阈值；告警失败不能带走已写的流水
+    try:
+        evaluate_alerts(conn, key_id=key_id, provider=provider, model=model, at=ts)
+    except Exception:  # noqa: BLE001
+        logger.exception("配额告警评估失败 key_id=%s provider=%s model=%s", key_id, provider, model)
+    return {
+        "written": True,
+        "billed_micro": billed_micro,
+        "estimated": estimated,
+        "note": note,
+        "snapshot_id": snapshot_id,
+        "tokens": tokens,
+    }
+
+
+def period_bounds(window: str, at: int) -> tuple[int, int]:
+    """返回 (周期起点, 周期终点) epoch 秒；日/月界按 UTC+8 计算。
+
+    惰性周期：不跑清零任务，按当前时刻算出周期再聚合 billing_ledger。
+    """
+    if window not in QUOTA_WINDOWS:
+        raise ValueError(f"未知配额周期：{window!r}")
+    tz = dt.timezone(dt.timedelta(seconds=WINDOW_TZ_OFFSET))
+    local = dt.datetime.fromtimestamp(int(at), tz=tz)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if window == "month":
+        start = start.replace(day=1)
+        end = (start.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    else:
+        end = start + dt.timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _policy_scope(policy: sqlite3.Row, start: int, end: int) -> tuple[str, list[Any]]:
+    """策略的计量范围：key 必选，provider / model 为空表示不限。"""
+    where = "key_id = ? AND ts >= ? AND ts < ?"
+    params: list[Any] = [policy["key_id"], start, end]
+    if policy["provider"]:
+        where += " AND provider = ?"
+        params.append(policy["provider"])
+    if policy["model"]:
+        where += " AND model = ?"
+        params.append(policy["model"])
+    return where, params
+
+
+def matching_policies(
+    conn: sqlite3.Connection, *, key_id: int, provider: str, model: str
+) -> list[sqlite3.Row]:
+    """命中当前请求的策略：key 维度必配，provider/model 可收窄。"""
+    return conn.execute(
+        "SELECT * FROM quota_policies WHERE key_id = ? AND enabled = 1 "
+        "AND (provider = '' OR provider = ?) AND (model = '' OR model = ?) ORDER BY id",
+        (key_id, provider, model),
+    ).fetchall()
+
+
+def check_failure_rate(
+    conn: sqlite3.Connection, *, key_id: int | None, window_sec: int, max_failures: int, at: int
+) -> dict[str, Any] | None:
+    """失败请求滑动窗口限流：窗内失败条数达到上限就返回拒绝详情，否则 None。
+
+    计数直接聚合 request_logs（status>=400 或 error 非空），不另起累加器，
+    这样日志与限流只有一份真相。窗口是滑动的：最早一条失败记录过期即释放名额，
+    因此 reset_after 取「最早一条失败 + 窗长 - 当前时刻」，而不是整段窗口重开。
+    """
+    if key_id is None or max_failures <= 0 or window_sec <= 0:
+        return None
+    since = int(at) - int(window_sec)
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, MIN(ts) AS first_ts FROM request_logs "
+        "WHERE key_id = ? AND ts >= ? AND (status >= 400 OR COALESCE(error, '') <> '')",
+        (int(key_id), since),
+    ).fetchone()
+    used = int(row["n"] or 0)
+    if used < max_failures:
+        return None
+    first_ts = int(row["first_ts"] or at)
+    reset_after = max(1, first_ts + int(window_sec) - int(at))
+    return {
+        "type": "failure_rate_limited",
+        "layer": "key",
+        "metric": "failures",
+        "used": used,
+        "limit": int(max_failures),
+        "unit": "requests",
+        "window": "sliding",
+        "window_sec": int(window_sec),
+        "reset_at": int(at) + reset_after,
+        "reset_after": reset_after,
+        "message": (
+            f"{int(window_sec)} 秒内失败请求已达 {used} 次，上限 {int(max_failures)} 次；"
+            f"请在 {reset_after} 秒后重试"
+        ),
+    }
+
+
+def window_usage(conn: sqlite3.Connection, policy: sqlite3.Row, at: int) -> dict[str, Any]:
+    """从 billing_ledger 聚合当前周期用量，金额与请求数同一口径，不另起累加器。"""
+    start, end = period_bounds(policy["window"], at)
+    where, params = _policy_scope(policy, start, end)
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(billed_micro), 0) AS micro, COUNT(*) AS requests "
+        f"FROM billing_ledger WHERE {where}",
+        params,
+    ).fetchone()
+    return {
+        "used_micro": int(row["micro"] or 0),
+        "used_requests": int(row["requests"] or 0),
+        "period_start": start,
+        "period_end": end,
+        "reset_at": end,
+        "reset_after": max(0, end - int(at)),
+    }
+
+
+def check_quota(
+    conn: sqlite3.Connection, *, key_id: int | None, provider: str, model: str, at: int
+) -> dict[str, Any] | None:
+    """准入校验：任一命中策略已达上限就返回拒绝详情，否则 None。
+
+    只判断「已用 >= 上限」是否成立，不做预估预扣。
+    """
+    if key_id is None:
+        return None
+    for policy in matching_policies(conn, key_id=key_id, provider=provider, model=model):
+        usage = window_usage(conn, policy, at)
+        if policy["limit_micro"] > 0 and usage["used_micro"] >= policy["limit_micro"]:
+            metric = "micro"
+        elif policy["limit_requests"] > 0 and usage["used_requests"] >= policy["limit_requests"]:
+            metric = "requests"
+        else:
+            continue
+        if metric == "micro":
+            used, limit = usage["used_micro"], int(policy["limit_micro"])
+            unit, label = "micro-USD", "金额"
+        else:
+            used, limit = usage["used_requests"], int(policy["limit_requests"])
+            unit, label = "次请求", "请求数"
+        reset_local = dt.datetime.fromtimestamp(
+            usage["reset_at"], tz=dt.timezone(dt.timedelta(seconds=WINDOW_TZ_OFFSET))
+        )
+        return {
+            "type": "quota_exceeded",
+            "layer": "key",
+            "policy_id": policy["id"],
+            "key_id": policy["key_id"],
+            "window": policy["window"],
+            "metric": metric,
+            "used": used,
+            "limit": limit,
+            "unit": "micro_usd" if metric == "micro" else "requests",
+            "period_start": usage["period_start"],
+            "reset_at": usage["reset_at"],
+            "reset_after": usage["reset_after"],
+            "message": (
+                f"{_WINDOW_LABELS[policy['window']]}（{label}）已用 {used} {unit}，上限 {limit} {unit}；"
+                f"周期重置于 {reset_local:%Y-%m-%d %H:%M:%S}（UTC+8）"
+            ),
+        }
+    return None
+
+
+def evaluate_alerts(
+    conn: sqlite3.Connection, *, key_id: int | None, provider: str, model: str, at: int
+) -> list[dict[str, Any]]:
+    """跨阈值记一条告警；同策略、同阈值、同周期只记一次，周期翻转后重新允许。
+
+    在 settle 写完整流水后调用，所以聚合结果天然包含本次请求的金额与次数。
+    """
+    if key_id is None:
+        return []
+    created: list[dict[str, Any]] = []
+    for policy in matching_policies(conn, key_id=key_id, provider=provider, model=model):
+        usage = window_usage(conn, policy, at)
+        thresholds = conn.execute(
+            "SELECT percent FROM quota_alert_thresholds WHERE policy_id = ? ORDER BY percent",
+            (policy["id"],),
+        ).fetchall()
+        for threshold in thresholds:
+            percent = int(threshold["percent"])
+            micro_hit = policy["limit_micro"] > 0 and (
+                usage["used_micro"] * 100 >= int(policy["limit_micro"]) * percent
+            )
+            requests_hit = policy["limit_requests"] > 0 and (
+                usage["used_requests"] * 100 >= int(policy["limit_requests"]) * percent
+            )
+            if not (micro_hit or requests_hit):
+                continue
+            if micro_hit and requests_hit:
+                # 两类都跨了只报更接近上限的那一类，避免同一阈值刷两条
+                metric = (
+                    "micro"
+                    if usage["used_micro"] * int(policy["limit_requests"])
+                    >= usage["used_requests"] * int(policy["limit_micro"])
+                    else "requests"
+                )
+            else:
+                metric = "micro" if micro_hit else "requests"
+            existing = conn.execute(
+                "SELECT id FROM quota_alerts WHERE policy_id = ? AND threshold_percent = ? "
+                "AND period_start = ?",
+                (policy["id"], percent, usage["period_start"]),
+            ).fetchone()
+            if existing is not None:
+                continue
+            conn.execute(
+                "INSERT INTO quota_alerts(policy_id, threshold_percent, window, period_start, "
+                "triggered_at, metric, used_micro, limit_micro, used_requests, limit_requests) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    policy["id"],
+                    percent,
+                    policy["window"],
+                    usage["period_start"],
+                    int(at),
+                    metric,
+                    usage["used_micro"],
+                    int(policy["limit_micro"]),
+                    usage["used_requests"],
+                    int(policy["limit_requests"]),
+                ),
+            )
+            created.append(
+                {
+                    "policy_id": policy["id"],
+                    "key_id": policy["key_id"],
+                    "threshold_percent": percent,
+                    "window": policy["window"],
+                    "period_start": usage["period_start"],
+                    "triggered_at": int(at),
+                    "metric": metric,
+                    "used_micro": usage["used_micro"],
+                    "limit_micro": int(policy["limit_micro"]),
+                    "used_requests": usage["used_requests"],
+                    "limit_requests": int(policy["limit_requests"]),
+                }
+            )
+    return created
+
+
+def import_price_books(conn: sqlite3.Connection, path: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    """把 config/prices.yaml 的种子价导入 price_books；重复版本跳过，不覆盖旧行。
+
+    unpriced 段只回传给调用方（前端/接口标注用），不落表：没有公开价就不编价。
+    """
+    try:
+        import yaml
+    except ImportError as exc:  # 运行时缺依赖时给出可执行的修复指令
+        raise RuntimeError("导入价格表需要 PyYAML：pip install PyYAML") from exc
+
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError("prices.yaml 顶层必须是映射")
+    rows = data.get("prices") or []
+    if not isinstance(rows, list):
+        raise ValueError("prices 必须是列表")
+
+    inserted = 0
+    skipped = 0
+    for index, item in enumerate(rows, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"prices 第 {index} 条不是映射")
+        token_class = str(item.get("token_class") or "")
+        if token_class not in TOKEN_CLASSES:
+            raise ValueError(f"prices 第 {index} 条 token_class 非法：{token_class!r}")
+        micro = item.get("price_micro_per_1m")
+        if micro is None:
+            raw = item.get("price_per_mtok")
+            if raw is None:
+                raise ValueError(f"prices 第 {index} 条缺 price_micro_per_1m / price_per_mtok")
+            micro = int((Decimal(str(raw)) * MICRO_PER_USD).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        micro = int(micro)
+        if micro < 0:
+            raise ValueError(f"prices 第 {index} 条价格为负：{micro}")
+        provider = str(item.get("provider") or "*").strip() or "*"
+        model = str(item.get("model") or "").strip()
+        if not model:
+            raise ValueError(f"prices 第 {index} 条缺 model")
+        effective_from = int(item.get("effective_from") or data.get("default_effective_from") or 0)
+
+        exists = conn.execute(
+            "SELECT id FROM price_books WHERE provider = ? AND model = ? AND token_class = ? "
+            "AND effective_from = ?",
+            (provider, model, token_class, effective_from),
+        ).fetchone()
+        if exists is not None:
+            skipped += 1
+            continue
+        inserted += 1
+        if dry_run:
+            continue
+        conn.execute(
+            "INSERT INTO price_books(provider, model, token_class, price_micro_per_1m, currency, "
+            "effective_from, created_by, note) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                provider,
+                model,
+                token_class,
+                micro,
+                str(data.get("currency") or "USD"),
+                effective_from,
+                "prices.yaml",
+                str(item.get("note") or ""),
+            ),
+        )
+
+    unpriced = [
+        str(item.get("model") or "")
+        for item in (data.get("unpriced") or [])
+        if isinstance(item, dict) and item.get("model")
+    ]
+    return {
+        "inserted": inserted,
+        "skipped": skipped,
+        "total": len(rows),
+        "dry_run": dry_run,
+        "currency": str(data.get("currency") or "USD"),
+        "unpriced": unpriced,
+    }
