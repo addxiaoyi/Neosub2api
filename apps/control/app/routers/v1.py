@@ -24,6 +24,7 @@ from ..billing import (
 )
 from ..db import get_json_setting
 from ..gateway_errors import GatewayError, from_provider_error, from_upstream_reply
+from ..model_resolve import MODE_CATALOG, resolve_model
 
 router = APIRouter(tags=["gateway"])
 logger = logging.getLogger("unified.billing")
@@ -302,9 +303,18 @@ async def _resolve(request: Request, payload: dict[str, Any], capability: str):
     if not model:
         raise GatewayError(400, "请求体缺少 model", type_="invalid_request_error", code="missing_model")
     try:
-        adapter, effective = request.app.state.registry.resolve(model, request.headers.get("x-provider"))
+        adapter, effective, mode = await resolve_model(
+            request.app.state.registry,
+            model,
+            request.headers.get("x-provider"),
+            capability,
+            ttl_sec=int(getattr(request.app.state.settings, "models_cache_ttl_sec", 60)),
+        )
     except ProviderError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        raise from_provider_error(exc) from exc
+    if mode == MODE_CATALOG:
+        # 自动解析是新增路径：把命中的 provider 显式写进日志，方便和 request_logs 对照排查
+        logger.info("自动解析 model=%s → %s/%s", model, adapter.spec.id, effective)
     if not adapter.spec.capabilities.get(capability):
         raise GatewayError(
             501,
@@ -319,7 +329,7 @@ async def _resolve(request: Request, payload: dict[str, Any], capability: str):
 async def _proxy(request: Request, capability: str):
     key = _gateway_key(request)
     payload = await _json_payload(request)
-    adapter, effective = _resolve(request, payload, capability)
+    adapter, effective = await _resolve(request, payload, capability)
     payload["model"] = effective
     # 先校验额度再冻结价格：被拒请求不产生快照与流水，通过后仍按原逻辑冻结价格
     _quota_guard(request, key, adapter.spec.id, effective)

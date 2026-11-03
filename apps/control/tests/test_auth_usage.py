@@ -49,7 +49,7 @@ def test_usage_recorded_non_stream(
     r = anon.post(
         "/v1/chat/completions",
         headers={"authorization": f"Bearer {bearer_key}"},
-        json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]},
     )
     assert r.status_code == 200, f"{r.status_code} {r.text}"
 
@@ -82,7 +82,7 @@ def test_usage_recorded_stream(
         "/v1/chat/completions",
         headers={"authorization": f"Bearer {bearer_key}"},
         json={
-            "model": "m",
+            "model": "fake-chat-1",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },

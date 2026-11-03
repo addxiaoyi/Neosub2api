@@ -1,6 +1,6 @@
 """网关路由：/v1/models 聚合、/v1/chat/completions 流式+非流式、/v1/messages。
 
-codebuddy 默认 enabled=1 且 capabilities 全 True，它透传到假上游（8021），
+codebuddy 默认 enabled=1 且 capabilities 全 True，它透传到假上游（8061），
 所以这些用例在当前环境应该能跑通；若未来改了适配器/假上游，用 skip 兜底。
 """
 
@@ -55,7 +55,7 @@ def test_chat_completions_non_stream(anon: httpx.Client, bearer_key: str) -> Non
     r = anon.post(
         "/v1/chat/completions",
         headers={"authorization": f"Bearer {bearer_key}"},
-        json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]},
     )
     assert r.status_code == 200, f"{r.status_code} {r.text}"
     body = r.json()
@@ -72,7 +72,7 @@ def test_chat_completions_stream(anon: httpx.Client, bearer_key: str) -> None:
         "/v1/chat/completions",
         headers={"authorization": f"Bearer {bearer_key}"},
         json={
-            "model": "m",
+            "model": "fake-chat-1",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -93,7 +93,7 @@ def test_messages_non_stream(anon: httpx.Client, bearer_key: str) -> None:
     r = anon.post(
         "/v1/messages",
         headers={"authorization": f"Bearer {bearer_key}"},
-        json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]},
     )
     if r.status_code == 501:
         pytest.skip(f"provider 未实现 messages 能力：{r.text}")
