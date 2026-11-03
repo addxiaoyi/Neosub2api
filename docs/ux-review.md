@@ -51,7 +51,7 @@
 
 ## 修复状态（2026-11-02）
 
-复核方式统一为：`cd apps/web && npm run build:export`（18 个静态页，通过）→ 静态产物由 8010 控制面托管 → Playwright 1440/900 与 768/900 两档截图，脚本在仓库外执行。后端 `cd apps/control && python -m pytest tests -q` → **76 passed, 3 subtests passed**。
+复核方式统一为：`cd apps/web && npm run build:export`（18 个静态页，通过）→ 静态产物由 8010 控制面托管 → Playwright 1440/900 与 768/900 两档截图，脚本在仓库外执行。后端 `cd apps/control && python -m pytest tests -q` → **76 passed, 3 subtests passed**（该数字为当次快照；当前基线 `250 passed, 1 skipped, 3 subtests passed`）。
 
 | 编号 | 状态 | 验证方式 | 证据 |
 | --- | --- | --- | --- |

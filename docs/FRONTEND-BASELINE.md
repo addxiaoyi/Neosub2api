@@ -62,10 +62,10 @@
 | 组 | 路由 |
 | --- | --- |
 | 入口 | `/`（登录 / 引导）、`/(auth)` |
-| 主页面 | `/dashboard`、`/accounts`、`/quota`、`/pricing`、`/tasks`、`/keys`、`/models`、`/playground`、`/stats`、`/logs`、`/security`、`/settings`（服务商配置在设置页「服务商」tab，不再有独立 `/providers` 页） |
+| 主页面 | `/dashboard`、`/accounts`、`/quota`、`/pricing`、`/keys`、`/models`、`/playground`、`/stats`、`/logs`、`/security`、`/settings`（服务商配置在设置页「服务商」tab，不再有独立 `/providers` 页） |
 | 不计入 | `/design`（演示页） |
 
-现状备注（2026-11-03）：`/red-packets` 与 `/claim` 已按业务决定整条链路删除（后端从无端点），基准不再保留这两个页面，也不应再补；`/providers` 页已并入设置页，导航与路由以当前 `ManagementBar.tsx` 为准。
+现状备注（2026-11-03）：`/red-packets` 与 `/claim` 已按业务决定整条链路删除（后端从无端点），基准不再保留这两个页面，也不应再补；`/tasks` 页面与相关 9 条幽灵路径（签到记录 / 任务日志 / 上游日志 / 任务执行 / 认领计划）已整体删除，页面清单与导航均不再包含它；`/providers` 页已并入设置页，导航与路由以当前 `ManagementBar.tsx` 为准。
 
 4. 逐页比对：同视口、同页面、同数据。差异按条记录，一条一行：
 

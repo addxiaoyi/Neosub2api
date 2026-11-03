@@ -128,7 +128,7 @@ def build(settings: Settings, base_url: str = "") -> FooAdapter:
 
 ## 9. 自检清单
 
-1. `python -m pytest apps/control/tests`（`test_providers.py` 覆盖注册与鉴权，`test_billing.py` 覆盖结算）。当前基线：**177 passed, 1 skipped**。
+1. `python -m pytest apps/control/tests`（`test_providers.py` 覆盖注册与鉴权，`test_billing.py` 覆盖结算）。当前基线：**250 passed, 1 skipped, 3 subtests passed**。
 2. 启动控制面，`GET /api/providers` 出现新 `id`，`enabled=false`、`has_api_key=false`。
 3. `PATCH /api/providers/{id}` 启用并填 `api_key`，再查 `enabled=true`、`has_api_key=true`。
 4. 带 `x-provider: <id>` 打一次 `/v1/chat/completions`；不可达时必须是 502/503，不能 500。

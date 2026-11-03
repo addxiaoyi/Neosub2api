@@ -143,6 +143,28 @@ Anthropic 外壳示例（`/v1/messages`）：
 
 `code` 与 `candidates` 是 Anthropic 错误对象的附加键，只在解析类错误上出现；其余 Anthropic 错误仍是 `type` + `message` + `provider/upstream_*`。
 
+#### 失败请求限流（429 `failure_rate_limited`）
+
+按**密钥**做滑动窗口计数，计数直接聚合 `request_logs`（`status >= 400` 或 `error` 非空），不另建累加器：
+
+- 窗口 `UNIFIED_FAILURE_WINDOW_SEC`（默认 60 秒）、上限 `UNIFIED_FAILURE_WINDOW_MAX`（默认 20 次），任一为 `0` 即关闭；匿名请求没有密钥维度，不参与计数。
+- 达到上限后，后续请求在转发前返回 **429**，`error.type = rate_limit_error`、`error.code = failure_rate_limited`，响应头带 `Retry-After: <reset_after>`；`detail` 形状：
+
+```json
+{
+  "type": "failure_rate_limited", "layer": "key", "metric": "failures",
+  "used": 20, "limit": 20, "unit": "requests",
+  "window": "sliding", "window_sec": 60,
+  "reset_at": 1762000060, "reset_after": 42,
+  "message": "60 秒内失败请求已达 20 次，上限 20 次；请在 42 秒后重试"
+}
+```
+
+- `reset_after` 按「最早一条失败记录 + 窗长 - 当前时刻」计算，不是整窗重开。
+- 被拒请求本身只写 `request_logs(status=429)`，不写 `usage_records` / `billing_ledger`。
+- 注意：这条 429 日志的 `error` 非空，因此**也计入失败窗口**。客户端在限流期间持续重试，会把窗口一直堆满、让限制一直续命；请按 `Retry-After` 退避，别原地轮询。
+- 限流查询读库失败时按旁路处理放过请求（不因统计组件故障阻断转发）。
+
 **流式响应**：上游直接以 4xx/5xx 拒绝时返回普通 JSON 错误（不是 SSE）；若**已经出帧后中途断开**，先前的分片照常转发，随后补一个错误事件再正常结束：
 
 - Chat Completions：`data: {"error": {...}}` 后跟 `data: [DONE]`；
@@ -396,18 +418,20 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/keys` | 登录 | 列表，不含明文 |
-| `POST /api/keys` | 管理员 | 创建，明文只返回一次 |
+| `GET /api/keys` | 登录 | 列表，不含明文；admin 返回全部，非 admin 只返回 `owner_user_id = 自己用户名` 的密钥（历史 NULL 归属对非 admin 不可见） |
+| `POST /api/keys` | 管理员 | 创建，明文只返回一次；`owner_user_id` 可空，缺省归当前登录用户 |
 | `PATCH /api/keys/{key_id}` | 管理员 | 改名 / 启停 |
 | `DELETE /api/keys/{key_id}` | 管理员 | 吊销（物理删除，立即失效） |
 
 ### `POST /api/keys`
 
-请求体 `{"name": "..."}`（1–64 字符，超限 400）。响应见 [GETTING-STARTED.md](GETTING-STARTED.md) 第 6 节——`key` 字段仅此一次。
+请求体 `{"name": "...", "owner_user_id": "..."}`（`name` 1–64 字符，超限 400；`owner_user_id` 可省略或留空，此时归当前登录用户；指定不存在的用户返回 400「归属用户不存在」）。响应见 [GETTING-STARTED.md](GETTING-STARTED.md) 第 6 节——`key` 字段仅此一次。
+
+密钥行的公共字段为 `id, name, prefix, enabled, created_at, last_used_at, owner_user_id`。归属存的是用户名而不是数字 id：`users` 表主键是 TEXT 的 `username`，与 `owner_user_id` 一一对应；删除用户不会自动回收其密钥，这些密钥会变成只有 admin 可见的孤儿记录，需要管理员显式吊销。
 
 ### `PATCH /api/keys/{key_id}`
 
-请求体 `{"name": "...", "enabled": true}`，至少一项。返回更新后的公共行（`id, name, prefix, enabled, created_at, last_used_at`）。
+请求体 `{"name": "...", "enabled": true}`，至少一项。返回更新后的公共行（`id, name, prefix, enabled, created_at, last_used_at, owner_user_id`）。归属不随 PATCH 变更。
 
 ### `DELETE /api/keys/{key_id}`
 
@@ -731,13 +755,17 @@ cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/quota/policies?key_id=` | 管理员 | 策略列表；`key_id` 只收数字 id，按密钥定位用 `X-Api-Key` 请求头 |
+| `GET /api/quota/policies?key_id=` | 登录（admin 全部 / 归属者自有） | 策略列表；`key_id` 只收数字 id，按密钥定位用 `X-Api-Key` 请求头 |
 | `POST /api/quota/policies` | 管理员 | 按 `(key_id, provider, model, window)` 幂等 upsert，阈值整体替换 |
 | `DELETE /api/quota/policies/{policy_id}` | 管理员 | 删除策略与阈值；告警历史保留 |
-| `GET /api/quota/status?key_id=&at=` | 管理员 | 当前周期用量与告警；`at` 缺省为当前秒 |
-| `GET /api/quota/alerts?key_id=&policy_id=&limit=&offset=` | 管理员 | 告警历史，支持过滤与分页 |
+| `GET /api/quota/status?key_id=&at=` | 管理员 / 归属者 | 当前周期用量与告警；`at` 缺省为当前秒 |
+| `GET /api/quota/alerts?key_id=&policy_id=&limit=&offset=` | 管理员 / 归属者 | 告警历史，支持过滤与分页 |
 
-配额读取权限：`api_keys` 当前没有 owner/group 归属字段，无法判断非管理员与某把密钥的关系，因此三个 GET 端点暂只放行 `admin`。非 admin（viewer）无论用 `X-Api-Key`、数字 `key_id` 还是不传过滤条件，统一返回 **403 `无权查看配额数据`**；鉴权在解析密钥之前完成，不区分密钥是否存在，避免 403/404 差异被用于存在性探测。归属模型落地后只需替换 `quota_reader` 依赖，端点契约不变。
+配额读取权限按 `api_keys.owner_user_id` 判定（该列存 `users.username`）：
+
+- `admin`：可查全部密钥，`key_id` / `X-Api-Key` 只作过滤条件。
+- 非 admin：不带过滤条件时只返回自己名下密钥的策略/状态/告警；用 `X-Api-Key` 或数字 `key_id` 查他人的密钥返回 **403 `无权查看该密钥的配额数据`**；历史 NULL 归属的密钥对非 admin 不可见。
+- 鉴权与归属判断都在解析密钥之前完成，不区分密钥是否存在，避免 403/404 差异被用于存在性探测。出参里的 `key_id` / `key_name` / `key_prefix` 只用于展示，不改变可见范围。
 
 `POST /api/quota/policies` 请求体：
 
@@ -801,10 +829,10 @@ cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
 | --- | --- |
 | 400 | 请求体非法、缺 `model`、参数越界（用户名/密钥名长度等）、`base_url` 不是 http(s)、无可更新字段；配额 `key_id` 形态非法、`window`/阈值越界 |
 | 401 | 未登录/会话过期（`/api/*`）；网关密钥缺失或无效（`/v1/*`）；登录密码错误 |
-| 403 | viewer 调管理员接口或配额域读接口（响应带 `error.type=permission_denied`、`required_role`）；sub2api 分组已停用；CodeBuddy 管理端拒绝 `wbt_` token |
-| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在；配额 `key_id` 引用的密钥或策略不存在 |
+| 403 | viewer 调管理员接口或读取非自有密钥的配额数据（响应带 `error.type=permission_denied`、`required_role`）；sub2api 分组已停用；CodeBuddy 管理端拒绝 `wbt_` token |
+| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在；配额 `key_id` 引用的密钥或策略不存在；模型解析失败（`model_not_found` / `model_unavailable`） |
 | 409 | 用户名已存在；任务状态不允许取消/重试 |
-| 429 | sub2api 分组或账号池额度耗尽；网关密钥触发配额上限；上游 429（保留 `Retry-After`） |
+| 429 | sub2api 分组或账号池额度耗尽；网关密钥触发配额上限；同一密钥失败请求达到窗口上限（`failure_rate_limited`）；上游 429（保留 `Retry-After`） |
 | 501 | 请求的 provider 不支持该能力（如 trae_sidecar 无 `/v1/messages`；deepseek sidecar 无流式 messages） |
 | 502 | 上游不可达（连接失败、DNS 失败等）；上游 5xx 归并到 502（原始状态码见 `error.upstream_status`） |
 | 503 | 无已启用的 chat provider；sub2api 分组未配置；sub2api 账号缺 upstream_base |

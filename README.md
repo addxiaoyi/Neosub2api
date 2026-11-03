@@ -5,7 +5,7 @@
 主仓对可 clean-room 重写的上游只依据公开 README / 协议说明 / 实测 HTTP 行为实现，不复制上游源码；需要独立进程的保留 sidecar 边界：CodeBuddy 管理端（7864）加 codar / trae / deepseek / qoder 四个 sidecar。`providers/` 只放上游参考来源说明，不是运行依赖。
 控制面负责账号、服务商、密钥、用量、配额分发与注册任务；推理协议由各 provider 适配器直接对接上游（或用户自建的上游服务），主仓保持 MIT 可分发、可商用。
 
-当前状态：14 家 provider（3 家 `ready` / 11 家 `needs_config`，逐家见 [docs/PROVIDERS.md](docs/PROVIDERS.md)）；前端导航为仪表盘、账号、配额、定价、任务、密钥、模型、测试台、统计、日志、安全、设置（服务商配置已并入设置页）。红包/抽奖链路已全部删除，后端与前端都不再保留。
+当前状态：14 家 provider（3 家 `ready` / 11 家 `needs_config`，逐家见 [docs/PROVIDERS.md](docs/PROVIDERS.md)）；前端导航为仪表盘、账号、配额、定价、密钥、模型、测试台、统计、日志、安全、设置（服务商配置已并入设置页）。红包/抽奖链路已全部删除，后端与前端都不再保留；`/tasks` 任务页（含签到记录、任务日志、上游日志、任务执行、认领计划）也已整体删除，后端从无对应端点。
 
 ## 目录结构
 
@@ -13,7 +13,7 @@
 unified-2api/
 ├─ apps/
 │  ├─ web/                 # Next.js 15 前端（基于 codebuddy2api 的 web/ 迁移）
-│  │  ├─ app/(main)/       # dashboard / accounts / quota / pricing / tasks / keys / models /
+│  │  ├─ app/(main)/       # dashboard / accounts / quota / pricing / keys / models /
 │  │  │                    # playground / stats / logs / security / settings
 │  │  ├─ components/       # 沿用原项目的设计语言与组件
 │  │  └─ lib/              # api.ts、providers.ts、use-providers.ts、i18n…
@@ -26,7 +26,7 @@ unified-2api/
 │     │  ├─ registry.py    # provider 注册表（SQLite 持久化）
 │     │  ├─ db.py          # 表结构 + 连接（sqlite3，WAL）
 │     │  └─ main.py        # 装配 + 静态页面托管 + 任务服务生命周期
-│     ├─ tests/            # 控制面测试（当前 177 passed, 1 skipped）
+│     ├─ tests/            # 控制面测试（当前 250 passed, 1 skipped, 3 subtests passed）
 │     └─ scripts/          # 假上游、验证脚本
 ├─ docs/providers/         # clean-room 协议契约与逐家实现说明
 ├─ providers/              # 上游参考来源（不是依赖）：只放说明与可选对照编排
@@ -51,7 +51,7 @@ cd apps/control
 python -m pytest tests -q
 ```
 
-当前基线：**177 passed, 1 skipped**。skip 的那条是 POSIX 权限位用例（`test_hardening.py`），在 Windows 上按设计跳过。
+当前基线：**250 passed, 1 skipped, 3 subtests passed**。skip 的那条是 POSIX 权限位用例（`test_hardening.py`），在 Windows 上按设计跳过。
 
 ## 启动方式
 
@@ -144,7 +144,18 @@ npm run build:export        # 产出 apps/web/out，由控制面直接托管
 | 凭据中心：`/api/provider-credentials` 与设置页「服务商」tab，支持一个 provider 多把 key、逐条 base_url 与启停 | ✅ |
 | 定价页：价格簿、导入、`/api/pricing/resolve` 按 provider+model 命中价；配额页：分组/额度/流水 | ✅ |
 | 日志页、测试台、安全页重写；红包/抽奖链路从前端到类型定义全部移除，不再保留空壳页 | ✅ |
-| 测试基线：`177 passed, 1 skipped`（Windows；skip 为 POSIX 权限位用例） | ✅ |
+| 测试基线：`250 passed, 1 skipped, 3 subtests passed`（Windows；skip 为 POSIX 权限位用例） | ✅ |
+
+### 2026-11-03 行为变化
+
+以下改动对外有影响，升级前请先核对客户端用法，细节见 [docs/API-REFERENCE.md](docs/API-REFERENCE.md)。
+
+- **未知模型名不再兜底**：以前 `/v1/*` 遇到本地目录里没有的模型名会兜底到第一家 chat provider，现在直接 **404 `model_not_found`**。客户端要么用 `<provider>/<model>` 写法，要么带 `x-provider` 头；模型只存在于未启用 provider 时返回 404 `model_unavailable`，同名多家命中返回 400 `ambiguous_model`（带 `candidates`）。存量客户端可临时设置 `UNIFIED_MODEL_FALLBACK_FIRST=1` 恢复旧兜底；该开关只解决「一家都没命中」，不掩盖歧义。详见 API-REFERENCE §1「模型解析顺序」与错误契约。
+- **`/tasks` 页面整体删除**：签到记录、任务日志、上游日志、任务执行、认领计划对应的页面、导航入口、账号页跳转与全部 i18n 文案一并移除；这些端点后端从未实现。账号行内的「活动任务」按钮同步消失，不再保留死按钮。
+- **`GET /api/models` 新契约**：条目新增 `provider` / `providers` / `source`（`upstream` | `declared` | `declared_fallback`）/ `provider_states` / `unavailable_reason` / `fallback_reason`；支持 `?provider=<id>` 只看一家（未知 id 404，且不再按 enabled 过滤）。模型页已改调该端点。
+- **密钥归属**：`api_keys.owner_user_id` 存用户名（`users.username` 是 TEXT 主键）。admin 可查全部、可指定归属；非 admin 只列自有密钥，配额读接口只能查自有 key，查他人（含历史 NULL 归属）返回 403。
+- **失败请求限流**：同一密钥在滑动窗口内失败次数达到上限，后续请求返回 **429 `failure_rate_limited`**，`detail` 含 `used/limit/window_sec/reset_at/reset_after`，并带 `Retry-After`。计数直接来自 `request_logs`（`status>=400` 或 `error` 非空），被拒请求本身也会落一条 429 日志。
+- **新增配置项**：`UNIFIED_MODELS_CACHE_TTL_SEC`（默认 60，`0` 关闭模型目录缓存）、`UNIFIED_MODEL_FALLBACK_FIRST`（默认 `0`，未知模型 404；设 `1` 兜底到首家启用的、支持该端点能力位的 provider）、`UNIFIED_FAILURE_WINDOW_SEC`（默认 60）、`UNIFIED_FAILURE_WINDOW_MAX`（默认 20，后两项任一为 `0` 即关闭失败限流）。
 
 ### 本地假上游（无真实凭证时的链路验证）
 

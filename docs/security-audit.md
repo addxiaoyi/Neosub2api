@@ -119,7 +119,7 @@
 
 ## 修复状态（逐条验收，2026-11-02）
 
-> 回归基线：`apps/control` 下 `python -m pytest tests -q` → **73 passed, 3 subtests passed**（含本次新增 `tests/test_security.py` 9 项）。
+> 回归基线：`apps/control` 下 `python -m pytest tests -q` → **73 passed, 3 subtests passed**（含本次新增 `tests/test_security.py` 9 项）。该数字为当次审查快照；当前基线为 `250 passed, 1 skipped, 3 subtests passed`。
 > 说明：每条只写「状态 / 改了什么 / 怎么验」，未修复的一律标明原因，无静默跳过。
 
 | 编号 | 状态 | 处理内容与验证方式 |

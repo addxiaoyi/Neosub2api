@@ -97,5 +97,5 @@ export interface ProviderDescriptor {
 
 - `npm run build:export`：通过，`/design` 进入静态产物。
 - `/design`：1440 与 768 下 `document.documentElement.scrollWidth` 分别等于视口宽度（无横向滚动）；控制台 0 条错误；Tab 连续 16 次覆盖 10 个可聚焦控件。
-- `apps/control/tests`：`76 passed, 3 subtests passed`。
+- `apps/control/tests`：`76 passed, 3 subtests passed`（该数字为当次快照；当前基线为 `250 passed, 1 skipped, 3 subtests passed`）。
 - 截图：`docs/ux-shots/skeleton/design-1440.png`、`design-768.png`、`design-drawer-1440.png`。
