@@ -21,7 +21,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 CONTROL = REPO / "apps" / "control"
-PY = REPO / ".runtime" / "python" / "python.exe"
+# 起子进程就用当前解释器，不绑定 Windows 内嵌运行时的目录布局
+PY = sys.executable
 # FAST_PORT 是审计后约定的端口名；FAKE_PORT 为历史写法，保留兼容
 FAKE_PORT = int(os.getenv("UNIFIED_TEST_FAST_PORT", os.getenv("UNIFIED_TEST_FAKE_PORT", "8061")))
 CTRL_PORT = int(os.getenv("UNIFIED_TEST_CTRL_PORT", "8060"))

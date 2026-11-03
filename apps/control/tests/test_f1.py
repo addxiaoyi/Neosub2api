@@ -1,7 +1,7 @@
 """F1 核心逻辑单测：配额扣减、429、注册任务状态流转。
 
 运行：apps/control 目录下
-  .runtime/python/python.exe -m unittest discover -s tests -v
+  python -m unittest discover -s tests -v
 """
 
 import asyncio
