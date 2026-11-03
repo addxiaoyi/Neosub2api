@@ -434,6 +434,14 @@
     "unavailableNote": "Breakdown by model and key, upstream-reported stats and stats repair have no backing endpoints in this backend build, so they are unavailable."
   },
   "accounts": {
+    "lastUsedShort": "Last used {ago}",
+    "failCountShort": "{n} failures",
+    "providerReadyTitle": "Provider: {provider}, status: ready",
+    "providerNeedsConfigTitle": "Provider: {provider}, status: needs config ({requires})",
+    "providerNoRequires": "nothing else required",
+    "managed_sidecar": "This provider's accounts live in its own sidecar; this page only forwards models.",
+    "managed_quota": "This provider's accounts are managed in the account pool on the Quota page.",
+    "managed_external": "This provider is not wired into unified account management yet; its accounts live in its own console.",
     "title": "Accounts",
     "descCn": "Tencent CodeBuddy account pool: token validity, check-in and connectivity (auto-refresh every 30s)",
     "descGlobal": "Tencent CodeBuddy account pool (Global edition): token validity and connectivity (auto-refresh every 30s)",

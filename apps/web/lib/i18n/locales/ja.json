@@ -247,6 +247,14 @@
     "unavailableNote": "モデル別・キー別の内訳、上流公式統計、統計修復は、このバックエンドには対応するエンドポイントがないため利用できません。"
   },
   "accounts": {
+    "lastUsedShort": "最終使用 {ago}",
+    "failCountShort": "失敗 {n} 回",
+    "providerReadyTitle": "プロバイダー: {provider}、状態: 準備完了",
+    "providerNeedsConfigTitle": "プロバイダー: {provider}、状態: 設定待ち（{requires}）",
+    "providerNoRequires": "追加設定は不要",
+    "managed_sidecar": "このプロバイダーのアカウントは sidecar 自身で管理されます。本ページはモデル転送のみを担当します。",
+    "managed_quota": "このプロバイダーのアカウントは「クォータ」ページのアカウントプールで管理されます。",
+    "managed_external": "このプロバイダーは統一アカウント管理に未接続です。アカウントは独自のコンソールで管理されます。",
     "title": "アカウント管理",
     "descCn": "Tencent CodeBuddy アカウントプール: Token 有効期限・チェックイン・疎通確認（30 秒ごとに自動更新）",
     "descGlobal": "Tencent CodeBuddy アカウントプール（グローバル版）: Token 有効期限と疎通確認（30 秒ごとに自動更新）",

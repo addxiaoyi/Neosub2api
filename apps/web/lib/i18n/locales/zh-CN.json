@@ -410,6 +410,14 @@
     "unavailableNote": "按模型与按密钥的分解、上游官方统计、统计修复在当前后端版本没有对应接口，暂不可用。"
   },
   "accounts": {
+    "lastUsedShort": "最近使用 {ago}",
+    "failCountShort": "失败 {n} 次",
+    "providerReadyTitle": "服务商：{provider}，状态：就绪",
+    "providerNeedsConfigTitle": "服务商：{provider}，状态：待配置（{requires}）",
+    "providerNoRequires": "无需额外配置",
+    "managed_sidecar": "该服务商的账号由其 sidecar 自身管理，本页只负责模型转发。",
+    "managed_quota": "该服务商的账号在「配额」页的账号池中管理。",
+    "managed_external": "该服务商尚未接入统一账号管理，账号在其他控制台维护。",
     "title": "账号管理",
     "descCn": "腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性（每 30 秒自动刷新）",
     "descGlobal": "腾讯 CodeBuddy 账号池（国际版）：Token 有效期与连通性（每 30 秒自动刷新）",

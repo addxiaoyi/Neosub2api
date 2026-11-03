@@ -247,6 +247,14 @@
     "unavailableNote": "依模型與依金鑰的分解、上游官方統計、統計修復在目前後端版本沒有對應介面，暫不可用。"
   },
   "accounts": {
+    "lastUsedShort": "最近使用 {ago}",
+    "failCountShort": "失敗 {n} 次",
+    "providerReadyTitle": "服務商：{provider}，狀態：就緒",
+    "providerNeedsConfigTitle": "服務商：{provider}，狀態：待設定（{requires}）",
+    "providerNoRequires": "無需額外設定",
+    "managed_sidecar": "該服務商的帳號由其 sidecar 自身管理，本頁只負責模型轉發。",
+    "managed_quota": "該服務商的帳號在「配額」頁的帳號池中管理。",
+    "managed_external": "該服務商尚未接入統一帳號管理，帳號在其他控制台維護。",
     "title": "帳號管理",
     "descCn": "騰訊 CodeBuddy 帳號池：Token 有效期、簽到與連線測試（每 30 秒自動重新整理）",
     "descGlobal": "騰訊 CodeBuddy 帳號池（國際版）：Token 有效期與連線測試（每 30 秒自動重新整理）",
