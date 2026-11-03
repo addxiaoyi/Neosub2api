@@ -918,6 +918,57 @@
     "jsonInvalid": "JSON 형식이 올바르지 않습니다. 괄호와 쉼표를 확인하세요",
     "jsonNotObject": "JSON 객체여야 합니다. 예: { \"checkin_hours\": [9, 21] }",
     "modelMapSaved": "모델 매핑을 저장했습니다",
+    "tabRuntime": "실행 설정",
+    "runtime": {
+      "title": "실행 설정",
+      "desc": "게이트웨이 동작에 영향을 주는 비밀 키가 아닌 설정입니다. 데이터베이스에 저장되며 재시작 없이 즉시 적용됩니다.",
+      "fromDb": "사용자 지정",
+      "fromDefault": "기본값",
+      "fromInvalid": "DB 값이 잘못됨",
+      "defaultValue": "기본값 {value}",
+      "on": "켜짐",
+      "off": "꺼짐",
+      "saveFailed": "저장에 실패했습니다",
+      "saved": "실행 설정을 저장했습니다",
+      "savedHint": "재시작 없이 즉시 적용되었습니다",
+      "readFailed": "실행 설정을 불러오지 못했습니다",
+      "transferTitle": "내보내기 / 가져오기",
+      "transferDesc": "현재 실행 설정을 JSON으로 내보내거나 백업에서 복원합니다.",
+      "importHint": "쓰기 전에 모든 항목을 검증하며, 하나라도 잘못되면 전체 가져오기를 취소합니다. 성공 후 즉시 적용됩니다.",
+      "export": "JSON 내보내기",
+      "import": "JSON 가져오기",
+      "exported": "실행 설정을 내보냈습니다",
+      "exportDesc": "파일에는 키나 자격 증명이 포함되지 않습니다.",
+      "exportFailed": "내보내기에 실패했습니다",
+      "imported": "설정 {count}개를 가져왔습니다",
+      "importFailed": "가져오기에 실패했으며 아무것도 쓰지 않았습니다",
+      "badFile": "파일이 올바른 JSON 객체가 아닙니다",
+      "importErrors": "다음 설정이 검증을 통과하지 못했습니다",
+      "models_cache_ttl_sec": {
+        "label": "모델 목록 캐시 시간",
+        "desc": "업스트림 모델 목록을 이 프로세스에 캐시하는 초입니다. 0은 매번 다시 가져옵니다. 값을 키우면 업스트림 요청이 줄지만 새 모델은 캐시가 만료되어야 보입니다. 기본값 60."
+      },
+      "failure_window_sec": {
+        "label": "실패 제한 기간",
+        "desc": "API 키별 실패 요청을 집계하는 슬라이딩 기간(초)입니다. 이 값이나 '기간 내 실패 상한'이 0이면 제한이 꺼집니다. 기본값 60."
+      },
+      "failure_window_max": {
+        "label": "기간 내 실패 상한",
+        "desc": "하나의 API 키가 한 기간에 허용되는 실패 횟수이며, 초과하면 429를 반환합니다. 실패한 요청만 집계합니다. 기본값 20."
+      },
+      "model_fallback_first": {
+        "label": "미지원 모델 대체",
+        "desc": "꺼져 있으면 알 수 없는 모델 이름에 model_not_found를 반환합니다. 켜면 해당 엔드포인트를 제공하는 첫 번째 활성 업스트림으로 대체합니다. 기본값은 꺼짐."
+      },
+      "sse_max_seconds": {
+        "label": "스트리밍 최대 시간",
+        "desc": "스트리밍 응답 한 건의 최대 초입니다. 초과하면 중단하고 SSE 오류 프레임을 보냅니다. 기본값 600."
+      },
+      "session_ttl_sec": {
+        "label": "로그인 세션 유효 시간",
+        "desc": "관리 콘솔 세션의 유효 초입니다. 이후 새 로그인에만 적용되며 기존 세션은 원래 만료 시간을 유지합니다. 기본값 86400."
+      }
+    },
     "upstashUrlRequired": "Upstash 주소를 입력하세요",
     "upstashSaved": "Upstash 설정을 저장했습니다",
     "errNeedOneHour": "시각을 최소 하나 입력하세요",

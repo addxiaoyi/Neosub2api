@@ -918,6 +918,57 @@
     "jsonInvalid": "JSON 格式有誤，請檢查括號與逗號",
     "jsonNotObject": "需要是一個 JSON 物件，例如 { \"checkin_hours\": [9, 21] }",
     "modelMapSaved": "模型映射已儲存",
+    "tabRuntime": "執行參數",
+    "runtime": {
+      "title": "執行參數",
+      "desc": "影響閘道執行時行為的非金鑰設定，儲存在資料庫，改完立即生效，無需重新啟動。",
+      "fromDb": "已自訂",
+      "fromDefault": "預設",
+      "fromInvalid": "資料庫值無效",
+      "defaultValue": "預設 {value}",
+      "on": "開",
+      "off": "關",
+      "saveFailed": "儲存失敗",
+      "saved": "執行參數已儲存",
+      "savedHint": "新值已立即生效，無需重新啟動",
+      "readFailed": "讀取執行參數失敗",
+      "transferTitle": "匯出 / 匯入",
+      "transferDesc": "把目前執行參數匯出為 JSON，或從備份還原。",
+      "importHint": "匯入前會逐項驗證，任一項不合法則整批不寫入；成功匯入後立即生效。",
+      "export": "匯出 JSON",
+      "import": "匯入 JSON",
+      "exported": "已匯出執行參數",
+      "exportDesc": "檔案不含任何金鑰或憑證。",
+      "exportFailed": "匯出失敗",
+      "imported": "已匯入 {count} 項設定",
+      "importFailed": "匯入失敗，未寫入任何設定",
+      "badFile": "檔案內容不是合法的 JSON 物件",
+      "importErrors": "以下設定未通過驗證",
+      "models_cache_ttl_sec": {
+        "label": "模型目錄快取時長",
+        "desc": "上游模型清單在本程序內的快取秒數。0 表示每次呼叫都重新拉取；調大能減少上游請求，但新模型要等快取過期才會出現。預設 60。"
+      },
+      "failure_window_sec": {
+        "label": "失敗限流視窗",
+        "desc": "依 API Key 統計失敗請求的滑動視窗長度（秒）。與「視窗內失敗上限」任一為 0 即關閉限流。預設 60。"
+      },
+      "failure_window_max": {
+        "label": "視窗內失敗上限",
+        "desc": "同一 API Key 在一個視窗內允許的失敗次數，達到後回傳 429。只影響失敗請求。預設 20。"
+      },
+      "model_fallback_first": {
+        "label": "未知模型兜底",
+        "desc": "關閉時未知模型名稱直接回傳 model_not_found；開啟後回退到首家啟用且支援該端點的上游。預設關閉。"
+      },
+      "sse_max_seconds": {
+        "label": "串流請求時長上限",
+        "desc": "串流回應單一請求的最長秒數，逾時後中斷並補送 SSE 錯誤訊框。預設 600。"
+      },
+      "session_ttl_sec": {
+        "label": "登入工作階段有效期",
+        "desc": "管理端登入工作階段的有效秒數。只對之後的新登入生效，已登入工作階段維持原到期時間。預設 86400。"
+      }
+    },
     "upstashUrlRequired": "請填寫 Upstash 位址",
     "upstashSaved": "Upstash 設定已儲存",
     "errNeedOneHour": "請至少填一個時刻",

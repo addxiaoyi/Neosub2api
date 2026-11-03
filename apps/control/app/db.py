@@ -335,6 +335,15 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def put_settings(conn: sqlite3.Connection, items: dict[str, str]) -> None:
+    """批量写 settings 但不提交：调用方负责 commit / rollback，多项写入要么全成要么全退。"""
+    conn.executemany(
+        "INSERT INTO settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        list(items.items()),
+    )
+
+
 def get_json_setting(conn: sqlite3.Connection, key: str, default: Any) -> Any:
     raw = get_setting(conn, key)
     if raw is None:

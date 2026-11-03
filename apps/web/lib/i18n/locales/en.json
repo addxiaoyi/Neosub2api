@@ -1146,6 +1146,57 @@
     "jsonInvalid": "Invalid JSON — check the braces and commas",
     "jsonNotObject": "It must be a JSON object, for example { \"checkin_hours\": [9, 21] }",
     "modelMapSaved": "Model mapping saved",
+    "tabRuntime": "Runtime settings",
+    "runtime": {
+      "title": "Runtime settings",
+      "desc": "Non-secret settings that affect gateway behavior. Stored in the database and applied immediately, no restart required.",
+      "fromDb": "Customized",
+      "fromDefault": "Default",
+      "fromInvalid": "Invalid in DB",
+      "defaultValue": "Default: {value}",
+      "on": "On",
+      "off": "Off",
+      "saveFailed": "Save failed",
+      "saved": "Runtime settings saved",
+      "savedHint": "Applied immediately, no restart required",
+      "readFailed": "Failed to load runtime settings",
+      "transferTitle": "Export / import",
+      "transferDesc": "Export the current runtime settings as JSON, or restore them from a backup.",
+      "importHint": "Every item is validated before writing; one invalid value rejects the whole import. Successful imports apply immediately.",
+      "export": "Export JSON",
+      "import": "Import JSON",
+      "exported": "Runtime settings exported",
+      "exportDesc": "The file contains no secrets or credentials.",
+      "exportFailed": "Export failed",
+      "imported": "Imported {count} settings",
+      "importFailed": "Import failed; nothing was written",
+      "badFile": "The file is not a valid JSON object",
+      "importErrors": "These settings failed validation",
+      "models_cache_ttl_sec": {
+        "label": "Model catalog cache TTL",
+        "desc": "Seconds the upstream model list stays cached in this process. 0 refetches on every call; a larger value reduces upstream traffic but new models only appear after the cache expires. Default 60."
+      },
+      "failure_window_sec": {
+        "label": "Failure rate window",
+        "desc": "Sliding window (seconds) used to count failures per API key. Setting either this or the failure limit to 0 disables throttling. Default 60."
+      },
+      "failure_window_max": {
+        "label": "Failures per window",
+        "desc": "Failures allowed for one API key within a window before returning 429. Only failed requests count. Default 20."
+      },
+      "model_fallback_first": {
+        "label": "Unknown-model fallback",
+        "desc": "When off, unknown model names return model_not_found. When on, they fall back to the first enabled provider that serves the endpoint. Off by default."
+      },
+      "sse_max_seconds": {
+        "label": "Streaming request limit",
+        "desc": "Maximum seconds for one streaming response; after the timeout the stream is aborted and an SSE error frame is sent. Default 600."
+      },
+      "session_ttl_sec": {
+        "label": "Login session lifetime",
+        "desc": "Lifetime in seconds for admin sessions. Only new logins are affected; existing sessions keep their original expiry. Default 86400."
+      }
+    },
     "upstashUrlRequired": "Enter the Upstash URL",
     "upstashSaved": "Upstash configuration saved",
     "errNeedOneHour": "Enter at least one hour",
