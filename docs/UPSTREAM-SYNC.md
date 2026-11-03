@@ -1,6 +1,6 @@
 # 上游同步流程
 
-这份文档回答一个问题：`scripts/check-upstreams.ps1` 报出「有更新」之后，接下来做什么。
+这份文档回答一个问题：巡检脚本报出「有更新」之后，接下来做什么。
 
 上游清单见 [`upstreams/upstreams.yaml`](../upstreams/upstreams.yaml)，字段说明见 [`upstreams/README.md`](../upstreams/README.md)。
 
@@ -15,9 +15,34 @@
 
 | 来源 | 频率 | 说明 |
 | --- | --- | --- |
-| `.github/workflows/upstream-watch.yml` | 每周一 09:00（北京时间） | 有变化时开 issue 或追加评论，同时写 job summary；**不会让构建失败**。 |
-| 手动 | 需要时 | `powershell -File scripts/check-upstreams.ps1` |
+| `.github/workflows/upstream-sync.yml` | 每周一 02:00 UTC（北京时间 10:00） | 跑 `scripts/check_upstreams.py`，有 `updated` / `error` 时开 issue 或追加评论，同时写 job summary。**不提交清单、不让构建失败。** |
+| `.github/workflows/upstream-watch.yml` | 每周一 09:00（北京时间） | 旧链路（PowerShell + `git ls-remote`），保留作交叉核对。 |
+| 手动 | 需要时 | `python scripts/check_upstreams.py` 或 `powershell -File scripts/check-upstreams.ps1` |
 | 发版前 | 每次发布 | 至少确认清单里没有长期 `outdated` 的条目。 |
+
+## 巡检脚本 `scripts/check_upstreams.py`
+
+只用 Python 标准库（`urllib`），走 GitHub REST API：先取 `GET /repos/{owner}/{name}`（默认分支、`archived` / `disabled`、改名检测），再取 `GET /repos/{owner}/{name}/commits/{branch}`（HEAD 的 sha 与提交时间）。
+
+```bash
+python scripts/check_upstreams.py            # 文本输出
+python scripts/check_upstreams.py --json     # 单行 JSON，CI 消费
+python scripts/check_upstreams.py --update   # 回写 checked_at；不动 analyzed_commit
+```
+
+三种状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `unchanged` | HEAD 与 `analyzed_commit` 一致；或 HEAD 已偏移但提交早于 `checked_at`（已在巡检中见过、基线刻意未推进）。 |
+| `updated` | HEAD 与基线不一致，且提交时间不早于 `checked_at` → 出现新 commit。 |
+| `error` | 404（删除 / 改名 / 私有化）、改名为别的仓库、`archived` / `disabled`、限流、网络失败。 |
+
+退出码：`0` 全部 `unchanged`；`1` 有 `updated`；`2` 有 `error`（可能同时有 `updated`）。单家失败不影响其余仓库，最后按汇总给码。
+
+匿名调用是 60 次/小时（每家 2 次请求，11 家共 22 次）；设置 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量即自动带上，脚本不回显、不写盘。
+
+`--update` 只改 `checked_at`（逐行正则替换，保留缩进、行序、换行符与 BOM），**不推 `analyzed_commit`**——基线推进仍由 `check-upstreams.ps1 -Update` 或人工在读完新 commit 后完成。
 
 ## 第一步：判断改动性质
 
@@ -150,25 +175,31 @@ powershell -File scripts/check-upstreams.ps1 -Update
 
 ### 2026-11-03
 
-检查方式：`powershell -File scripts\check-upstreams.ps1 -Json` 取默认分支 HEAD（全部 11 家由 `git ls-remote` 成功返回）；`gh api repos/<repo>` 读 `archived` / `disabled` / `license`；唯一偏移仓库在 `%TEMP%` 浅克隆后只 diff 协议相关文件。
+当天做了两次巡检：上午用 `powershell -File scripts\check-upstreams.ps1 -Json`（`git ls-remote`），下午用 `python scripts/check_upstreams.py`（GitHub API）。下表是下午那次的结果，11 家全部可访问，`archived=false`、`disabled=false`，无 404 / 改名 / 私有化。上午 08:00Z 之后又有三家上游落了新提交，所以与上午那次相比多了 2 家偏移。
 
-| 仓库 | 基线 → 远端 HEAD | 判定 | 依据 / 影响 |
+| 仓库 | 基线 → 远端 HEAD | 状态 | 依据 / 影响 |
 | --- | --- | --- | --- |
-| `addxiaoyi/codebuddy2api` | `92b8b91` → 同值 | 协议未变 | HEAD 未移动，适配器无需改动。 |
-| `czg86389-hub/muse2api` | `1cd0168` → 同值 | 协议未变 | HEAD 未移动。 |
-| `kaibush/grok-register` | `a5eddc2` → `0cca5cb` | 协议未变 | 唯一偏移。diff 仅 `.github/data/stars-history.json` 与 `docs/images/stars-trend-{dark,light}.svg`（stars 527→528），无代码、路由、许可证改动；`grok-register` 无推理协议，基线不推进。 |
-| `jasonxu114514/opencode2api` | `58f5667` → 同值 | 协议未变 | HEAD 未移动；GPL-3.0 隔离约束不变。 |
-| `addxiaoyi/gptGrok2api` | `0335d62` → 同值 | 协议未变 | HEAD 未移动。 |
-| `addxiaoyi/ZCode2api` | `25c57e6` → 同值 | 协议未变 | HEAD 未移动。 |
-| `Wei-Shaw/sub2api` | `4a4a83e` → 同值 | 协议未变 | HEAD 未移动；LGPL-3.0 隔离约束不变。 |
-| `JeffHu0912/trae2api` | `ec20c08` → 同值 | 协议未变 | HEAD 未移动。 |
-| `ColudAI/Deepseek2Go` | `3d9f10c` → 同值 | 协议未变 | HEAD 未移动；仍无 LICENSE。 |
-| `NextAgentX/qoder-trae-workbuddy-switch` | `93d873c` → 同值 | 协议未变 | HEAD 未移动；LICENSE 首行仍为 PolyForm Noncommercial 1.0.0。 |
-| `AiXiaoc/codar2api` | `d7f5024` → 同值 | 协议未变 | HEAD 未移动。 |
+| `addxiaoyi/codebuddy2api` | `92b8b91` → 同值 | unchanged | HEAD 未移动（2026-09-25T18:35:40Z）。 |
+| `czg86389-hub/muse2api` | `1cd0168` → 同值 | unchanged | HEAD 未移动（2026-11-02T10:26:22Z）。 |
+| `kaibush/grok-register` | `a5eddc2` → `5521150` | updated | 偏移 2 个 commit，文件仅 `.github/data/stars-history.json` 与 `docs/images/stars-trend-{dark,light}.svg`（stars 统计）。无代码、无路由、无协议；基线不推进。 |
+| `jasonxu114514/opencode2api` | `58f5667` → 同值 | unchanged | HEAD 未移动（2026-10-29T20:16:18Z）；GPL-3.0 隔离约束不变。 |
+| `addxiaoyi/gptGrok2api` | `0335d62` → 同值 | unchanged | HEAD 未移动（2026-09-28T07:39:48Z）。 |
+| `addxiaoyi/ZCode2api` | `25c57e6` → 同值 | unchanged | HEAD 未移动（2026-10-31T05:56:16Z）。 |
+| `Wei-Shaw/sub2api` | `4a4a83e` → 同值 | unchanged | HEAD 未移动（2026-11-02T03:17:44Z）；LGPL-3.0 隔离约束不变。 |
+| `JeffHu0912/trae2api` | `ec20c08` → 同值 | unchanged | HEAD 未移动（2026-09-08T03:35:49Z）。 |
+| `ColudAI/Deepseek2Go` | `3d9f10c` → 同值 | unchanged | 默认分支为 `master`，HEAD 未移动（2025-09-15T06:56:06Z）；仍无 LICENSE。 |
+| `NextAgentX/qoder-trae-workbuddy-switch` | `93d873c` → `930d149` | updated | 12 个 commit（2026-11-03T07:12:17Z）。协议侧只新增观测：`protocol/usage_tap.rs` 的 `UsageReport` 加 `cached_tokens`，`routes/{chat,messages}.rs` 仅补该日志字段；端点、鉴权头、请求/响应结构未变。sidecar 无需升级，适配器不用改。 |
+| `AiXiaoc/codar2api` | `d7f5024` → `ba05367` | updated | v0.1.4 单次发布提交（2026-11-03T04:14:53Z）。改动集中在 `internal/gateway/`：compat 身份前缀、`proxy_retry`、`request_blocklist`、账号导入、管理面板与测试；未见对外端点/响应结构变化。跟进方案见下。 |
 
-**协议变化：0 家。仓库异常：0 家。无法检查：0 家。** 11 家 `archived=false`、`disabled=false`。
+**协议变化：0 家。仓库异常：0 家（无 404 / 改名 / 私有化）。无法检查：0 家。** 结果：unchanged 8 / updated 3 / error 0，脚本退出码 `1`。
 
-许可证：本次巡检未发现任何许可证变更。GitHub API 对各仓报告的 `license` 与清单一致（MIT / GPL-3.0 / LGPL-3.0 / `none`）；两处需要人工解释：
+待人工确认（巡检不改清单地址，也不推基线）：
+
+- `AiXiaoc/codar2api` 是 sidecar 形态，是否把 `providers/codar2api` 的获取版本刷到 v0.1.4，需要先看它 release notes 里有没有启动参数/端口变化；本次 diff 里 `Dockerfile` 只改了 `VERSION` 注入方式，默认端口与入口未变。
+- `kaibush/grok-register` 的 `notes` 目前仍写「HEAD 已到 0cca5cb」，实际已到 `5521150`；这不影响协议判断，下次跟进时顺手改掉。
+- `opencode2api` 本次实跑有一次 TLS `UNEXPECTED_EOF`（重试后成功），属网络抖动，非上游问题。
+
+许可证：本次巡检未重新读取 `LICENSE`，沿用当天上午 `gh api repos/<repo>` 的结论——未发现任何许可证变更，GitHub 报告的 `license` 与清单一致（MIT / GPL-3.0 / LGPL-3.0 / `none`）。两处需要人工解释：
 
 - `NextAgentX/qoder-trae-workbuddy-switch` 在 GitHub API 里是 `NOASSERTION`（GitHub 的许可证识别器不认 PolyForm），以仓内 `LICENSE` 文件首行为准，仍是 **PolyForm Noncommercial 1.0.0**，商用限制不变。
 - `ColudAI/Deepseek2Go` 无 `LICENSE` 文件（raw 取回 404），仍是默认 All Rights Reserved，只允许 sidecar 运行。
