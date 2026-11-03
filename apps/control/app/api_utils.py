@@ -58,6 +58,19 @@ def db_of(request: Request):
     return request.app.state.db.connect()
 
 
+def log_success_sql() -> str:
+    """request_logs 的成功口径：2xx 且没有 error 事件。
+
+    流式中途断流时 HTTP 层已经出了首帧、状态码只能是 200，只能靠 error 列区分。
+    """
+    return "status < 400 AND COALESCE(error, '') = ''"
+
+
+def log_failure_sql() -> str:
+    """失败口径与 log_success_sql 互补：4xx/5xx，或 2xx 但带 error。"""
+    return "status >= 400 OR COALESCE(error, '') <> ''"
+
+
 def public_account(row: Any) -> dict[str, Any]:
     expires_at = int(row["expires_at"] or 0)
     remain = max(expires_at - now(), 0) if expires_at else 0

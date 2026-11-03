@@ -2,8 +2,9 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +14,7 @@ from .adapters.base import ProviderError
 from .api_utils import mask_access_args
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
+from .gateway_errors import GatewayError
 from .registry import ProviderRegistry
 from .routers import accounts, auth, grok, keys, models, providers, settings as settings_router, stats, sub2api, v1
 from .security import hash_password, verify_password
@@ -157,6 +159,33 @@ def create_app() -> FastAPI:
     @app.exception_handler(ProviderError)
     async def provider_error_handler(request: Request, exc: ProviderError):
         return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
+
+    @app.exception_handler(GatewayError)
+    async def gateway_error_handler(request: Request, exc: GatewayError):
+        """/v1 错误按端点协议出形状：messages 走 Anthropic，其余走 OpenAI。"""
+        payload = (
+            exc.anthropic_payload()
+            if request.url.path.startswith("/v1/messages")
+            else exc.openai_payload()
+        )
+        return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(HTTPException)
+    async def http_error_handler(request: Request, exc: HTTPException):
+        """管理面保持 {detail}；403 额外给结构化原因，前端不必再猜「为什么被拒」。"""
+        payload: dict[str, Any] = {"detail": exc.detail}
+        if exc.status_code == 403:
+            error: dict[str, Any] = {
+                "type": "permission_denied",
+                "code": "insufficient_role",
+                "message": exc.detail if isinstance(exc.detail, str) else "权限不足",
+                "required_role": getattr(exc, "required_role", "admin"),
+            }
+            role = getattr(exc, "role", None)
+            if role:
+                error["role"] = role
+            payload["error"] = error
+        return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
     for module in (auth, providers, accounts, keys, models, stats, settings_router, sub2api, grok, v1):
         app.include_router(module.router)

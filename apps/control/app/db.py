@@ -178,6 +178,8 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
             _ensure_column(conn, "request_logs", "key_id", "INTEGER")
             _ensure_column(conn, "request_logs", "key_name", "TEXT NOT NULL DEFAULT ''")
+            # 失败限流按 (key_id, ts) 聚合 request_logs，索引让窗口查询不退化成全表扫描
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_key_ts ON request_logs(key_id, ts)")
             # F2 缺陷修复：空池拒绝也要留痕，给流水加可空的原因字段
             _ensure_column(conn, "sub2_ledger", "reason", "TEXT")
             # M2 起 codebuddy 默认指向管理端 7864（M1 默认是数据面 7863），只迁移没动过的存量

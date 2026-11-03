@@ -2,7 +2,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, Request
 
-from ..api_utils import now
+from ..api_utils import log_success_sql, now
 from ..security import current_user
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -39,7 +39,7 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
         today = _day_start()
         week = _day_start(6)
         rows = conn.execute(
-            "SELECT ts, status, prompt_tokens, completion_tokens, model FROM request_logs WHERE ts >= ?",
+            "SELECT ts, status, error, prompt_tokens, completion_tokens, model FROM request_logs WHERE ts >= ?",
             (week,),
         ).fetchall()
         total = conn.execute(
@@ -48,7 +48,9 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
         ).fetchone()
         for row in rows:
             tokens = int(row["prompt_tokens"] or 0) + int(row["completion_tokens"] or 0)
-            is_ok = row["status"] < 400
+            # 成功要同时看 error 列：流式中途断流 HTTP 状态还是 200
+            is_ok = row["status"] < 400 and not (row["error"] or "").strip()
+            is_client_error = 400 <= row["status"] < 500
             if is_ok:
                 result["week_requests"] += 1
                 result["week_tokens"] += tokens
@@ -56,12 +58,12 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
                 if is_ok:
                     result["today_requests"] += 1
                     result["today_tokens"] += tokens
-                elif row["status"] < 500:
+                elif is_client_error:
                     result["failures"]["today_4xx"] += 1
                 else:
                     result["failures"]["today_5xx"] += 1
             if not is_ok:
-                if row["status"] < 500:
+                if is_client_error:
                     result["failures"]["week_4xx"] += 1
                 else:
                     result["failures"]["week_5xx"] += 1
@@ -71,15 +73,15 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
             conn.execute("SELECT COUNT(*) AS n FROM api_keys WHERE enabled = 1").fetchone()["n"] or 0
         )
         top = conn.execute(
-            "SELECT model, COUNT(*) AS n FROM request_logs "
-            "WHERE ts >= ? AND model IS NOT NULL AND status < 400 "
-            "GROUP BY model ORDER BY n DESC LIMIT 1",
+            f"SELECT model, COUNT(*) AS n FROM request_logs "
+            f"WHERE ts >= ? AND model IS NOT NULL AND {log_success_sql()} "
+            f"GROUP BY model ORDER BY n DESC LIMIT 1",
             (week,),
         ).fetchone()
         result["top_model"] = top["model"] if top else None
         result["usage_health"]["logs_today"] = int(
             conn.execute(
-                "SELECT COUNT(*) AS n FROM request_logs WHERE ts >= ? AND status < 400",
+                f"SELECT COUNT(*) AS n FROM request_logs WHERE ts >= ? AND {log_success_sql()}",
                 (today,),
             ).fetchone()["n"]
             or 0
@@ -112,7 +114,7 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
             bucket = buckets.get(label)
             if bucket is None:
                 continue
-            if row["status"] < 400:
+            if row["status"] < 400 and not (row["error"] or "").strip():
                 bucket["requests"] += 1
                 bucket["prompt_tokens"] += int(row["prompt_tokens"] or 0)
                 bucket["completion_tokens"] += int(row["completion_tokens"] or 0)

@@ -8,9 +8,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..adapters.base import ProviderError
-from ..api_utils import now, parse_bool
+from ..adapters.stream_util import DONE, sse_error
+from ..api_utils import mask_text, now, parse_bool
 from ..billing import extract_usage, record_usage, totals, usage_from_stream, usage_in_chunk
 from ..db import get_json_setting
+from ..gateway_errors import GatewayError, from_provider_error, from_upstream_reply
 
 router = APIRouter(tags=["gateway"])
 
@@ -41,7 +43,9 @@ def _gateway_key(request: Request) -> dict[str, Any]:
     if not header:
         if _anonymous_allowed(request):
             return {"id": None, "name": "anonymous"}
-        raise HTTPException(status_code=401, detail="缺少 Authorization: Bearer <key>")
+        raise GatewayError(
+            401, "缺少 Authorization: Bearer <key>", type_="authentication_error", code="invalid_api_key"
+        )
     token = header[7:].strip() if header.lower().startswith("bearer ") else header
     digest = hashlib.sha256(token.encode()).hexdigest()
     conn = request.app.state.db.connect()
@@ -50,7 +54,7 @@ def _gateway_key(request: Request) -> dict[str, Any]:
             "SELECT id, name FROM api_keys WHERE key_hash = ? AND enabled = 1", (digest,)
         ).fetchone()
         if row is None:
-            raise HTTPException(status_code=401, detail="无效的 API Key")
+            raise GatewayError(401, "无效的 API Key", type_="authentication_error", code="invalid_api_key")
         conn.execute(
             "UPDATE api_keys SET last_used_at = ? WHERE id = ? "
             "AND (last_used_at IS NULL OR last_used_at < ?)",
@@ -114,22 +118,73 @@ async def _json_payload(request: Request) -> dict[str, Any]:
     try:
         payload = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"请求体不是合法 JSON：{exc}") from exc
+        raise GatewayError(
+            400, f"请求体不是合法 JSON：{exc}", type_="invalid_request_error", code="invalid_json"
+        ) from exc
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+        raise GatewayError(400, "请求体必须是 JSON 对象", type_="invalid_request_error", code="invalid_json")
     return payload
 
 
-def _resolve(request: Request, payload: dict[str, Any], capability: str):
+def _stream_error_frame(capability: str, err: GatewayError) -> bytes:
+    """中途失败补错误帧，形状跟着端点协议走。"""
+    if capability == "messages":
+        return sse_error(err.anthropic_payload(), event="error")
+    if capability == "responses":
+        # Responses 的流内错误事件：event: error + {type, code, message, param}
+        event = {
+            "type": "error",
+            "code": err.error["code"],
+            "message": err.error["message"],
+            "param": None,
+            **err.extra_fields(),
+        }
+        return sse_error(event, event="error")
+    frame = sse_error({"error": err.error})
+    return frame + DONE
+
+
+def _stream_failure(provider: str, exc: Exception) -> GatewayError:
+    if isinstance(exc, ProviderError):
+        return from_provider_error(exc, provider)
+    return GatewayError(
+        502,
+        f"上游流式中断：{mask_text(str(exc))}",
+        type_="api_error",
+        code="upstream_stream_broken",
+        provider=provider,
+    )
+
+
+async def _drain_reply(reply: Any, limit: int = 8192) -> bytes:
+    """读掉上游错误体（只留前 8KB 解析），避免连接悬挂。"""
+    body = b""
+    try:
+        async for chunk in reply.iter_bytes():
+            body += chunk
+            if len(body) >= limit:
+                break
+    except Exception:  # noqa: BLE001 - 错误体读失败不影响错误映射
+        pass
+    return body[:limit]
+
+
+async def _resolve(request: Request, payload: dict[str, Any], capability: str):
     model = str(payload.get("model") or "").strip()
     if not model:
-        raise HTTPException(status_code=400, detail="请求体缺少 model")
+        raise GatewayError(400, "请求体缺少 model", type_="invalid_request_error", code="missing_model")
     try:
         adapter, effective = request.app.state.registry.resolve(model, request.headers.get("x-provider"))
     except ProviderError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     if not adapter.spec.capabilities.get(capability):
-        raise HTTPException(status_code=501, detail=f"{adapter.spec.name} 不支持 {capability}")
+        raise GatewayError(
+            501,
+            f"{adapter.spec.name} 不支持 {capability}",
+            type_="invalid_request_error",
+            code="capability_unsupported",
+            provider=adapter.spec.id,
+        )
     return adapter, effective
 
 
@@ -154,9 +209,22 @@ async def _proxy(request: Request, capability: str):
             latency_ms=int((time.perf_counter() - started) * 1000),
             stream=stream, error=exc.message,
         )
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        raise from_provider_error(exc, adapter.spec.id) from exc
 
     if stream:
+        if reply.status_code >= 400:
+            # 上游直接拒绝流式请求时不要吐一个"看起来是 SSE"的 JSON 错误体
+            raw = await _drain_reply(reply)
+            await _record_safe(
+                request, key=key, provider=adapter.spec.id, model=effective,
+                status=reply.status_code, usage=None,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                stream=True, error=raw[:200].decode("utf-8", "ignore"), pricing=pricing,
+            )
+            raise from_upstream_reply(
+                status_code=reply.status_code, body=raw, headers=reply.headers, provider=adapter.spec.id
+            )
+
         async def body_stream():
             error: str | None = None
             usage_chunks: list[bytes] = []
@@ -167,6 +235,10 @@ async def _proxy(request: Request, capability: str):
                 async for chunk in source:
                     if time.monotonic() > deadline:
                         error = f"流式响应超过 {max_seconds}s 上限，已中断"
+                        yield _stream_error_frame(capability, GatewayError(
+                            504, error, type_="api_error", code="stream_timeout",
+                            provider=adapter.spec.id,
+                        ))
                         break
                     # 先解析 SSE data 再判断有没有 usage，避免正文里出现 usage 字样就误攒
                     if len(usage_chunks) < 32 and usage_in_chunk(chunk):
@@ -174,7 +246,8 @@ async def _proxy(request: Request, capability: str):
                     yield chunk
             except Exception as exc:  # 流中断要留痕，否则日志里看不到
                 error = str(exc)
-                raise
+                # 半路断流不能直接截断：按 SSE 约定补错误事件，调用方才知道这句没说完
+                yield _stream_error_frame(capability, _stream_failure(adapter.spec.id, exc))
             finally:
                 try:
                     await source.aclose()  # 超时 break 时也要显式释放上游连接
@@ -194,6 +267,19 @@ async def _proxy(request: Request, capability: str):
         )
 
     body = reply.body or b""
+    if reply.status_code >= 400:
+        await _record_safe(
+            request, key=key, provider=adapter.spec.id, model=effective,
+            status=reply.status_code, usage=None,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            stream=False,
+            error=body[:200].decode("utf-8", "ignore"),
+            pricing=pricing,
+        )
+        raise from_upstream_reply(
+            status_code=reply.status_code, body=body, headers=reply.headers, provider=adapter.spec.id
+        )
+
     usage = extract_usage(body)
     await _record_safe(
         request, key=key, provider=adapter.spec.id, model=effective,

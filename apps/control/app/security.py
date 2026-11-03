@@ -90,6 +90,15 @@ def current_user(request: Request) -> dict[str, Any]:
     return user
 
 
+class PermissionDenied(HTTPException):
+    """403 权限失败：除 detail 外带结构化原因，前端可据 error.required_role 引导升权。"""
+
+    def __init__(self, message: str, *, role: str | None = None, required_role: str = "admin"):
+        super().__init__(status_code=403, detail=message)
+        self.role = role
+        self.required_role = required_role
+
+
 def admin_user(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
