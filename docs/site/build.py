@@ -34,6 +34,7 @@ GROUPS = [
         "docs": [
             {"path": "README.md", "slug": "overview", "label": "项目总览"},
             {"path": "docs/GETTING-STARTED.md", "slug": "getting-started", "label": "从零启动"},
+            {"path": "docs/examples.md", "slug": "examples", "label": "调用示例（三协议）"},
             {"path": "CHANGELOG.md", "slug": "changelog", "label": "更新日志"},
         ],
     },
@@ -84,7 +85,9 @@ GROUPS = [
             {"path": "docs/TROUBLESHOOTING.md", "slug": "troubleshooting", "label": "故障排查"},
             {"path": "docs/UPSTREAM-SYNC.md", "slug": "upstream-sync", "label": "上游同步流程"},
             {"path": "upstreams/README.md", "slug": "upstreams", "label": "上游追踪清单"},
+            {"path": "docs/unification-audit.md", "slug": "unification-audit", "label": "全站一致性审计"},
             {"path": "docs/security-audit.md", "slug": "security-audit", "label": "安全与合规审计", "severity": "audit"},
+            {"path": "docs/compliance.md", "slug": "compliance", "label": "许可证与合规边界"},
             {"path": "THIRD-PARTY-NOTICES.md", "slug": "third-party-notices", "label": "第三方许可证"},
         ],
     },
@@ -161,6 +164,7 @@ class Markdown:
         self.doc_dir = posixpath.dirname(doc_path)
         self.slug = slug
         self.docs_by_path = docs_by_path
+        self.docs_by_lower = {key.lower(): slug for key, slug in docs_by_path.items()}
         self.severity = severity
         self.base_dir = base_dir
         self.headings: list[tuple[int, str, str]] = []
@@ -468,6 +472,13 @@ class Markdown:
             target_file = Path(local)
             if not target_file.exists():
                 self.warnings.append(f"broken link in {self.doc_path}: {dest}")
+            # 写成 file:/// 的仓内 Markdown 也要落到站内锚点，否则静态托管下是 .md 404
+            rel = doc_rel_path(target_file, self.repo_root)
+            slug = self.docs_by_path.get(rel) if rel else None
+            if slug is None and rel:
+                slug = self.docs_by_lower.get(rel.lower())
+            if slug:
+                return f"#doc-{slug}"
             return self.local_link(target_file, frag, dest)
         path, _, frag = dest.partition("#")
         if path == "":
@@ -475,11 +486,15 @@ class Markdown:
 
         target = posixpath.normpath(posixpath.join(self.doc_dir, urllib.parse.unquote(path)))
         if target.lower().endswith(".md"):
-            if target in self.docs_by_path:
-                return f"#doc-{self.docs_by_path[target]}"
+            slug = self.docs_by_path.get(target) or self.docs_by_lower.get(target.lower())
+            if slug:
+                return f"#doc-{slug}"
             abs_md = self.repo_root / target
             if not abs_md.exists():
                 self.warnings.append(f"broken md link in {self.doc_path}: {dest}")
+            else:
+                # 仓内 Markdown 但没进清单：站点不会生成这一页，只剩原始 .md 文件链接
+                self.warnings.append(f"markdown link not in site manifest: {target} (from {self.doc_path})")
             return self.local_link(abs_md, frag, dest)
 
         abs_path = self.repo_root / target
@@ -561,6 +576,14 @@ def parse_bracket_link(text: str, start: int):
     if title:
         dest = dest[:title.start()].strip()
     return text[start + 1:close], dest, end + 1
+
+
+def doc_rel_path(path: Path, repo_root: Path) -> str | None:
+    """仓内绝对路径 → 仓库根相对的 posix 路径；仓外或无法解析时返回 None。"""
+    try:
+        return Path(path).resolve().relative_to(repo_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
 
 
 def repo_relative_url(path: Path, repo_root: Path, base_dir: Path) -> str | None:
@@ -677,6 +700,9 @@ def build(repo_root: Path, out_path: Path) -> int:
         rel = md.relative_to(repo_root).as_posix()
         if rel.startswith(("apps/", "providers/", "node_modules/", ".runtime/", "docs/site/", "docs/ux-shots/")):
             continue
+        # 隐藏目录（.git / .github / .trae 等）不是站点内容，扫进来只会制造误报
+        if any(part.startswith(".") for part in rel.split("/")[:-1]):
+            continue
         if rel not in manifest_paths:
             warnings.append(f"markdown not in site manifest: {rel}")
 
@@ -701,7 +727,8 @@ def build(repo_root: Path, out_path: Path) -> int:
     try:
         shown = out_path.resolve().relative_to(repo_root.resolve()).as_posix()
     except ValueError:
-        shown = str(out_path)
+        # --out 指到仓外时只打印文件名，避免把本机路径写进构建日志
+        shown = out_path.name
     print(f"[build] wrote {shown} ({out_path.stat().st_size / 1024:.1f} KB)")
     if warnings:
         seen = []

@@ -160,6 +160,7 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 
 - `model` 的解析顺序：`x-provider` 请求头显式指定 → `provider前缀/模型名`（如 `opencode/gpt-4o-mini`）→ 「设置」页的模型别名表 → 在已启用 provider 的模型目录里按同名 `id` 自动匹配（唯一命中直接走，多家命中 400 `ambiguous_model`，无命中 404）。只写模型名也能路由，前提是该 `id` 在 `/api/models` 里唯一。
 - 流式请求把 `"stream": true` 打开即可，SSE 原样直通。
+- 三个协议的完整示例（curl / Python / Node，流式与非流式）见 [examples.md](examples.md)。
 
 验证结果落在哪：仪表盘的统计来自 `request_logs`（次数/token/延迟/状态码），`usage_records` 另存上游返回的原始 usage JSON。日志是旁路记录，不影响响应。
 

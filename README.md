@@ -90,7 +90,8 @@ npm run build:export        # 产出 apps/web/out，由控制面直接托管
 ```
 
 构建后控制面会把 `apps/web/out` 挂到 `/`，浏览器打开 <http://127.0.0.1:8010> 即可
-（登录 → 仪表盘 / 账号 / 服务商 / 设置）。
+（登录 → 仪表盘 / 账号 / 服务商 / 设置）。要直接拿客户端调通 `/v1/*`，照
+[docs/examples.md](docs/examples.md) 的三个协议示例抄（curl / Python / Node，流式与非流式齐全）。
 
 > 本机实测注意：这台机器的系统 Python 3.10 标准库已损坏（缺 `encodings`），
 > 因此验证时用的是仓库内 `.runtime/python`（3.12 embed 包，已 gitignore）。

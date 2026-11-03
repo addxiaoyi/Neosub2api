@@ -29,8 +29,8 @@ powershell -ExecutionPolicy Bypass -File docs\site\build.ps1
 其他参数：
 
 ```powershell
-# 指定仓库根与输出位置
-.\.runtime\python\python.exe docs\site\build.py --repo-root D:\path\to\unified-2api --out D:\tmp\index.html
+# 指定仓库根与输出位置（输出到仓外也能构建，只是仓内文件链接会失去相对关系）
+.\.runtime\python\python.exe docs\site\build.py --repo-root <仓库根> --out <输出路径>\index.html
 ```
 
 构建成功时输出文档数、分组数与文件大小；有警告（坏了链接、未收录的 Markdown）会打印到 stderr，但站点仍会生成。
@@ -52,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File docs\site\build.ps1
    - 需要严重度色块的文档加 `"severity": "audit"`（critical/high/medium/low）或 `"severity": "ux"`（blocker/major/minor）。
 3. 重新运行 `build.ps1`。
 
-文档之间的 `.md` 链接会自动改写成站内锚点；指向源码、YAML、图片等仓内文件的链接会转成**相对仓库的路径**（如 `../../apps/control/app/adapters/base.py`），生成物里不会出现本机绝对路径（`file:///…`）。
+文档之间的 `.md` 链接会自动改写成站内锚点；指向源码、YAML、图片等仓内文件的链接会转成**相对仓库的路径**（如 `../../apps/control/app/adapters/base.py`），生成物里不会出现本机绝对路径（`file:///…`）。写成 `file:///…` 的仓内 Markdown 链接同样会落到站内锚点；`.md` 文件存在但没进 `GROUPS` 时会给出 warning，避免留下静态托管下 404 的裸 `.md` 链接。
 
 ## 已知限制
 
@@ -61,5 +61,5 @@ powershell -ExecutionPolicy Bypass -File docs\site\build.ps1
 - **无语法高亮**：代码块保留原文与换行，只有等宽字体与底色。
 - **仓内文件链接是相对路径**：`index.html` 必须留在 `docs/site/`（或保持与仓库的层级关系）才能打开源码/图片链接；单独把 HTML 拷到别处时这些链接会失效。`https://` 链接保留原样，点击才会联网，站点本身加载不联网。
 - **未内嵌的资产**：`docs/design/prototype.html` 与 `docs/ux-shots/*.png` 不进入站点，只在正文里以相对路径链接。
-- **单文件体积**：目前约 880 KB（40 篇），全部正文内嵌，换目录或加文档会线性增长。
+- **单文件体积**：目前约 1074 KB（43 篇），全部正文内嵌，换目录或加文档会线性增长。
 - **服务商契约篇数**：`docs/providers/*.md` 按实际文件收录；未进清单的篇目会在构建时以 warning 列出。
