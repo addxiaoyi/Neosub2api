@@ -15,7 +15,7 @@
 | 已有自研配额范式：`QuotaStore.charge` 在**同一事务**里 `UPDATE quota_used = quota_used + ?`（账号、分组各一次）+ 写 `sub2_ledger`，单位是 token 数不是金额；`require_group` 在准入侧 429 | [sub2api_store.py](file:///d:/qwq/项目/unified-2api/apps/control/app/adapters/sub2api_store.py) `charge / require_group / pick_account_credentials` |
 | sub2api 域扣减失败被吞掉（不改变已返回响应），靠流水对账兜底 | [sub2api.py](file:///d:/qwq/项目/unified-2api/apps/control/app/adapters/sub2api.py) `Sub2ApiAdapter._charge` |
 | 密钥只有 `id/name/key_hash/prefix/enabled/created_at/last_used_at`，无配额、无模型白名单（注释明确留给 M3） | [keys.py](file:///d:/qwq/项目/unified-2api/apps/control/app/routers/keys.py) 模块 docstring；API-REFERENCE §6 |
-| 统计的 `today_credit/week_credit/total_credit` 恒 0，等 M3 填 | [stats.py](file:///d:/qwq/项目/unified-2api/apps/control/app/routers/stats.py) `_zero_summary`；API-REFERENCE §7 |
+| 统计的 `today_credit/week_credit/total_credit` 已由 `billing_ledger` 的 `SUM(billed_micro)` 填充（M3-1 已落地，展示层换算美元，见 API-REFERENCE §7） | [stats.py](file:///d:/qwq/项目/unified-2api/apps/control/app/routers/stats.py) `summary`；API-REFERENCE §7 |
 | 持久化 = 单文件 SQLite，`connect()` 设 `PRAGMA journal_mode=WAL`、轻量迁移靠 `_ensure_column`；SQL 裸写在 8 个文件里 | [db.py](file:///d:/qwq/项目/unified-2api/apps/control/app/db.py) `Database.connect / _ensure_column` |
 | 配置体系：`settings` 表存 JSON（`gateway`/`model_map`/`upstream_config`），`get_json_setting/set_json_setting` | [settings.py](file:///d:/qwq/项目/unified-2api/apps/control/app/routers/settings.py) `_read_config` |
 | 鉴权：网关口是 `api_keys.key_hash = sha256(token)`；控制台是 cookie 会话（admin/viewer） | [v1.py](file:///d:/qwq/项目/unified-2api/apps/control/app/routers/v1.py) `_gateway_key`；[security.py](file:///d:/qwq/项目/unified-2api/apps/control/app/security.py) |

@@ -8,7 +8,9 @@
 
 通用约定：
 
-- 错误响应统一为 `{"detail": "..."}`（FastAPI 默认结构 + ProviderError 处理器）。
+- `/api/*` 错误响应为 `{"detail": "..."}`（FastAPI 默认结构 + ProviderError 处理器）；权限失败（403）额外带 `error` 对象，见下。
+- `/v1/*` 错误响应为 `{"error": {...}, "detail": "..."}`，`error` 是 OpenAI 兼容对象，映射规则见「1. 网关」。
+- 权限失败示例：`{"detail": "需要管理员权限", "error": {"type": "permission_denied", "code": "insufficient_role", "message": "需要管理员权限", "required_role": "admin", "role": "viewer"}}`（`role` 仅在后端能拿到当前角色时出现）。
 - 时间戳均为 Unix 秒（整数）。
 - 角色两种：`admin` / `viewer`。标注「管理员」的接口 viewer 调用返回 403。
 - 请求体均为 JSON；`Content-Type: application/json`。
@@ -20,7 +22,7 @@
 无鉴权。
 
 ```json
-{"ok": true, "providers": 10, "db": "/data/unified.db"}
+{"ok": true, "providers": 14, "db": "/data/unified.db"}
 ```
 
 `providers` 为注册表内 provider 数量（不是已启用数）。
@@ -47,31 +49,109 @@ OpenAI Chat Completions 协议转发。
 | 流式 | 请求体 `"stream": true` 时 SSE 直通（`text/event-stream`） |
 | 日志 | 旁路写 `request_logs` + `usage_records`（流式从含 usage 的 SSE chunk 提取） |
 
-模型解析顺序（`registry.resolve`）：
+模型解析顺序（`app/model_resolve.py`，三条 `/v1` 协议共用同一套）：
 
 1. `x-provider` 头 → 用该 provider，模型名不变；
-2. `model` 形如 `<provider_id>/<model>` 且前缀是已知 provider → 用该 provider，取后半段；
-3. 「设置 → 模型别名」表命中 → 目标值再按规则 2 解析；
-4. 兜底：第一个已启用且 `capabilities.chat` 为真的 provider；
-5. 全都没有 → 503 `没有已启用的 chat provider`。
+2. `model` 形如 `<provider_id>/<model>` 且前缀是已知 provider → 用该 provider，取后半段；显式指定优先级高于自动匹配；
+3. 「设置 → 模型别名」表命中 → 目标值再按规则 2 解析；目标不带前缀时继续走规则 4；
+4. 自动匹配：在**已启用** provider 的模型目录（与 `/v1/models` 同一份聚合数据）里找同名 `id`：
+   - 恰好一家支持当前端点能力位 → 直接走该 provider，请求体、流式、计费、日志与带前缀写法完全一致；
+   - 两家及以上支持 → 400 `ambiguous_model`，`candidates` 给 `[{provider, readiness}]` 供消歧；
+   - 一家都没有 → 404；若该 `id` 只出现在**未启用** provider 的静态声明里，返回 404 `model_unavailable`，`candidates` 带 `readiness / requires / reason`，说明「存在但不可用」；
+   - 命中的 provider 不支持该端点能力位 → 501 `capability_unsupported`（与带前缀写法一致）。
+5. 解析结果直接落进 `request_logs` 既有字段 `provider` / `model`，不新增表；自动解析命中时另写一行 `unified.model_resolve` 日志便于对照。
 
-错误码：
+#### 错误契约
 
-| 状态码 | 含义 |
+所有 provider 失败先归一成内部错误（实现在 `app/gateway_errors.py`），再**按端点协议**输出不同外壳；状态码映射三端点共用，不受外壳影响。
+
+| 端点 | 错误外壳 |
 | --- | --- |
-| 400 | 请求体不是合法 JSON / 不是 JSON 对象 / 缺 `model` |
-| 401 | 缺少 `Authorization` 或密钥无效 |
-| 501 | 命中的 provider 不支持 chat（能力位关闭） |
-| 502 | 上游不可达（连接失败等） |
-| 503 | 无已启用的 chat provider；sub2api 分组未配置 |
-| 429 | sub2api 分组额度耗尽 / 账号池空 |
-| 上游原样 | 上游返回的 4xx/5xx 状态码与响应体原样透传 |
+| `/v1/chat/completions` | OpenAI：`{"error": {message, type, param, code, ...}}`，另带兼容字段 `detail` |
+| `/v1/responses` | 同 Chat Completions（OpenAI 形状） |
+| `/v1/messages` | Anthropic：`{"type": "error", "error": {type, message, ...}}`，**没有** `detail` |
 
-响应体是上游响应的逐字节转发（非流式含 `usage` 字段；流式为 SSE）。
+OpenAI 外壳示例：
+
+```json
+{
+  "error": {
+    "message": "上游返回 401：token expired",
+    "type": "authentication_error",
+    "param": null,
+    "code": "upstream_auth_failed",
+    "provider": "codebuddy",
+    "upstream_status": 401,
+    "upstream_code": "401",
+    "upstream_message": "token expired"
+  },
+  "detail": "上游返回 401：token expired"
+}
+```
+
+Anthropic 外壳示例（`/v1/messages`）：
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "authentication_error",
+    "message": "上游返回 401：token expired",
+    "provider": "zcode",
+    "upstream_status": 401,
+    "upstream_code": "401",
+    "upstream_message": "token expired"
+  }
+}
+```
+
+- Anthropic 的错误对象只认 `type` + `message`，`provider / upstream_status / upstream_code / upstream_message` 作为 `error` 的**附加键**保留；这是「按协议出形状」与「保留排查信息」之间的取舍。
+- `provider`、`upstream_status`、`upstream_code`、`upstream_message` 是排查用的子字段：
+  - `upstream_status` 是上游原始 HTTP 状态（含被合并的 403）；
+  - `upstream_code` / `upstream_message` 由适配器从厂商错误体解析（兼容 OpenAI `error.code/message`、Anthropic `error.type/message`、`code` / `message` / `detail` 等常见键），拿不到时留空（键可能不出现），不会编造；
+  - `upstream_message` 已掩码并截断到 200 字符。
+- 上游状态码映射（`public_status`）：
+
+| 上游状态 | 对外状态 | `error.type`（OpenAI / Anthropic） | `error.code`（仅 OpenAI 外壳） |
+| --- | --- | --- | --- |
+| 400 / 409 / 413 / 415 / 422，其余未列出的 4xx | 400 | `invalid_request_error` / `invalid_request_error` | `upstream_bad_request` |
+| 401、403（合并） | 401 | `authentication_error` / `authentication_error` | `upstream_auth_failed` |
+| 402 | 402 | `insufficient_quota` / `invalid_request_error` | `upstream_billing` |
+| 404 | 404 | `invalid_request_error` / `not_found_error` | `upstream_not_found` |
+| 408 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
+| 429 | 429 | `rate_limit_error` / `rate_limit_error` | `upstream_rate_limited`（保留上游 `Retry-After`，缺失时默认 60） |
+| 500 / 502 / 其余 5xx（合并） | 502 | `api_error` / `api_error` | `upstream_unavailable` |
+| 503 | 503 | `api_error` / `overloaded_error` | `provider_unavailable` |
+| 504 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
+| 501（能力位未实现） | 501 | `invalid_request_error` / `invalid_request_error` | `capability_unsupported` |
+
+网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）。
+
+模型解析失败（发生在转发之前，不写 `request_logs`、不产生流水）：
+
+| 场景 | 状态 | OpenAI 外壳 `type` / `code` | Anthropic 外壳 `type` / `code` | 关键字段 |
+| --- | --- | --- | --- | --- |
+| 同名模型命中多家 | 400 | `ambiguous_model` / `ambiguous_model` | `invalid_request_error` / `ambiguous_model` | OpenAI 在 `detail.candidates`、Anthropic 在 `error.candidates` 给 `[{provider, readiness}]` |
+| 没有已启用 provider 提供 | 404 | `model_not_found` / `model_not_found` | `not_found_error` / `model_not_found` | `detail.model` 回显，`candidates` 为空 |
+| 只存在于未启用 provider | 404 | `model_unavailable` / `model_unavailable` | `not_found_error` / `model_unavailable` | `candidates` 含 `provider/readiness/enabled/requires/reason`，不含凭据与 `base_url` |
+
+`code` 与 `candidates` 是 Anthropic 错误对象的附加键，只在解析类错误上出现；其余 Anthropic 错误仍是 `type` + `message` + `provider/upstream_*`。
+
+**流式响应**：上游直接以 4xx/5xx 拒绝时返回普通 JSON 错误（不是 SSE）；若**已经出帧后中途断开**，先前的分片照常转发，随后补一个错误事件再正常结束：
+
+- Chat Completions：`data: {"error": {...}}` 后跟 `data: [DONE]`；
+- Messages（Anthropic）：`event: error` + `data: {"type": "error", "error": {type, message, ...}}`（Anthropic 无 `[DONE]`）；
+- Responses：`event: error` + `data: {"type": "error", "code", "message", "param", ...}`（OpenAI Responses 的错误事件形状）。
+
+计费侧不变：被拒请求（配额 429）只写 `request_logs`，不写 `billing_ledger`；中途失败的流式请求仍按已采集 usage 结算。
 
 ### `POST /v1/messages`
 
-Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与上完全一致，仅能力位换成 `messages`。provider 不支持时 501（如 trae_sidecar、muse）。
+Anthropic Messages 协议转发，鉴权、模型解析、日志、状态码映射与 `/v1/chat/completions` 一致，仅能力位换成 `messages`；**错误外壳是 Anthropic 形状**（`{"type": "error", "error": {...}}`，详见「错误契约」），不是 OpenAI 的 `{"error": {...}}`。provider 不支持时 501（如 trae_sidecar、muse）。
+
+### `POST /v1/responses`
+
+OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/v1/chat/completions` 一致（含 OpenAI `error` 外壳），能力位换成 `responses`（代码里同走 `_proxy`）。目前只有 `codar` 与 `qoder` 声明了该能力位，其余 provider 返回 501。
 
 ### `GET /v1/models`
 
@@ -117,7 +197,7 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 
 ### `GET /api/providers`（登录）
 
-返回 10 家 provider 的公共信息列表，每项字段：
+返回 14 家 provider 的公共信息列表（其中 3 家 `ready`、11 家 `needs_config`，逐家卡点见 [PROVIDERS.md](PROVIDERS.md#就绪状态)），每项字段：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -126,11 +206,17 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 | `status` | `implemented`（主仓内置实现）或 `sidecar`（透明代理到独立进程） |
 | `description` | 一句话描述 |
 | `base_url` / `default_base_url` | 当前生效地址 / 默认地址 |
+| `base_url_source` | 生效地址来源：`db`（provider 行或凭据行）/ `env` / `default` |
+| `base_url_warning` | 历史默认值残留提示，空串表示正常。当前只对 `deepseek_sidecar` 的 `http://127.0.0.1:7872` 生效（真实默认是 5001）；启动时扫 `providers.base_url` 与启用中的凭据行并打日志，接口返回时按当前库值重算；只告警不改值 |
+| `credential_base_warnings` | 同上检查作用于 `enabled=1` 的凭据行，数组项 `{provider, id, label, base_url, suggested_base_url, message}`；为空数组表示无残留，停用的凭据不提示 |
 | `enabled` | 是否启用 |
-| `capabilities` | `{chat, messages, models, oauth, checkin, credits, register, sidecar}` 八个布尔位 |
-| `protocols` | 支持的协议（`openai.chat.completions` / `anthropic.messages`） |
+| `capabilities` | `{chat, messages, models, responses, oauth, checkin, credits, register, sidecar}` 九个布尔位 |
+| `protocols` | 支持的协议（`openai.chat.completions` / `anthropic.messages` / `openai.responses`） |
+| `readiness` / `requires` | `ready` / `needs_config`，以及缺什么（给人看的短句；`ready` 时为空数组） |
+| `allows_local_base_url` | 是否允许把 `base_url` / 凭据 `base_url` 填成本地 loopback 地址；由 `default_base_url` 是否指向 loopback 推导（四家 sidecar 与 `codebuddy` 管理端为 `true`） |
 | `risk_level` / `risk_note` | `safe` / `warn` / `danger` 及说明 |
 | `has_api_key` | 是否已配置上游密钥（不回显明文） |
+| `credential_count` / `credentials` | 凭据条数 / 掩码列表（`id`、`label`、`base_url`、`secret_masked`、`sort_order`） |
 | `options` | 已保存的高级配置 dict |
 
 ### `PATCH /api/providers/{provider_id}`（管理员）
@@ -138,7 +224,7 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `enabled` | bool | 启用/停用 |
-| `base_url` | string | 必须 `http://` 或 `https://` 开头，否则 400；尾部 `/` 自动去除 |
+| `base_url` | string | 必须 `http://` 或 `https://` 开头，否则 400；尾部 `/` 自动去除。本地 loopback 地址只对 `allows_local_base_url=true` 的 provider 放行，其余返回 400 并在 `detail` 说明原因；私网、链路本地与云元数据地址一律 400（元数据地址即使 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 也拒绝） |
 | `label` | string | 显示名，截断 64 字符 |
 | `api_key` | string | 约定：`***` = 保持不变；空串 = 清除；其他 = 覆盖 |
 | `options` | object | 与已有 options 深合并（部分更新） |
@@ -246,12 +332,57 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 
 ### `GET /api/models`（登录）
 
+跨所有 provider 聚合真实并集：同一 `id` 被多家支持时合并为一条，`providers` 列出全部归属，`provider_states` 保留每家的来源与就绪状态。默认只列 `enabled=1` 的 provider；`?provider=<id>` 可显式只看一家（此时不再按 enabled 过滤，未知 id 返回 404）。
+
 ```json
-{"models": [{"id": "...", "owned_by": "opencode", "...": "上游原始字段"}],
- "source": "dynamic", "count": 12}
+{
+  "models": [
+    {
+      "id": "shared-model",
+      "object": "model",
+      "owned_by": "codebuddy",
+      "provider": "codebuddy",
+      "providers": ["codebuddy", "muse"],
+      "source": "upstream",
+      "provider_states": {
+        "codebuddy": {"source": "upstream", "readiness": "needs_config", "requires": ["..."], "enabled": true, "available": false, "unavailable_reason": "...", "fallback_reason": null},
+        "muse": {"source": "declared", "readiness": "needs_config", "requires": ["..."], "enabled": true, "available": false, "unavailable_reason": "...", "fallback_reason": null}
+      },
+      "readiness": "needs_config",
+      "requires": ["..."],
+      "enabled": true,
+      "available": false,
+      "unavailable_reason": "汇总的不可用原因",
+      "fallback_reason": null
+    }
+  ],
+  "source": "dynamic",
+  "count": 1
+}
 ```
 
-`source`：有结果为 `dynamic`，否则 `unknown`。与 `/v1/models` 的区别：登录态而非密钥鉴权，且去重（`/v1/models` 不去重）、附带上游原始元数据字段。
+条目字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `provider` / `providers` | 主归属 provider（首个返回该 id 的家）与全部归属列表 |
+| `source` | 主归属的来源：`upstream` / `declared` / `declared_fallback` |
+| `provider_states` | 每个归属 provider 的 `{source, readiness, requires, enabled, available, unavailable_reason, fallback_reason}` |
+| `readiness` / `requires` | 沿用 provider 清单的语义；`needs_config` 的模型不会被隐藏 |
+| `available` | 任一归属 provider 既已启用又 `ready` 时为 `true` |
+| `unavailable_reason` | 不可用原因；`available=true` 时为 `null` |
+| `fallback_reason` | 主归属处于 `declared_fallback` 时的上游失败原因（已脱敏） |
+
+来源判定只看实际行为，不做推测：
+
+- `declared`：适配器只有静态声明（没有覆盖 `fetch_models`）；
+- `upstream`：覆盖了 `fetch_models` 且本次真实拉取成功（缓存命中沿用上游结果）；
+- `declared_fallback`：覆盖了 `fetch_models` 但拉取失败，回落到该适配器的静态声明，并在条目上带脱敏后的失败原因。拿不到上游又没有声明时返回空，不补条目。
+
+顶层 `source`（有结果 `dynamic`，否则 `unknown`）与 `count` 保持不变以兼容旧前端。上游实拉结果按 `UNIFIED_MODELS_CACHE_TTL_SEC`（默认 60 秒）做进程内缓存，键含 provider、`base_url`、凭据指纹与 `models_path`/`tier` 选项，切地址或换凭据后不会读到旧缓存。
+
+与 `/v1/models` 的区别：登录态而非密钥鉴权、去重合并，并附带来源与就绪状态。
+
 
 ---
 
@@ -276,7 +407,7 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 
 返回 `{"ok": true}`；不存在 404。
 
-密钥无配额、无模型白名单（属 M3 计费范畴，当前版本有意不收录）。
+密钥的额度策略与告警见第 11 节（`/api/quota`）；密钥表本身仍不限制模型白名单。
 
 ---
 
@@ -289,7 +420,7 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
   "today_requests": 0, "today_tokens": 0,
   "week_requests": 0, "week_tokens": 0,
   "total_requests": 0, "total_tokens": 0,
-  "today_credit": 0, "week_credit": 0, "total_credit": 0,
+  "today_credit": 0.000098, "week_credit": 1.204311, "total_credit": 12.50842,
   "active_keys": 1, "top_model": "gpt-4o-mini",
   "usage_health": {"ok": true, "detail": "...", "logs_today": 0},
   "failures": {"today_4xx": 0, "today_5xx": 0, "week_4xx": 0, "week_5xx": 0}
@@ -297,12 +428,16 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、错误码与�
 ```
 
 - 「周」按最近 7 天（含今天）。
-- `*_credit` 三个字段恒为 0：定价与倍率属 M3，当前不计算。
+- 成功口径：`status < 400` **且** `error` 列为空。流式请求已经出帧后中途断开时，HTTP 层只能保持 200，这类请求靠 `request_logs.error` 判为失败——计入 `failures.today_5xx / week_5xx`，不计入 `today_requests / week_requests`；`top_model` 与 `usage_health.logs_today` 用同一口径。`/api/logs?status=ok|error` 与之一致（`ok` 排除带 error 的 2xx）。
+- `*_credit` 是历史字段名，值现在是**美元金额**：分别对 `billing_ledger.billed_micro` 求和（全量 / 最近 7 天 / 今天），再在展示层用 `to_usd()` 换算并保留 6 位小数。落库始终是整数 micro-USD。
+- 金额只来自已落库流水：`status >= 400` 且没有 usage 的请求不写流水，因此不产生金额（详见第 10 节）。
 - `realm` 参数当前不参与过滤（保留字段）。
 
 ### `GET /api/stats/daily?days=30`（登录）
 
-`days` 夹逼到 1–90。返回逐日桶数组：`[{day: "2026-11-01", requests, prompt_tokens, completion_tokens, credit, failed}]`。`credit` 恒 0；`failed` 只计 4xx/5xx。
+`days` 夹逼到 1–90。返回逐日桶数组：`[{day: "2026-11-01", requests, prompt_tokens, completion_tokens, credit, failed}]`。`credit` 是当天 `billing_ledger.billed_micro` 求和后换算的美元；`requests` 与 `failed` 使用与 summary 相同的成功口径（`status < 400` 且 `error` 为空才算成功，带 error 的 2xx 计入 `failed`）。金额与 success 分桶无关：失败请求通常没有金额，但带 usage 的失败请求仍会记账。
+
+统计域**只有以上两个端点**：没有 `/api/stats/keys` 与 `/api/stats/providers`，按密钥 / 按 provider 的拆分明细暂无接口，需要时直接在 `request_logs` / `billing_ledger` 上按 `key_id` / `provider` 列自行统计。
 
 ---
 
@@ -354,11 +489,13 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 
 语义：分组 → 账号池 → 配额扣减 → 耗尽 429。配额按 token 数（prompt+completion）累计。
 
+鉴权口径：这里的 GET 端点读的是**全局**管理数据（`sub2api_*` 表没有归属列，分组/账号池/流水属于整个实例而不是某个登录用户），因此与 `/api/quota/*` 读接口一致，要求 `admin`；viewer 一律在查库前返回 `403 无权查看配额数据`，不会因为传入不存在的 `group_id` 变成 404 而暴露存在性。
+
 ### 分组
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/sub2api/groups` | 登录 | 分组列表（含 `accounts`、`active_accounts` 聚合数） |
+| `GET /api/sub2api/groups` | 管理员 | 分组列表（含 `accounts`、`active_accounts` 聚合数） |
 | `POST /api/sub2api/groups` | 管理员 | upsert |
 | `PATCH /api/sub2api/groups/{group_id}` | 管理员 | 部分更新 |
 | `DELETE /api/sub2api/groups/{group_id}` | 管理员 | 删除 |
@@ -378,7 +515,7 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/sub2api/accounts?group_id=` | 登录 | 列表，可按分组过滤 |
+| `GET /api/sub2api/accounts?group_id=` | 管理员 | 列表，可按分组过滤 |
 | `POST /api/sub2api/accounts` | 管理员 | 添加 |
 | `PATCH /api/sub2api/accounts/{account_id}` | 管理员 | 部分更新 |
 | `DELETE /api/sub2api/accounts/{account_id}` | 管理员 | 删除 |
@@ -401,11 +538,228 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 
 ### 流水
 
-`GET /api/sub2api/ledger?group_id=&limit=50`（登录）：返回扣减流水（`limit` 夹逼 1–500，按 id 倒序，逐条含 `ts, group_id, account_id, model, prompt_tokens, completion_tokens, cost, status, note`；`cost` 为 token 计数而非金额）。
+`GET /api/sub2api/ledger?group_id=&limit=50`（管理员）：返回扣减流水（`limit` 夹逼 1–500，按 id 倒序，逐条含 `ts, group_id, account_id, model, prompt_tokens, completion_tokens, cost, status, note`；`cost` 为 token 计数而非金额）。
 
 ---
 
-## 10. Grok 注册任务（`/api/grok/register`）
+## 10. 计费（`/api/pricing`）
+
+M3-1 的消费侧计费只算钱、不拦人：网关转发链路不会因为价格缺失或计费异常而拒绝请求；价格解析失败只记日志，结算按「未定价」处理。金额一律以整数 micro-USD 落库（1 micro = 1e-6 美元），美元只出现在展示层。
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `GET /api/pricing/books` | 登录 | 价格行列表；可按 `provider` / `model` / `token_class` 过滤，`limit` 夹逼 1–1000（默认 200），按 provider、model、token_class、effective_from 倒序 |
+| `POST /api/pricing/books` | 管理员 | 追加一行价格；同一唯一键已存在返回 409 |
+| `GET /api/pricing/resolve` | 登录 | 干跑解析：某 provider + model 在 `at` 时刻命中的价格行 |
+| `POST /api/pricing/import` | 管理员 | 从 `config/prices.yaml` 幂等导入；`dry_run=true` 只统计不落库 |
+
+**没有 `PATCH` / `DELETE`。** 价格表 append-only：历史行是已发生流水的定价依据，原地改价会让 `billing_ledger` 的价格快照对不上账。改价 = 插入一条 `effective_from` 更晚的新行，旧行保留。
+
+### `POST /api/pricing/books`
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | 模型名；`*` 表示通配 |
+| `token_class` | string | 必填 | `input` / `output` / `cache_read` / `cache_write` / `reasoning` |
+| `price_micro_per_1m` | int | 必填 | 每 1M token 的 micro-USD，非负 |
+| `provider` | string | `*` | 适配器 id；`*` 表示对所有 provider 生效 |
+| `effective_from` | int | 当前秒 | 生效 epoch 秒；填未来时间即定时生效 |
+| `note` | string | `""` | 价格来源与口径说明 |
+
+响应（列表项同构）：
+
+```json
+{
+  "id": 42, "provider": "*", "model": "gpt-4o", "token_class": "input",
+  "price_micro_per_1m": 2500000, "price_usd_per_1m": 2.5,
+  "currency": "USD", "effective_from": 1793548800,
+  "created_by": "admin", "note": "..."
+}
+```
+
+唯一键为 `(provider, model, token_class, effective_from)`；`currency` 当前固定 `USD`。解析优先级：精确 provider 行优先于 `*`，精确 model 行优先于 `*`，同精度取 `effective_from` 最新且不晚于请求准入时刻的行。
+
+### `GET /api/pricing/resolve?provider=&model=&at=`
+
+`provider` / `model` 必填，`at` 默认当前秒。返回每类 token 命中的行，以及没有独立价格行的类别：
+
+```json
+{
+  "provider": "opencode", "model": "gpt-4o", "at": 1793548800,
+  "lines": {
+    "input": {"price_id": 42, "provider": "*", "model": "gpt-4o",
+              "price_micro_per_1m": 2500000, "price_usd_per_1m": 2.5},
+    "output": {"price_id": 43, "provider": "*", "model": "gpt-4o",
+               "price_micro_per_1m": 10000000, "price_usd_per_1m": 10}
+  },
+  "missing": ["cache_write", "reasoning"]
+}
+```
+
+`missing` 只表示没有独立价格行。`reasoning` 缺失不是问题——结算时回落到 `output` 价；其它类别缺失则该类 token 不计费，并让这笔流水 `estimated=1`。
+
+### `POST /api/pricing/import?dry_run=false`
+
+读取仓库内 `config/prices.yaml`（文件不存在 404，YAML 非法 400）。逐条插入缺失的行，已存在的唯一键跳过、不覆盖；`prices` 条目既可写 `price_micro_per_1m`，也可写 `price_per_mtok`（字符串小数，服务端乘 1e6 后四舍五入）。`unpriced` 段只回显给调用方，不落库——没有公开价就不编价。
+
+```json
+{"inserted": 24, "skipped": 0, "total": 24, "dry_run": false,
+ "currency": "USD", "unpriced": ["..."], "path": ".../config/prices.yaml"}
+```
+
+### 数据表
+
+`price_books`：价格版本行，只追加。
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 行 id；流水通过快照间接引用 |
+| `provider` / `model` | 适配器 id / 实际模型名；`*` 为通配 |
+| `token_class` | 五类之一，见「计费口径」 |
+| `price_micro_per_1m` | 每 1M token 的 micro-USD，非负整数 |
+| `currency` | 当前固定 `USD`，不做多币种 |
+| `effective_from` | 生效 epoch 秒 |
+| `created_by` / `note` | 操作者与价格来源（审计） |
+
+唯一键 `UNIQUE(provider, model, token_class, effective_from)`；查询索引 `(token_class, provider, model, effective_from)`。
+
+`price_book_snapshots`：每个请求准入时冻结一份解析结果。
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 快照 id，被流水的 `price_snapshot_id` 引用 |
+| `resolved_at` | 解析时间（= 请求准入时刻，不是落库时刻） |
+| `provider` / `model` | 本次请求的 provider 与模型 |
+| `lines_json` | `{"input": {"price_id": 42, "provider": "*", "model": "gpt-4o", "price_micro_per_1m": 2500000}, ...}` |
+
+没有任何价格行命中时不写空快照，`price_snapshot_id` 为 `NULL`。
+
+`billing_ledger`：每请求一行，金额已定格，可重算可审计。
+
+| 字段 | 说明 |
+| --- | --- |
+| `ts` | 落库时间 epoch 秒 |
+| `key_id` / `key_name` | 网关密钥归因；匿名或失效密钥 `key_id` 为 `NULL` |
+| `billing_account_id` | 冗余自 `api_keys`；M3-1 恒 `NULL`（M3-2 回填） |
+| `provider` / `model` / `status` | 实际路由结果与上游状态码 |
+| `input_tokens` | OpenAI：`prompt_tokens` 减去缓存命中；Anthropic：`input_tokens` 原值 |
+| `output_tokens` | 已扣除 reasoning 的可见输出 |
+| `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens` | 其余三类，未出现即 0 |
+| `billed_micro` | 定格金额，整数 micro-USD；只增，退款走负行 |
+| `price_snapshot_id` | 指向 `price_book_snapshots.id`，无价格行时 `NULL` |
+| `estimated` | `1` = 金额不完整（命中未定价档） |
+| `note` | `usage_missing` / `usage_zero:<provider>` / `unpriced:input,output` 等 |
+
+### 计费口径
+
+五类 token 的拆分不靠 provider 名猜，按 usage 里「字段是否存在」判定：
+
+| 类别 | OpenAI 来源 | Anthropic 来源 |
+| --- | --- | --- |
+| `input` | `prompt_tokens` 减去 `cached_tokens` | `input_tokens`（本身不含缓存） |
+| `output` | `completion_tokens` 减去 `reasoning_tokens` | `output_tokens` 减去 reasoning 明细 |
+| `cache_read` | `prompt_tokens_details.cached_tokens` | `cache_read_input_tokens` |
+| `cache_write` | 0（OpenAI 不单收缓存写入费） | `cache_creation_input_tokens` |
+| `reasoning` | `completion_tokens_details.reasoning_tokens` | 输出明细里的 reasoning |
+
+单类金额公式，四舍五入到 1 micro：
+
+```text
+cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
+```
+
+每类各自取整后再相加，所以单请求最大误差 ≤ 2.5 micro；两套协议行为一致。
+
+结算规则：
+
+- `reasoning` 没有独立价格行时回落到 `output` 价；`output` 也缺价才算未定价。
+- 未定价：只计有价部分，`billed_micro` 可能小于真实成本，`estimated=1`，`note` 记 `unpriced:<类别>`。
+- 没有 usage（上游没回 usage 或流式里没捞到）：金额记 0，`note=usage_missing`，`estimated=0`（没有 token 需要定价）。
+- 有 usage 但五类 token 全为 0（如 muse）：金额记 0，`note=usage_zero:<provider>`，`estimated=0`；与"完全没给数"刻意分开，便于统计该通道的免费调用量。
+- `status >= 400` 且没有 usage：不写流水，痕迹只留在 `request_logs`。
+- `status >= 400` 但有 usage：照常结算（按实际 token 计费）。
+- 计费异常不影响网关：`settle` 抛错时保留已写的日志与原始 usage，只记异常。
+
+### 可复算示例
+
+`gpt-4o` 的种子价：input `2.50` 美元/1M（`2500000` micro）、output `10.00` 美元/1M（`10000000` micro）。一次请求 usage 为 11 prompt + 7 completion，无缓存、无 reasoning：
+
+| 类别 | 计算 | micro |
+| --- | --- | --- |
+| `input` | `(11 × 2500000 + 500000) // 1000000` | 28 |
+| `output` | `(7 × 10000000 + 500000) // 1000000` | 70 |
+| 合计 `billed_micro` | 28 + 70 | **98** |
+
+98 micro = `$0.000098`（`to_usd()` 展示为 `0.000098`）。注意不是 97.5 micro：每类先取整，input 的 27.5 进到 28。
+
+### 价格快照与在途请求
+
+价格在**准入时**解析并冻结：请求进入网关、路由到 provider 后立刻 `resolve_prices(at=准入秒)`，把结果放进本次请求的内存上下文；流式响应结束、非流式响应返回后结算时，用的还是这份结果（同一份 `price_book_snapshots`）。
+
+因此：
+
+- 请求进行中插入更晚生效的价格行，不会改变这笔请求的金额；新价只影响之后准入的请求。
+- 同一请求的流式与非流式路径金额口径一致，不因结算时刻不同而取到不同价格。
+- 事后改价是不可能的（没有 PATCH/DELETE）；对账用流水上的 `price_snapshot_id` 回查当时的价。
+
+---
+
+## 11. 配额策略与告警（`/api/quota`）
+
+按网关密钥设日/月额度，可再按 provider / 模型收窄；金额以整数 micro-USD 落库，`*_usd` 只是展示换算。
+
+### 密钥标识（`key_id`）
+
+配额端点按「入参通道」区分，指向同一条 `api_keys` 记录：
+
+- **Query 参数 `key_id`**：只接受数字 `api_keys.id`，与改动前行为完全一致。完整 `u2a_` 密钥**不允许**出现在 URL 中（会进浏览器历史、Referer、反代/access log），出现即 **400**，文案明确提示改用 `X-Api-Key` 请求头。
+- **请求头 `X-Api-Key`**：GET `/api/quota/policies`、`/status`、`/alerts` 可选用它按完整密钥定位；服务端按 SHA-256 哈希精确匹配，无需前端把 `u2a_` 映射成数字。与 `key_id` 同时出现返回 **400**。
+- **POST body `key_id`**：可传数字 id 或完整 `u2a_` 密钥（body 不经过 URL）；服务端解析到同一条记录。
+- 形态非法（空串、非数字、`X-Api-Key` 不是完整 `u2a_` 密钥）返回 **400**；形态合法但解析不到（不存在或已吊销）返回 **404**，不会静默落到另一条密钥。
+
+出参统一带数字 `key_id`、密钥名称 `key_name`，以及掩码后的 `key_prefix`（形如 `u2a_abcd****`）。`key_prefix` 仅供展示，任何端点都不输出完整密钥。
+
+日志侧：`request_logs` 落库前对 `provider` / `model` / `error` / `key_name` 里疑似 `u2a_` 的片段统一掩码；服务自身写出的 `uvicorn.access` 访问日志同样在落盘前替换为 `u2a_…末4位`。反向代理（nginx 等）的 access log 不在应用内，需在代理层另行配置脱敏。
+
+### 端点
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `GET /api/quota/policies?key_id=` | 管理员 | 策略列表；`key_id` 只收数字 id，按密钥定位用 `X-Api-Key` 请求头 |
+| `POST /api/quota/policies` | 管理员 | 按 `(key_id, provider, model, window)` 幂等 upsert，阈值整体替换 |
+| `DELETE /api/quota/policies/{policy_id}` | 管理员 | 删除策略与阈值；告警历史保留 |
+| `GET /api/quota/status?key_id=&at=` | 管理员 | 当前周期用量与告警；`at` 缺省为当前秒 |
+| `GET /api/quota/alerts?key_id=&policy_id=&limit=&offset=` | 管理员 | 告警历史，支持过滤与分页 |
+
+配额读取权限：`api_keys` 当前没有 owner/group 归属字段，无法判断非管理员与某把密钥的关系，因此三个 GET 端点暂只放行 `admin`。非 admin（viewer）无论用 `X-Api-Key`、数字 `key_id` 还是不传过滤条件，统一返回 **403 `无权查看配额数据`**；鉴权在解析密钥之前完成，不区分密钥是否存在，避免 403/404 差异被用于存在性探测。归属模型落地后只需替换 `quota_reader` 依赖，端点契约不变。
+
+`POST /api/quota/policies` 请求体：
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `key_id` | int / string | 必填 | 数字 id 或 `u2a_` 明文密钥 |
+| `window` | string | 必填 | `day` / `month` |
+| `provider` | string | `""` | 空或 `*` = 不限 provider |
+| `model` | string | `""` | 空或 `*` = 不限模型 |
+| `limit_micro` | int | `0` | 金额上限 micro-USD，`0` = 不设 |
+| `limit_requests` | int | `0` | 请求数上限，`0` = 不设 |
+| `thresholds` | int[] | `[]` | 告警阈值百分比，1–1000，去重后升序 |
+| `enabled` | bool | `true` | 是否生效 |
+
+策略对象字段：`id, key_id, key_name, key_prefix, provider, model, window, limit_micro, limit_usd, limit_requests, enabled, thresholds, created_at, updated_at`。
+
+### 告警分页
+
+`GET /api/quota/alerts` 使用 **`limit` + `offset`**：
+
+- `limit` 夹逼到 1–1000，默认 100；`offset` 默认 0，负数按 0。
+- `total` 是过滤条件下的**真实总数**（独立 `COUNT(*)`），与当页 `items` 条数无关。
+- 不传分页参数时响应仍是 `{"total": ..., "items": [...]}`，形状与改动前一致；`total` 语义修正为真实总数。
+- 选择 `limit` + `offset` 而不是 `page` / `size`：既有接口已经暴露 `limit`，新增 `offset` 是最小兼容增量，也不会出现两套互相重叠的页大小参数。
+
+---
+
+## 12. Grok 注册任务（`/api/grok/register`）
 
 任务编排为控制面内一等服务的队列；浏览器执行器外置（`GROK_REGISTER_EXECUTOR_URL`），未配置时任务以明确原因失败。
 
@@ -435,17 +789,17 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 
 ---
 
-## 11. 错误码速查
+## 13. 错误码速查
 
 | 状态码 | 典型场景 |
 | --- | --- |
-| 400 | 请求体非法、缺 `model`、参数越界（用户名/密钥名长度等）、`base_url` 不是 http(s)、无可更新字段 |
+| 400 | 请求体非法、缺 `model`、参数越界（用户名/密钥名长度等）、`base_url` 不是 http(s)、无可更新字段；配额 `key_id` 形态非法、`window`/阈值越界 |
 | 401 | 未登录/会话过期（`/api/*`）；网关密钥缺失或无效（`/v1/*`）；登录密码错误 |
-| 403 | viewer 调管理员接口；sub2api 分组已停用；CodeBuddy 管理端拒绝 `wbt_` token（管理类操作需会话级管理员时透传上游 403） |
-| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在 |
+| 403 | viewer 调管理员接口或配额域读接口（响应带 `error.type=permission_denied`、`required_role`）；sub2api 分组已停用；CodeBuddy 管理端拒绝 `wbt_` token |
+| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在；配额 `key_id` 引用的密钥或策略不存在 |
 | 409 | 用户名已存在；任务状态不允许取消/重试 |
-| 429 | sub2api 分组或账号池额度耗尽 |
+| 429 | sub2api 分组或账号池额度耗尽；网关密钥触发配额上限；上游 429（保留 `Retry-After`） |
 | 501 | 请求的 provider 不支持该能力（如 trae_sidecar 无 `/v1/messages`；deepseek sidecar 无流式 messages） |
-| 502 | 上游不可达（连接失败、DNS 失败等） |
+| 502 | 上游不可达（连接失败、DNS 失败等）；上游 5xx 归并到 502（原始状态码见 `error.upstream_status`） |
 | 503 | 无已启用的 chat provider；sub2api 分组未配置；sub2api 账号缺 upstream_base |
-| 上游透传 | 其余 4xx/5xx 原样转发状态码与响应体 |
+| 504 | 上游超时（408/504 归并）；流式响应超过时长上限 |

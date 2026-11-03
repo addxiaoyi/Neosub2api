@@ -70,13 +70,14 @@ lsof -i :8010
 
 | detail 示例 | 原因 | 处理 |
 | --- | --- | --- |
-| `没有已启用的 chat provider...` | 模型解析兜底失败：没有任何已启用的 chat provider | 「服务商」页启用至少一家（或用 `provider前缀/模型`、`x-provider` 显式指定） |
 | `OpenCode 未配置上游密钥...` | opencode 没填 api_key / extra_keys | 服务商页补密钥 |
 | `sub2api 配额分组未配置...` | sub2api 还没建分组/账号 | 先建分组和账号（`/api/sub2api/groups`、`/accounts`） |
 | `sub2api 分组订阅额度已耗尽` / `账号池无可用账号` | 配额或池子耗尽 | 重置额度（`/api/sub2api/accounts/{id}/reset`）或加账号 |
 | `上游 <path> 返回 503：<原文>` | **上游限流或暂时不可用** | 控制面原样透传状态码；opencode 适配器对 503 已做换 key 重试（最多 `max_attempts` 次，退避封顶 2s），重试耗尽后透传。处理：换 key、降低并发、稍后重试，或给该 provider 配 `options.proxy` 换出口 |
 
 上游 429 同理透传；sub2api 适配器还会把 429/5xx 的账号冷却 60 秒并自动换号（最多 3 次尝试）。
+
+模型解析失败不再产生 503，而是 400/404 结构化错误：无命中 `404 model_not_found`；只存在于未启用 provider `404 model_unavailable`（`candidates` 带 `requires` 与原因）；多家命中 `400 ambiguous_model`（`candidates` 带 `provider/readiness`）。先看 `/api/models` 里该 `id` 归谁，再写成 `provider/model` 即可。详见 `API-REFERENCE.md`「模型解析顺序」。
 
 ## 6. 网关返回 401
 
@@ -91,6 +92,7 @@ detail 形如 `上游不可达（http://...）：...`，是控制面连不上上
 1. 上游进程/容器没起：按 [PROVIDERS.md](PROVIDERS.md) 的端口表核对；
 2. 地址不对：容器里的控制面访问宿主机要用 `host.docker.internal`（compose 默认已这么配），Linux 宿主机需要 `extra_hosts: host-gateway`；
 3. 系统代理劫持：控制面的 HTTP 客户端刻意不读系统代理（`trust_env=False`），上游在内网但被代理规则拦截时，给 provider 配 `options.proxy` 显式指定出口即可，不需要动系统代理。
+4. **deepseek_sidecar 连不上先核对端口**：Deepseek2Go 上游默认监听 **5001**（`PORT` 可覆盖），仓内 `DEEPSEEK_SIDECAR_BASE` 默认也是 5001；仓内**早期版本**默认 7872，从旧版升级后 `.env` 里残留的 `7872` 会导致连接失败（报「连接失败」而非「配置错误」，容易误判成 sidecar 没启动）。处理：把 `DEEPSEEK_SIDECAR_BASE` 改成 `http://127.0.0.1:5001`（compose 部署为 `http://host.docker.internal:5001`），或反过来给 sidecar 设 `PORT=7872`——两边对齐即可。「服务商」页里给 deepseek_sidecar 单独配过 base_url 的同理核对。
 
 ## 8. 网关返回 501
 
@@ -113,7 +115,7 @@ detail 形如 `<provider> 不支持 <capability>` 或 `<provider> 适配器未�
 
 ## 11. 其他
 
-- **统计页全是 0 / credit 恒为 0**：定价与倍率属 M3 未实现，`*_credit` 字段恒 0，不是 bug。
+- **统计页 credit 全是 0**：先确认请求是否落进了 `billing_ledger`（`status >= 400` 且没有 usage 的请求不写流水，属于设计行为），再查 `price_books` 是否命中该模型（未定价时金额为 0 且 `estimated=1`，可用 `GET /api/pricing/resolve` 干跑确认）。缺价格就补价，见 [API-REFERENCE.md](API-REFERENCE.md) 第 10 节与 [pricing-sources.md](pricing-sources.md)。
 - **忘记管理员密码**：停控制面，删除 `./data/unified.db` 会全量重置（密钥、日志全丢）。只想改密码且还有另一个 admin 账号登录：用户管理页直接改。当前版本没有 CLI 改密工具（待确认后续版本是否提供）。
 - **Upstash 相关**：`/api/settings/upstash/test` 恒返回「未接入」，Upstash 不属于当前版本功能。
 - **grok 注册任务全部失败**：先看 `/api/grok/register/worker` 的 `executor` 字段——`unconfigured` 说明没配 `GROK_REGISTER_EXECUTOR_URL`，任务会以明确原因失败，这是设计行为。

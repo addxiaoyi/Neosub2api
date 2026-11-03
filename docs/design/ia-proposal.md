@@ -1,6 +1,8 @@
 # unified-2api 前端信息架构与品牌方案
 
-- 依据：直接读取 `apps/web/app/` 路由、[ManagementBar.tsx](file:///d:/qwq/项目/unified-2api/apps/web/components/common/layout/ManagementBar.tsx)、[ProviderPanel.tsx](file:///d:/qwq/项目/unified-2api/apps/web/components/common/providers/ProviderPanel.tsx)、`lib/i18n/locales/zh-CN.json`、`apps/control/app/routers/`。
+> **已判定不采用，仅作存档。** 本文件不是已批准的前端方案，不得作为实现依据；前端基准与红线见 [docs/FRONTEND-BASELINE.md](../FRONTEND-BASELINE.md)。正文保持原样，不再维护。
+
+- 依据：直接读取 `apps/web/app/` 路由、[ManagementBar.tsx](file:///d:/qwq/项目/unified-2api/apps/web/components/common/layout/ManagementBar.tsx)、`ProviderPanel.tsx`（后续重构已并入 `components/common/settings/ProvidersSection.tsx`，原文件不再存在）、`lib/i18n/locales/zh-CN.json`、`apps/control/app/routers/`。
 - 范围：信息架构、术语、页面清单、风险表达、品牌命名。不含视觉稿（视觉稿见 `prototype.html`）。
 - 约束：未读取/未修改 `apps/web/` 源码以外的运行产物；本文件与原型都落在 `docs/design/`。
 
@@ -38,16 +40,16 @@
 
 | 走查项 | 根因（代码层面） | 本方案对应章节 |
 | --- | --- | --- |
-| U1 服务商表格 1440 下溢出 | 表格 6 列 + 固定 `w-[210px]` 地址输入框 + 能力位标签堆叠；容器 `max-w-7xl`（[ProviderPanel.tsx L237-L257](file:///d:/qwq/项目/unified-2api/apps/web/components/common/providers/ProviderPanel.tsx#L237-L257)） | §5、README B2 |
-| U3 失败态显示成空态 | `catch` 只发 toast，`items=[]` 后渲染 `providers.empty`（[ProviderPanel.tsx L65-L77、L350-L352](file:///d:/qwq/项目/unified-2api/apps/web/components/common/providers/ProviderPanel.tsx#L65-L77)） | §5.4、README B3 |
+| U1 服务商表格 1440 下溢出 | 表格 6 列 + 固定 `w-[210px]` 地址输入框 + 能力位标签堆叠；容器 `max-w-7xl`（`ProviderPanel.tsx` L237-L257，文件已删除） | §5、README B2 |
+| U3 失败态显示成空态 | `catch` 只发 toast，`items=[]` 后渲染 `providers.empty`（`ProviderPanel.tsx` L65-L77、L350-L352，文件已删除） | §5.4、README B3 |
 | U5 确认方式不一致 | 密钥删除走 `ConfirmDialog`；启停与网关匿名开关直接 `patch` | §5.5 |
-| U6 warn 徽章从未出现 | 12 个适配器里 0 个 `risk_level=warn`（仅 `deepseek_sidecar`、`qoder_sidecar` 为 danger） | §5.1 |
-| U7 风险说明 10px / 3.84:1 | [ProviderPanel.tsx L206-L208](file:///d:/qwq/项目/unified-2api/apps/web/components/common/providers/ProviderPanel.tsx#L206-L208) | §5.3 |
+| U6 warn 徽章从未出现 | 14 个适配器里 0 个 `risk_level=warn`（仅 `deepseek_sidecar`、`qoder_sidecar` 为 danger） | §5.1 |
+| U7 风险说明 10px / 3.84:1 | `ProviderPanel.tsx` L206-L208（文件已删除） | §5.3 |
 | U10 引导浮层遮挡内容 | dock 的 `showDockTip` 浮层贴在导航上方（L690-L726） | §2.1 |
 
 ### 1.3 一处直接可删的重复
 
-`/providers` 与 `/settings` 的第一个 tab 渲染的是同一个 `ProviderPanel`（[settings/page.tsx L1100-L1102](file:///d:/qwq/项目/unified-2api/apps/web/app/(main)/settings/page.tsx#L1100-L1102)）。两个入口改同一个对象，却出现在「服务商」和「设置」两个一级归属下，是当前导航语义混乱的来源之一。
+`/providers` 与 `/settings` 的第一个 tab 渲染的是同一个 `ProviderPanel`（[settings/page.tsx L1100-L1102](file:///d:/qwq/项目/unified-2api/apps/web/app/(main)/settings/page.tsx#L1100-L1102)）。两个入口改同一个对象，却出现在「服务商」和「设置」两个一级归属下，是当前导航语义混乱的来源之一。（后续 `/providers` 已并入设置页，这条只作历史记录。）
 
 ## 2. 导航结构
 

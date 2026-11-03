@@ -20,7 +20,7 @@
 | 无 | `weight` | 同优先级层内的流量份额 |
 | 无 | `fallbacks.on` | 失败触发条件，见第 5 节 |
 
-与 sub2api 一致的关键点是 **fail closed**：解析不到就报错，不猜 provider、不静默换模型。当前实现的「第一个已启用 chat provider」兜底要移除（见第 9 节）。
+与 sub2api 一致的关键点是 **fail closed**：解析不到就报错，不猜 provider、不静默换模型。当前实现的「第一个已启用 chat provider」兜底已移除，改为模型目录唯一命中 + 404（见第 9 节）。
 
 ## 2. 文件结构与硬约束
 
@@ -47,7 +47,7 @@ notes:
 | 字段 | 约束 |
 | --- | --- |
 | 别名键 | 小写，`[a-z0-9._-]`，不含 `/`；命中时对请求 `model` 做 `lower()` |
-| `provider` | 必须存在于适配器注册表（由 `adapters/__init__.py` 的 `BUILDERS` 推导，当前 12 个） |
+| `provider` | 必须存在于适配器注册表（由 `adapters/__init__.py` 的 `BUILDERS` 推导，当前 14 个） |
 | `upstream_model` | 原样转发、大小写敏感；必须能追溯到上游 README 或本仓代码 |
 | `weight` | 0–1；同一别名内合计为 1.0；只决定同优先级层内的份额 |
 | `priority` | 非负整数；小者先选 |
@@ -173,7 +173,7 @@ notes:
 
 空表 / 配置无效时不要返回陈旧别名：启动期失败即拒绝启动；热加载失败保留 last-good 并告警。
 
-## 8. 10 家 provider × 协议 × 模型命名特征
+## 8. 14 家 provider × 协议 × 模型命名特征
 
 协议取自各适配器 `ProviderSpec.protocols`；模型名只写上游 README / 示例配置里真实出现的标识符。
 
@@ -190,10 +190,12 @@ notes:
 | `deepseek_sidecar` | OpenAI Chat + Anthropic（非标路径、仅非流式） | 原生名 `deepseek-chat`；Anthropic 侧用带日期的 Claude 映射名 | `deepseek-chat`、`claude-sonnet-4-20250514` | <https://github.com/ColudAI/Deepseek2Go> README `config.json` |
 | `qoder_sidecar` | OpenAI Chat + Anthropic Messages（上游还暴露 Responses，本仓未登记） | README 未列模型；模型名由产品线 / 地域前缀决定（`workbuddy/`、`global:`、`cn:`） | 无 README 样本（`unknown`） | <https://github.com/NextAgentX/qoder-trae-workbuddy-switch> README；[qoder.py](../apps/control/app/adapters/qoder.py#L400-L413) |
 
-补充：代码注册表实际有 **12** 个 provider，比 [PROVIDERS.md](PROVIDERS.md#L18-L29) 的 10 家多出两个主仓内置直连适配器：
+补充：代码注册表实际有 **14** 个 provider，比上表的 10 家多出四个主仓内置直连适配器：
 
 | provider id | 协议 | 命名特征 | 证据 |
 | --- | --- | --- | --- |
+| `codar` | OpenAI Chat + Anthropic Messages + Responses | 不维护固定清单，模型目录由上游 `/v1/codar/models` 返回 | [codar.py](../apps/control/app/adapters/codar.py) |
+| `codar_sidecar` | OpenAI Chat + Anthropic Messages | 与 `codar` 同一上游目录 | [codar_sidecar.py](../apps/control/app/adapters/codar_sidecar.py) |
 | `trae` | OpenAI Chat | `config_name` 小写；Solo 默认 `glm-5.2`，Work 默认 `DeepSeek-V4-Flash-Official` | [trae.py](../apps/control/app/adapters/trae.py#L42-L43) |
 | `qoder` | OpenAI Chat + Anthropic Messages + Responses | 与 `qoder_sidecar` 相同的产品线/地域前缀语义 | [qoder.py](../apps/control/app/adapters/qoder.py#L400-L413) |
 
@@ -209,7 +211,7 @@ notes:
 | 6 | `/v1/models` | 只聚合上游 id，不含别名，不去重；失败静默跳过 | 公开别名（去重）；上游清单走 `include_upstream=1` | 客户端看到的模型面变了，需同步文档 |
 | 7 | 配置读取 | 每个请求都读一次 SQLite `settings.model_map` | 进程内表 + 文件 mtime 热加载 | 去掉每请求 DB 读，但需要处理热加载失败 |
 | 8 | 校验 | 保存接口只做 `strip()`，无 schema 校验 | YAML 文件 + 脚本校验（唯一/provider/权重/成环/能力） | 配置错误从「运行时静默」前移到「发布前拦截」 |
-| 9 | provider 清单 | 文档写 10 家；注册表实际 12 家（多 `trae`、`qoder`） | 校验脚本按 `BUILDERS` 推导 12 家 | 文档需补两家，或明确「对外 10 家 / 内置 12 个适配器」口径 |
+| 9 | provider 清单 | 文档写 10 家；注册表实际 14 家（多 `codar`、`codar_sidecar`、`trae`、`qoder`） | 校验脚本按 `BUILDERS` 推导 14 家 | 文档与服务商页统一为 14 家口径 |
 | 10 | 兜底 | 无 | 429/5xx/timeout/能力不支持四级触发 | 新增一次请求内多候选重试；流式已开始后不换 |
 | 11 | 审计 | `model_map` 保存无审计事件（`gateway` 有） | 建议文件变更走 git + 校验脚本 | 迁移后变更留痕方式改变 |
 

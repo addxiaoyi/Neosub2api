@@ -27,7 +27,7 @@ cp .env.example .env
 | `UNIFIED_DATA_DIR` | `./data` | 数据目录（SQLite 落这里） | 一般不用改；compose 内固定为 `/data` |
 | `UNIFIED_DB_PATH` | `./data/unified.db` | SQLite 文件路径 | 想把库放别处时改 |
 | `UNIFIED_ADMIN_USER` | `admin` | 首个管理员用户名 | **只在 users 表为空时生效**（首次启动播种），之后改它没影响 |
-| `UNIFIED_ADMIN_PASSWORD` | `unified-admin` | 首个管理员密码 | 生产环境必须改；同样只在首次播种时生效 |
+| `UNIFIED_ADMIN_PASSWORD` | 空 | 首个管理员密码 | 不设时首次启动随机生成并写入 `data/admin-password.txt`；历史固定值 `unified-admin` 会被识别并轮换 |
 | `UNIFIED_SESSION_TTL_SEC` | `86400` | 登录会话有效期（秒） | 按需 |
 | `UNIFIED_COOKIE_SECURE` | `false` | 会话 Cookie 是否仅 HTTPS | 部署在 HTTPS 反代后面时改 `true` |
 | `UNIFIED_CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | 允许跨域的来源 | 前端和控制面不同源部署时改 |
@@ -73,23 +73,23 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 
 - 宿主机约定用 **8010**（8000 端口经常被占，见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)）。
 - 容器内监听 8000，compose 映射 `8010:8000`。
-- 启动即完成：建库建表（`data/unified.db`，WAL 模式）+ 播种管理员账号 + 注册 10 家 provider（默认仅 codebuddy 启用）。
+- 启动即完成：建库建表（`data/unified.db`，WAL 模式）+ 播种管理员账号 + 注册 14 家 provider（默认仅 codebuddy 启用）。
 - 健康检查：`curl http://127.0.0.1:8010/healthz`（无需鉴权）。
 
-浏览器打开 `http://127.0.0.1:8010` 即是管理界面（仪表盘 / 账号 / 服务商 / 密钥 / 设置）。
+浏览器打开 `http://127.0.0.1:8010` 即是管理界面（仪表盘 / 账号 / 配额 / 定价 / 任务 / 密钥 / 模型 / 测试台 / 统计 / 日志 / 安全 / 设置）。
 
 ## 5. 首次登录
 
-- 账号：`UNIFIED_ADMIN_USER` / `UNIFIED_ADMIN_PASSWORD` 的值（默认 `admin` / `unified-admin`，生产环境务必在首次启动前改掉）。
+- 账号：`UNIFIED_ADMIN_USER`（默认 `admin`）；口令取 `UNIFIED_ADMIN_PASSWORD`，未设置且库里没有口令时首次启动随机生成并写入 `data/admin-password.txt`（历史固定值 `unified-admin` 会被识别并轮换，不再作为默认口令）。
 - 登录后会种下 HttpOnly 会话 Cookie（`u2a_session`），有效期 `UNIFIED_SESSION_TTL_SEC` 秒。
 - 密码用 PBKDF2-SHA256（20 万轮）哈希存储；改密码会吊销该用户全部会话。
 
-curl 登录（保存 Cookie 供后续管理接口使用）：
+curl 登录（保存 Cookie 供后续管理接口使用，口令换成启动日志或 `data/admin-password.txt` 里的值）：
 
 ```bash
 curl -c cookies.txt -X POST http://127.0.0.1:8010/api/login \
   -H "content-type: application/json" \
-  -d '{"username":"admin","password":"unified-admin"}'
+  -d '{"username":"admin","password":"<初始口令>"}'
 # {"ok":true,"username":"admin","role":"admin"}
 ```
 
@@ -154,8 +154,7 @@ curl http://127.0.0.1:8010/v1/chat/completions \
   }'
 ```
 
-- `model` 的解析顺序：`x-provider` 请求头显式指定 → `provider前缀/模型名`（如 `opencode/gpt-4o-mini`）→ 「设置」页的模型别名表 → 第一个已启用且支持 chat 的 provider。
-- 没有任何已启用的 chat provider 时返回 503。
+- `model` 的解析顺序：`x-provider` 请求头显式指定 → `provider前缀/模型名`（如 `opencode/gpt-4o-mini`）→ 「设置」页的模型别名表 → 在已启用 provider 的模型目录里按同名 `id` 自动匹配（唯一命中直接走，多家命中 400 `ambiguous_model`，无命中 404）。只写模型名也能路由，前提是该 `id` 在 `/api/models` 里唯一。
 - 流式请求把 `"stream": true` 打开即可，SSE 原样直通。
 
 验证结果落在哪：仪表盘的统计来自 `request_logs`（次数/token/延迟/状态码），`usage_records` 另存上游返回的原始 usage JSON。日志是旁路记录，不影响响应。

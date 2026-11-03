@@ -14,8 +14,11 @@ services:
       UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
       CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
       TRAE_SIDECAR_BASE: ${TRAE_SIDECAR_BASE:-http://host.docker.internal:7871}
-      DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:7872}
+      # 连接地址：sidecar 跑在宿主机上（非 compose 服务），端口须与 sidecar 实际监听一致，上游默认 5001
+      DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:5001}
       QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
+      # codar2api（MIT）默认关闭：需自行 clone 上游并在宿主机启动，未启动时该 provider 如实显示不可达
+      CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
     volumes:
       - ./data:/data
     ports:

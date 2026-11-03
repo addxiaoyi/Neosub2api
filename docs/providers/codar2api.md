@@ -1,15 +1,21 @@
 # codar2api 协议契约与接入结论（clean-room 提炼）
 
-> 结论先行：**sidecar**。codar2api 自身是 MIT 的独立 Go 网关，对外已经提供
-> OpenAI Chat / Responses 与 Anthropic Messages 端点；它的主要工作量在 Codar 账号
-> 登录、令牌续期、签到与代理池，这些能力依赖 Codar 私有接口，主仓 clean-room 重写
-> 既不必要也不稳定。主仓只需一个 HTTP 代理适配器，不复制、不内置上游源码或二进制。
+> 结论先行：**协议层自研，账号自动化留在 sidecar**。codar2api 自身是 MIT 的独立
+> Go 网关，对外已经提供 OpenAI Chat / Responses 与 Anthropic Messages 端点；它的主要
+> 工作量在 Codar 账号登录、令牌续期、签到与代理池，这些能力依赖 Codar 私有接口。
+> 主仓已把「模型协议转发 + SSE + 多 token 轮换 + 401 续期」改为仓内直连
+> （`apps/control/app/adapters/codar.py`），不复制、不内置上游源码或二进制；
+> 扫码/短信登录、新 IP 验证、签到仍由 sidecar 完成。
 >
 > 依据：`AiXiaoc/codar2api` 在 commit `d7f50246c49ef5cc3df8eb014e79397cfdd0f8b5`
 > （2026-11-01，发布 v0.1.3）的仓库内容：README、LICENSE、go.mod，以及
 > `internal/gateway/` 下的路由、鉴权、转发、调度、上游与用量模块。
-> 本文件只记录协议与行为事实，不包含上游源码片段。主仓实现：**尚未落地**，
-> 计划文件见第 6 节。
+> 本文件只记录协议与行为事实，不包含上游源码片段。主仓实现：**已落地**，
+> `apps/control/app/adapters/codar_sidecar.py` 与 `apps/control/app/adapters/codar.py`，
+> 两者分界见第 10 节，接入点见第 6 节。
+>
+> **2026-11-02 更新**：协议层已改为仓内直连实现（`codar.py`），不再依赖 sidecar
+> 的模型转发；扫码/短信登录、新 IP 验证、签到仍必须留在 sidecar。第 10 节给出逐项分界。
 
 ## 0. 项目事实
 
@@ -157,43 +163,45 @@
 
 | 方案 | 可行性 | 代码证据 | 结论 |
 | --- | --- | --- | --- |
-| 主仓 clean-room 重写适配器 | **低** | 真正的上游不是 OpenAI 兼容服务，而是 Codar 私有接口：`/api/user/self`（`upstream.go:287`）、`/v1/gettoken`（`upstream.go:356`）、`/v1/daily-sign`（`upstream.go:448`）、`/api/codar/activities/free-model/claim`（`upstream.go:467`）、`/v1/token/refresh`（`upstream.go:478`）、`/v1/codar/usage/daily`（`upstream.go:636`）；登录还包含微信扫码/短信/新 IP 验证（`login.go:33-54`、`login.go:217`）。这些都没有公开协议规范，且会随 Codar 客户端版本变化 | 不做 |
-| **sidecar（推荐）** | **高** | 上游已经暴露标准 OpenAI/Anthropic 端点（第 1 节），且为 MIT（`LICENSE:1-3`）；主仓只需 HTTP 代理，不需要理解 Codar 私有协议 | **采用** |
+| 主仓自研协议层 | **高（限协议层）** | 模型端点没有协议转换：codar2api 把同一路径拼到 `APIBase` 后原样转发（`relay.go:260-263`），并用 Bearer 注入账号 JWT（`relay.go:275`）。因此只要有 token，就能用 Python 直接复现转发、SSE 与模型目录 | **已采用**（`codar.py`） |
+| 主仓自研账号自动化 | **低** | `/api/user/self`（`upstream.go:287`）、`/v1/gettoken`（`upstream.go:356`）、`/v1/daily-sign`（`upstream.go:448`）、`/api/codar/activities/free-model/claim`（`upstream.go:467`）、`/v1/codar/usage/daily`（`upstream.go:636`）；登录包含微信扫码/短信/新 IP 验证（`login.go:33-54`、`login.go:217`）。无公开规范且随客户端版本变化 | 不做，留在 sidecar |
+| **sidecar（保留）** | **高** | 上游已经暴露标准 OpenAI/Anthropic 端点（第 1 节），且为 MIT（`LICENSE:1-3`）；账号登录、签到、代理池仍由它承担 | **保留** |
 | 独立工具 | 中 | codar2api 自身可独立部署；但绕开控制面后，网关 Key、用量归因、模型别名都不生效 | 不采用 |
 | 不建议接入 | 可行但浪费 | 与 codebuddy2api / qoder-switch 的账号池 + 双协议能力高度重叠（第 8 节） | 不作为主方案 |
 
-选择 sidecar 的合规前提：上游源码/二进制**不进入主仓**，适配器只做 HTTP 调用；
-`codar2api` 由用户在外部目录自行 clone 与启动。
+## 6. 本仓接入点（已落地）
 
-## 6. 计划新增文件与能力位
-
-> 本轮只做分析，未改动 `apps/control/app/`。以下为落地时需要新增/改动的文件。
+两个适配器并存：`codar.py` 走仓内直连（推荐），`codar_sidecar.py` 保留为旁路。
+上游源码/二进制不进入仓库。
 
 | 文件 | 动作 | 内容 |
 | --- | --- | --- |
-| `apps/control/app/adapters/codar_sidecar.py` | 新增 | `ProviderSpec(id="codar_sidecar")` + 继承 `OpenAICompatAdapter`；`messages()` 转发 `/v1/messages`；默认 Base URL `http://127.0.0.1:8801` |
-| `apps/control/app/adapters/__init__.py` | 改动 | 导入 `codar_sidecar` 并加入 `BUILDERS` |
-| `providers/codar2api/README.md` | 新增（可选） | 上游参考来源与本地启动说明，格式对齐 `providers/trae2api/README.md` |
-| `docs/providers/codar2api.md` | 新增 | 本文件 |
+| `apps/control/app/adapters/codar.py` | 已新增 | `CodarAdapter(id="codar")`；直连 `APIBase`：models / chat / messages / responses，多 token 轮换 + 401 续期；登录类方法继承基类 501 |
+| `apps/control/app/adapters/codar_sidecar.py` | 已新增 | `CodarSidecarAdapter(id="codar_sidecar")`；chat/models 继承 `OpenAICompatAdapter`；`messages()` 转发 `/v1/messages`；默认 Base URL `http://127.0.0.1:8801` |
+| `apps/control/app/adapters/__init__.py` | 已改动 | `codar` 与 `codar_sidecar` 均已导入并注册进 `BUILDERS`（`test_providers.py` 有断言覆盖） |
+| `apps/control/app/config.py` | 已改动 | `Settings.codar_sidecar_base`，读 `CODAR_SIDECAR_BASE` |
+| `apps/control/app/registry.py` | 已改动 | `ENV_BASE_FIELDS["codar_sidecar"] = "codar_sidecar_base"`，地址来源按 `env_base_pids` 判定 |
+| `docker-compose.yml` / `.env.example` | 已改动 | 仅新增 `CODAR_SIDECAR_BASE` 条目与注释（默认关闭） |
+| `providers/codar2api/README.md` | 已新增 | 上游地址、MIT、启动方式、端口、不改动上游源码 |
+| `docs/providers/codar2api.md` | 本文件 | 协议契约、接入结论与分界 |
 
-能力位（`adapters/base.py:6-16` 的 `CAPABILITY_KEYS`）：
+`codar.py` 能力位（`adapters/base.py:6-16` 的 `CAPABILITY_KEYS`）：
 
 | 能力位 | 取值 | 理由 |
 | --- | --- | --- |
-| `chat` | true | `/v1/chat/completions` 直通 |
-| `messages` | true | `/v1/messages` 直通，含 SSE |
-| `models` | true | `/v1/models` 返回 `data[].id` |
-| `responses` | false | 上游有 `/v1/responses`，但本批不实现，不声明假能力 |
-| `oauth` | false | 登录在 sidecar 内完成，主仓不参与 |
-| `checkin` | false | 签到在 sidecar 内自动执行，没有对外 API |
-| `credits` | false | 余额在 sidecar 内管理，没有对外 API |
-| `register` | false | 上游没有批量注册；账号由人工扫码/短信/粘贴令牌导入 |
-| `sidecar` | true | 独立进程 |
+| `chat` | true | 直连 `/v1/chat/completions` |
+| `messages` | true | 直连 `/v1/messages`，补 `anthropic-version: 2023-06-01` |
+| `models` | true | 读私有目录 `/v1/codar/models` |
+| `responses` | true | 直连 `/v1/responses`；上游不实现时原样回 404/501，本地不伪造 |
+| `oauth` / `checkin` / `credits` / `register` | false | 仍属 sidecar 的账号自动化 |
+| `sidecar` | false | 仓内进程内实现 |
 
-`ProviderSpec` 其它字段建议：`runtime="独立进程 sidecar（Go）"`、`license="MIT"`、
-`risk_level="safe"`、`protocols=("openai.chat.completions", "anthropic.messages")`。
+`codar.py` 的 `ProviderSpec`：`runtime="仓内 Python 适配器（无 sidecar）"`、
+`license="MIT（仅参考上游公开行为，未复制源码）"`、`risk_level="safe"`、
+`protocols=("openai.chat.completions", "anthropic.messages", "openai.responses")`。
+`codar_sidecar` 的规格保持不变（`sidecar` 能力位为 true，`runtime` 为独立 Go 进程）。
 
-## 7. 与现有 10 家的能力重叠
+## 7. 与现有 provider 的能力重叠
 
 | 现有上游 | 与本上游的重叠点 | 重叠程度 |
 | --- | --- | --- |
@@ -212,27 +220,63 @@
 
 ## 8. 我方实现需要对齐的最小集
 
-1. `GET /v1/models`：转发并解析 `data[].id`；空列表视为「在线但无模型」，不报不可达。
+`codar.py`（仓内直连）已按以下口径实现；`codar_sidecar.py` 只覆盖其中 1-3 的透传部分。
+
+1. `GET /v1/models`：读取私有目录 `/v1/codar/models` 并解析 `data[].id`；空列表视为
+   「在线但无模型」，不报不可达。
 2. `POST /v1/chat/completions`：JSON 与 SSE 直通，不改写响应体、不重算 usage。
-3. `POST /v1/messages`：原样转发；流式与非流式都由上游处理，主仓不做协议转换。
-4. 鉴权：客户端 key 由控制面网关管理；sidecar key 走 provider `api_key`，
-   以 `Authorization: Bearer` 注入，不进入请求体、不返回前端。
-5. 错误：401/402/429/5xx 原样回传状态码与正文；不把 sidecar 的 429 改写成 200。
-6. 健康检查：`GET /health` 或 `/ping`（无需 key），区分「sidecar 不在线」与
-   「在线但账号池为空」（后者表现为 `/v1/models` 空列表或 503）。
-7. 不重试：sidecar 已经做账号级换号与冷却，适配器不再换 key、不再重放请求，
-   避免一个请求在两层各重试 3 次。
+3. `POST /v1/messages`：原样转发，补 `anthropic-version: 2023-06-01`；协议差异由 Codar
+   上游处理，主仓不做协议转换。
+4. `POST /v1/responses`：原样转发；上游不支持时把 404/501 原样回给调用方，不伪造成功。
+5. 鉴权：客户端 key 由控制面网关管理；Codar 账号 JWT 走 provider `api_key` 或
+   `options.tokens`，以 `Authorization: Bearer` 注入，不进入请求体、不返回前端。
+6. 错误：401/402/403/429/5xx 原样回传状态码与正文；不把 429 改写成 200。
+7. 多 token：默认轮询（`options.tokens` 与 `api_key`），单次请求最多尝试 3 个 token，
+   与上游 `store.go:174` 的默认尝试数一致。
+8. 401 续期：用失效 token 调 `POST {pay_base}/v1/token/refresh`，取 `data.token` 或
+   `token` 替换后立即重试一次（依据 `upstream.go:469-477` 的 `renew()`）。
+   `pay_base` 默认 `https://api.kuaipaper.com`，可用 `options.pay_base` 覆盖。
+9. 不重试非 401 错误：400/403/413/422 等直接回传，避免同一请求在多层重复放大。
 
 ## 9. 不做 / 待确认
 
-- 不复刻 Codar 登录（微信扫码、短信、新 IP 验证）、签到、免费模型领取、令牌续期、
-  代理池、管理面板。
+- 不复刻 Codar 登录（微信扫码、短信、新 IP 验证）、签到、免费模型领取、代理池、
+  账号调度与管理面板；这些继续由 codar2api sidecar 承担。
 - 不把 codar2api 源码或编译产物放进主仓；sidecar 由用户自行部署。
-- **未用真实 Codar 账号验证**：本轮没有可用凭证，端点与字段来自上游代码与 README；
-  真实账号下的模型清单、`tier`/余额判断、403 封控粒度仍需实测确认。
-- `POST /v1/responses` 上游支持但主仓本批不声明；后续要接，需单独实现
-  `forward("/v1/responses")` 并用真实 SSE 验证。
+- **未用真实 Codar 账号验证**：本轮测试使用假上游。真实账号下的模型清单、`tier`/
+  余额判断、403 封控粒度、`/v1/responses` 是否可用仍需实测确认。
+- `codar_sidecar` 仍不声明 `responses` 能力位；仓内 `codar.py` 才声明并转发。
 - Codar 平台的服务条款限制「仅管理本人名下账号」，转售/共享风险由部署方承担；
   这一点不因上游是 MIT 而消失。
 - 面板创建的 Key 必须把模型范围设为「全部」或包含实际使用的模型，否则
   `/v1/chat/completions` 会以 403 拒绝（`auth.go:357-361`、`app.go:319-321`）。
+  仓内直连不经过这层 Key，不适用该限制。
+
+## 10. 仓内实现 vs 仍需 sidecar（2026-11-02）
+
+| 能力 | 仓内 `codar.py` | 仍需 sidecar | 依据 |
+| --- | --- | --- | --- |
+| `GET /v1/models` | 已自研：`GET {base}/v1/codar/models` → `data[].id` | 否 | `app.go:285-305`、`upstream.go:210-245` |
+| `POST /v1/chat/completions`（JSON） | 已自研：按原路径转发 + Bearer + UA | 否 | `relay.go:260-279` |
+| `POST /v1/chat/completions`（SSE） | 已自研：逐块透传，不改帧 | 否 | `relay.go:412-449` |
+| `POST /v1/messages`（含 SSE） | 已自研：原路径转发并补 Anthropic 版本头 | 否 | `relay.go:290-292` |
+| `POST /v1/responses` | 已自研转发；上游未实现时原样回 404/501 | 否（登录仍要） | `app.go:189-202`、`relay.go:260` |
+| 多 token 轮换 | 已自研：`options.tokens` 轮询，最多 3 次 | 否 | `store.go:174`、`scheduler.go:83-115` |
+| 401 续期 | 已自研：`{pay_base}/v1/token/refresh` | 否 | `upstream.go:469-477` |
+| 初始 token 获取 | 用户自行粘贴 JWT | 是（扫码/短信/读本机 config.json） | `login.go:33-54`、`login.go:217` |
+| 新 IP 验证 / 人机校验 | 不实现 | 是 | `login.go:217`、`upstream.go:59-81` |
+| 每日签到 / 领免费模型 | 不实现 | 是 | `upstream.go:448`、`upstream.go:467` |
+| 账号池调度 / 冷却 / 代理池 | 不实现（仅 token 轮换） | 是 | `scheduler.go:50-127`、`upstream.go:59-81` |
+| 管理面板与本地 Key | 不实现 | 是 | `app.go:341-343`、`auth.go:333-361` |
+
+一句话：**能离线复现的协议层全部在仓内；任何需要人机交互或浏览器会话的链路都留在
+sidecar。** 不使用 sidecar 时，用户只需提供一个有效的 Codar 账号 JWT。
+
+token 来源（任选其一）：
+
+1. 已部署 codar2api 时，从它的管理面板复制账号 token（面板「粘贴 JWT」导入的就是它）；
+   数据目录下的账号 JSON 里也有同一字段。
+2. 本机安装了 Codar 客户端时，读 `~/.codar/config.json` 中的账号 token。
+3. token 形如 `eyJ...` 的三段 JWT；只填进服务商页 `api_key`（或 `options.tokens`），
+   不会进入请求体，也不会回显到前端。
+

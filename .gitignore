@@ -21,6 +21,9 @@ deploy/.env
 deploy/certs/
 deploy/certbot-webroot/
 
+# 仅在本地留存的验证截图（体积大，不随仓库分发）
+docs/ux-shots/
+
 # 日志与临时构建产物
 *.log
 logs/

@@ -144,6 +144,35 @@ powershell -File scripts/check-upstreams.ps1 -Update
 
 **顺序不能反。** 先 `-Update` 再评估，等于把"没看过"的 commit 标记成"看过"，下次检查就永远不会再提示。
 
+## 巡检记录
+
+本节按日期倒序记录每次远端巡检的结论。巡检只确认"HEAD 是否偏移、偏移是否触碰协议、仓库是否异常"，**不推进 `analyzed_commit`**；读数与结论写在 `upstreams/upstreams.yaml` 的 `checked_at` 与 `notes`。
+
+### 2026-11-03
+
+检查方式：`powershell -File scripts\check-upstreams.ps1 -Json` 取默认分支 HEAD（全部 11 家由 `git ls-remote` 成功返回）；`gh api repos/<repo>` 读 `archived` / `disabled` / `license`；唯一偏移仓库在 `%TEMP%` 浅克隆后只 diff 协议相关文件。
+
+| 仓库 | 基线 → 远端 HEAD | 判定 | 依据 / 影响 |
+| --- | --- | --- | --- |
+| `addxiaoyi/codebuddy2api` | `92b8b91` → 同值 | 协议未变 | HEAD 未移动，适配器无需改动。 |
+| `czg86389-hub/muse2api` | `1cd0168` → 同值 | 协议未变 | HEAD 未移动。 |
+| `kaibush/grok-register` | `a5eddc2` → `0cca5cb` | 协议未变 | 唯一偏移。diff 仅 `.github/data/stars-history.json` 与 `docs/images/stars-trend-{dark,light}.svg`（stars 527→528），无代码、路由、许可证改动；`grok-register` 无推理协议，基线不推进。 |
+| `jasonxu114514/opencode2api` | `58f5667` → 同值 | 协议未变 | HEAD 未移动；GPL-3.0 隔离约束不变。 |
+| `addxiaoyi/gptGrok2api` | `0335d62` → 同值 | 协议未变 | HEAD 未移动。 |
+| `addxiaoyi/ZCode2api` | `25c57e6` → 同值 | 协议未变 | HEAD 未移动。 |
+| `Wei-Shaw/sub2api` | `4a4a83e` → 同值 | 协议未变 | HEAD 未移动；LGPL-3.0 隔离约束不变。 |
+| `JeffHu0912/trae2api` | `ec20c08` → 同值 | 协议未变 | HEAD 未移动。 |
+| `ColudAI/Deepseek2Go` | `3d9f10c` → 同值 | 协议未变 | HEAD 未移动；仍无 LICENSE。 |
+| `NextAgentX/qoder-trae-workbuddy-switch` | `93d873c` → 同值 | 协议未变 | HEAD 未移动；LICENSE 首行仍为 PolyForm Noncommercial 1.0.0。 |
+| `AiXiaoc/codar2api` | `d7f5024` → 同值 | 协议未变 | HEAD 未移动。 |
+
+**协议变化：0 家。仓库异常：0 家。无法检查：0 家。** 11 家 `archived=false`、`disabled=false`。
+
+许可证：本次巡检未发现任何许可证变更。GitHub API 对各仓报告的 `license` 与清单一致（MIT / GPL-3.0 / LGPL-3.0 / `none`）；两处需要人工解释：
+
+- `NextAgentX/qoder-trae-workbuddy-switch` 在 GitHub API 里是 `NOASSERTION`（GitHub 的许可证识别器不认 PolyForm），以仓内 `LICENSE` 文件首行为准，仍是 **PolyForm Noncommercial 1.0.0**，商用限制不变。
+- `ColudAI/Deepseek2Go` 无 `LICENSE` 文件（raw 取回 404），仍是默认 All Rights Reserved，只允许 sidecar 运行。
+
 ## 许可证变化与退出策略
 
 ### 需要立刻停下来处理的信号
@@ -186,6 +215,8 @@ notes: "2026-11-02 跟进 1cd0168：新增 /v1/images，未接入；chat 协议�
 ```
 
 不要写「已更新」这种没有信息量的话。半年后回看时，需要知道当时判断了什么。
+
+巡检只写 `checked_at` 与 `notes`；`analyzed_commit` 只在真正读完新 commit 后才推进，并在 notes 里写明推进原因。
 
 ## 常见误区
 

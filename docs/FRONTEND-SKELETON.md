@@ -1,5 +1,7 @@
 # 前端骨架：可扩展但不改观
 
+> **已判定不采用，仅作存档。** 本文的 tokens、AppShell、states、provider-kit 等自造抽象未采纳，不得作为实现依据；前端基准与红线见 [docs/FRONTEND-BASELINE.md](FRONTEND-BASELINE.md)。正文保持原样，不再维护。
+
 本仓前端（`apps/web`）保持 codebuddy2api 迁移时的原样：底部 dock、右上角语言/版本切换、页面结构、组件与视觉语言都不变。骨架只做一件事——把写死在页面里的 provider 元数据收进配置，让新增第 12 家 provider 时只加 descriptor 和适配器。
 
 > `docs/design/` 下的信息架构提案（`ia-proposal.md`、`prototype.html`、`README.md`）仅存档，未采纳。
@@ -52,7 +54,7 @@ export interface ProviderDescriptor {
   vendor: string;
   license: string;
   runtime: string;
-  status: 'implemented' | 'stub' | 'sidecar';
+  status: 'implemented' | 'sidecar';
   description: string;
   defaultBaseUrl: string;
   protocols: string[];

@@ -127,7 +127,7 @@
 | S-01 | 已修复 | 全部 `/api/settings/*` 读写改 `admin_user`；`_read_config` 把密钥字段换成 `*_masked`（前 4 + 后 4）与 `has_*`，`provider_config`/`upstream_config`/`upstash` 递归脱敏；新增 `POST /api/settings/secret/reveal`（管理员 + `audit_logs` 记 actor/路径/IP，不记明文）；保存时丢弃回传的 `*_masked`，`push_config` 才用明文。验证：`test_security.py::test_viewer_cannot_read_settings`、`test_admin_settings_masks_upstream_key`、`test_reveal_returns_plaintext_and_writes_audit`、`test_non_admin_cannot_reveal`；契约同步更新在 `test_debt.py::test_detached_groups_fall_back_to_real_settings`。 |
 | S-02 | 已修复 | 新增 `api_utils.parse_bool`：布尔直通，字符串仅接受 `true/false`（大小写不敏感），其他 400；`save_gateway_config` 与 `get_gateway_config` 同源校验；`v1._anonymous_allowed` 复用解析，库里脏值按「关闭」处理。验证：`test_string_false_is_rejected_and_gateway_stays_closed`（含 `"false"`/`"FALSE"` 解析为 False、匿名 401、`1/0/null/"yes"/""/[]` 全部 400）、`test_bool_and_mask_helpers`。 |
 | S-03 | 已修复 | `config._admin_password`：env（且非历史默认值）> `data/admin-password.txt` > 首次 `secrets.token_urlsafe(24)` 生成并落盘 0600；`main._seed_admin` 对环境变量显式轮换、对已有库识别历史默认口令 `unified-admin` 并更新+吊销全部会话；启动日志打印口令来源与文件路径；默认监听改 `127.0.0.1:8010`（`UNIFIED_HOST`/`UNIFIED_PORT`），Dockerfile 容器内 0.0.0.0、compose 端口默认只映射 `127.0.0.1`、`.env.example` 去掉固定口令。验证：`test_default_admin_password_is_generated`（历史默认值被忽略、随机且落盘、二次读为 `file` 来源）；测试控制面启动即使用随机/文件口令路径。 |
-| S-04 | 已修复 | 新增 `app/net_guard.guard_upstream_url`：解析主机后拒绝 loopback/私网/链路本地/保留/组播/未指定与 `169.254.169.254`、`fd00:ec2::254`；接入 `registry.update(base_url)` 与 `QuotaStore.add_account/update_account(upstream_base)`；内网 sidecar 场景用 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 显式放开。验证：`test_private_upstreams_are_blocked`、`test_sub2_store_rejects_private_upstream`。 |
+| S-04 | 已修复 | 新增 `app/net_guard.guard_upstream_url`：解析主机后拒绝 loopback/私网/链路本地/保留/组播/未指定与 `169.254.169.254`、`fd00:ec2::254`；接入 `registry.update(base_url)`、凭据库写入与 `QuotaStore.add_account/update_account(upstream_base)`。本地 loopback 按 `spec.default_base_url` 推导放行（2026-11-03 补充，边界见下）；其余内网地址仍用 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 显式放开，云元数据地址无条件拒绝。验证：`test_private_upstreams_are_blocked`、`test_sub2_store_rejects_private_upstream`，以及 2026-11-03 新增的 loopback / 私网 / 元数据 / 公网 / 对外字段 7 项。 |
 | S-05 | 延期（需决策） | 原因：上游 key / `sub2_accounts.api_key` / session token 明文落库，改应用级加密要先定密钥托管（env 密钥、KMS 还是信封加密）、既有库迁移与备份流程，属产品/运维决策，单靠代码改动会留下「密钥和密文同机」的假安全。现状已在 notices 与部署文档标注「备份按敏感数据管理」。 |
 | S-06 | 部分修复（配额延期） | 已加：SSE 单请求最大时长（默认 600s，`UNIFIED_SSE_MAX_SECONDS`，超时中断并留下 `error` 记录，显式 `aclose` 释放上游）；`last_used_at` 60s 节流写入，减少 SQLite 写锁。延期：每 key 并发 / QPS / 日配额——需要产品定义额度口径与超限行为（拒绝码、是否计数、是否按模型区分）。 |
 | S-07 | 延期（需决策/升级窗口） | 原因：升级 `next >= 15.5.28` 需改 `package-lock` 并做全量前端回归，属独立依赖升级窗口；当前生产用 `output: export` 静态产物，不暴露 Next Image Optimization / Server Actions / `next dev`。已在 `THIRD-PARTY-NOTICES.md` 记录受影响版本。 |
@@ -146,3 +146,15 @@
 | S-20 | 延期 | `check-update`/`versions` 对 viewer 开放；改为管理员或加缓存需确认前端调用方。 |
 | S-21 | 部分修复（延期） | 已落审计：`settings.gateway`（匿名开关）、`settings.reveal_secret`（查看明文）。延期：provider key 变更、用户增删改、model-map 保存的统一审计，需先定 `audit_logs` 的 action 命名与保留期。 |
 | S-22 | 延期（CI 决策） | 原因：恢复 `npm audit --omit=dev` 门禁要处理现有 1 critical + 4 high 的存量告警（与 S-07 的升级窗口绑定），否则流水线会长期红。 |
+
+### S-04 边界补充（2026-11-03）
+
+本地 sidecar 地址（`trae_sidecar` / `deepseek_sidecar` / `qoder_sidecar` / `codar_sidecar`，以及默认地址同为 `127.0.0.1` 的 `codebuddy` 管理端）不再要求手动开启全局开关：
+
+- **放行依据**：`spec.default_base_url` 本身是否指向 loopback（`127.0.0.0/8`、`::1`、`localhost`）。名单由 spec 推导，新增 sidecar 不用改守卫代码。
+- **放行范围**：只有 loopback。`127.0.0.0/8` 整段放行（RFC 6890 保留给环回，无法路由出本机，只认 `127.0.0.1` 并不能多挡攻击面）。
+- **继续拦截**：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、链路本地 `169.254.0.0/16`、组播/保留/未指定地址。
+- **绝对红线**：`169.254.169.254` 与 `fd00:ec2::254` 云元数据地址无条件拒绝，包括 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 时。
+- **全局开关**：`UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 语义未变（跳过 IP 段检查并优先于 per-provider 判断），唯一收紧是元数据地址仍拒绝。
+- **对外契约**：`GET /api/providers` 新增 `allows_local_base_url`；`PATCH /api/providers/{id}` 与 `/api/provider-credentials` 写 `base_url` 复用同一守卫，400 文案说明「这家是否允许本地地址」及正确做法。
+- **残余风险**：守卫在保存时解析 DNS，保存到实际请求之间仍有 DNS 重绑定窗口（与修复前同性质，本次未引入连接期二次校验）；白名单信任 spec 里的静态默认地址，若默认值写错会让该 provider 获得 loopback 权限。

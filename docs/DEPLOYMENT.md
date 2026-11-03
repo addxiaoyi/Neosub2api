@@ -20,7 +20,7 @@ docker compose up -d --build
 - 访问入口二选一：
   - `http://127.0.0.1:8080` —— nginx 前端（静态页面 + 反代 `/api`、`/v1`、`/healthz` 到 `control:8000`）；
   - `http://127.0.0.1:8010` —— 控制面直接托管前端静态产物（控制面会把 `apps/web/out` 挂在 `/`；容器里该目录不存在时，控制面 `/` 返回提示 JSON，此时用 8080 入口）。
-- 默认登录 `admin` / `UNIFIED_ADMIN_PASSWORD` 的值（默认 `unified-admin`，**生产必改**）。
+- 登录 `admin` / `UNIFIED_ADMIN_PASSWORD` 的值；该变量为空时首次启动随机生成口令并写入 `data/admin-password.txt`（容器内 `/data/admin-password.txt`），历史固定值 `unified-admin` 会被轮换。
 - compose 已把控制面的上游地址默认值指向宿主机（`CODEBUDDY_BASE=http://host.docker.internal:7864` 等），sidecar 跑在宿主机时无需改。Linux 宿主机如 `host.docker.internal` 不可达，在 compose 里为 control 服务加 `extra_hosts: ["host.docker.internal:host-gateway"]`（需自行编辑 compose，本文不代改）。
 
 常用运维命令：
@@ -40,7 +40,7 @@ docker compose down            # 停止（./data 保留）
 | **8080** | nginx 前端（宿主机） | 容器内 80 |
 | 7864 | codebuddy2api 管理端（上游，需自部署） | 7863 为其 Go 数据面 |
 | 7865 / 7867 / 8787 | muse / gptgrok / zcode（上游，需自部署） | provider 默认地址，可在管理页改 |
-| 7871 / 7872 / 7873 | trae / deepseek / qoder sidecar（上游，需自部署） | 同上 |
+| 7871 / 5001 / 7873 | trae / deepseek / qoder sidecar（上游，需自部署） | 同上；deepseek 上游默认 5001 |
 
 控制面本身只占 8010 和数据目录；各家上游是独立进程/容器，自行决定部署位置，用「服务商」页的 base_url 或 `.env` 指过去即可。
 

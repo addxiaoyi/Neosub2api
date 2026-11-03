@@ -3,8 +3,9 @@
 > 依据：`czg86389-hub/muse2api` 在 commit `1cd01682533dbf2c015fa879a8dc09534b50b4a3`
 > （2026-11-02，v1.6.6）的仓库内容；与上一条基线 `fa3b992ff3ffde395c779b1084066c7bc1530d6a`
 > （v1.6.5）逐文件对比。本文件只记录协议事实，不含上游源码片段。
-> 主仓实现：`apps/control/app/adapters/muse.py`（继承 `OpenAICompatAdapter`，仅代理
-> `/v1/chat/completions` 与 `/v1/models`，MIT）。
+> 主仓实现：`apps/control/app/adapters/muse.py`，**状态：仓内实现（直连）**——不再继承
+> `OpenAICompatAdapter`，改为直连 Muse 官方 OpenAI 兼容入口（Bearer API key），
+> SSE 逐 chunk 直通；`base_url` 仍可指回旧 sidecar 保持兼容（MIT，本仓自研）。
 
 ## 1. 对外协议与端点
 
@@ -160,9 +161,13 @@
 
 ## 6. 我方实现需要对齐的最小集
 
-1. `base_url` 指向 sidecar（部署映射 `http://127.0.0.1:7865`），`api_key` 填 `MUSE2API_KEY`，以 `Authorization: Bearer` 注入。
+1. `base_url` 默认指向 Muse 官方 OpenAI 兼容入口 `https://api.meta.ai`（该默认域为公开
+   资料推断，**未用真实凭证验证**；账号体系不同时直接改 `base_url`），`api_key` 以
+   `Authorization: Bearer` 注入；旧部署可指回 sidecar `http://127.0.0.1:7865`；
+   `options.cookie` 可带 `hatch_sess`，供回退到网页网关时使用。
 2. `GET /v1/models` 必须返回 `{"object":"list","data":[3 项]}`；非空即视为在线。
 3. `POST /v1/chat/completions` 非流式返回 `chat.completion`，`usage` 全零属正常，不能当异常。
+   本仓对该通道按全零如实记账：`billing_ledger.note=usage_zero:muse`，金额 0，不做 token 估算。
 4. 流式必须逐帧转发 `data:`，保留 `[DONE]`；不要在 `usage` 全零时中断。
 5. 鉴权失败按 401 处理；`/v1/*` 错误包是 `{"error":{message,type,param,code}}`，可直接透传。
 6. 模型名不需要改写，上游自己会把常见别名归一；本仓只透传 `model`。
@@ -184,7 +189,9 @@
 的函数体无改动，SSE 辅助函数（`app.py:1426-1466`）无改动，`Dockerfile` /
 `docker-compose.yml` / `requirements.txt` / `LICENSE` 均不在 diff 中。
 
-## 8. 部署版本要求（硬性）
+## 8. 部署版本要求（仅回退到 sidecar 时适用）
+
+> 仓内实现直连官方入口，正常部署不需要 sidecar；把 `base_url` 指回旧服务时才受本节约束。
 
 **sidecar 必须 ≥ v1.6.6，浏览器扩展必须 1.0.2，油猴脚本必须 1.1.2。**
 

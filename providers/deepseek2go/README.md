@@ -35,7 +35,8 @@ git clone --depth 1 https://github.com/ColudAI/Deepseek2Go.git ../Deepseek2Go
 cd ../Deepseek2Go
 # 需要外部 WASM 文件 sha3_wasm_bg.7b9ca65ddd.wasm（自行从 Deepseek2Go 作者渠道获取）
 go run ./cmd/server
-# 默认端口见 README.md，设为 TRAE_SIDECAR_BASE=http://127.0.0.1:<port>
+# 上游默认监听 5001（PORT 可覆盖）；网关侧默认 DEEPSEEK_SIDECAR_BASE=http://127.0.0.1:5001
+# 若自行改 sidecar 端口，需同步该环境变量
 ```
 
 ## 合规建议

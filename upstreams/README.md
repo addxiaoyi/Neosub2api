@@ -28,6 +28,7 @@
 | `integration` | `in-repo-rewrite` / `sidecar` / `reference-only` / `not-integrated` | 我们和它的关系，见下一节。 |
 | `analyzed_commit` | 40 位 SHA 或 `unknown` | 分析时 `git rev-parse HEAD` 得到的真实值，不手填、不推测。 |
 | `analyzed_at` | `YYYY-MM-DD` | 首次把该 commit 读完的日期。`-Update` 时同步刷新。 |
+| `checked_at` | `YYYY-MM-DD` | 最近一次远端巡检日期。巡检脚本不写这个字段，人工确认后填写；只表示"查过 HEAD"，不表示"读过新 commit"。 |
 | `our_files` | 相对主仓根的文件列表 | 我们对应实现的适配器、服务、路由与契约文档。不存在的能力不要写。 |
 | `protocols` | 协议标识列表 | 如 `openai.chat.completions`、`anthropic.messages`、`openai.responses`。没有对外协议就写 `[]`。 |
 | `notes` | 字符串 | 语言栈、注意事项、许可证风险、未落地计划。写事实，不写猜测。 |
@@ -97,7 +98,7 @@ powershell -File scripts/check-upstreams.ps1 -Manifest ..\other.yaml
 
 ## 已知局限
 
-- 主仓当前不是 git 仓库，`analyzed_commit` 只针对上游，不记录本仓版本。
+- 主仓是 git 仓库时，`analyzed_commit` 仍只针对上游，不记录本仓版本。
 - `git ls-remote` 取到的是默认分支 HEAD，不是 tag；上游发版不回主干时可能漏报。
 - GitHub API 兜底受匿名速率限制（每小时 60 次），11 个仓一次检查足够，频繁跑会被限流。
 - `behind` 依赖 GitHub compare API，需要清单里有可比较的基线 SHA；`unknown` 或 API 失败时返回 `null`。
