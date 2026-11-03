@@ -1,0 +1,116 @@
+name: upstream-sync
+
+# 每周巡检 11 家上游仓库是否有新 commit 或访问异常。
+# 只做通知：不提交清单、不让构建失败；发现 updated / error 时开 issue 或追加评论。
+# 依赖只有 Python 标准库与 GitHub 官方 action，不引入第三方脚本。
+
+on:
+  schedule:
+    # 每周一 02:00 UTC（北京时间 10:00）
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 巡检上游 HEAD
+        id: check
+        env:
+          # 令牌只进环境变量，脚本不回显、不写文件。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/check_upstreams.py --json > upstream-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          total=$(jq -r '.totals.total' upstream-report.json)
+          unchanged=$(jq -r '.totals.unchanged' upstream-report.json)
+          updated=$(jq -r '.totals.updated' upstream-report.json)
+          failed=$(jq -r '.totals.error' upstream-report.json)
+          generated=$(jq -r '.generated_at' upstream-report.json)
+          authenticated=$(jq -r '.authenticated' upstream-report.json)
+
+          auth_note="匿名（60 次/小时限额）"
+          if [ "$authenticated" = "true" ]; then auth_note="已用令牌"; fi
+
+          {
+            echo "# 上游同步巡检"
+            echo
+            echo "- 巡检时间：$generated"
+            echo "- 认证：$auth_note"
+            echo "- 汇总：共 $total 家 / unchanged $unchanged / updated $updated / error $failed"
+            echo "- 脚本退出码：$code（0 无变化，1 有 updated，2 有 error）"
+            echo
+            echo "| 状态 | 仓库 | 旧 commit | 新 commit | 变化时间 | 说明 |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+            jq -r '.results[]
+              | [ (if .status == "unchanged" then "一致"
+                  elif .status == "updated" then "**有更新**"
+                  else "**异常**" end),
+                  ("`" + .repo + "`"),
+                  ("`" + (.base_short // "-") + "`"),
+                  ("`" + (.latest_short // "-") + "`"),
+                  (.commit_time // "-"),
+                  .message ]
+              | "| " + join(" | ") + " |"' upstream-report.json
+            echo
+            echo "跟进流程见 \`docs/UPSTREAM-SYNC.md\`。确认后本地执行 \`python scripts/check_upstreams.py --update\` 刷新 \`checked_at\`；\`analyzed_commit\` 只在读完新 commit 后手动推进。"
+          } > report.md
+
+          alert=0
+          if [ "$updated" != "0" ] || [ "$failed" != "0" ]; then alert=1; fi
+          echo "alert=$alert" >> "$GITHUB_OUTPUT"
+          echo "updated=$updated error=$failed alert=$alert"
+
+      - name: 写入 job summary
+        run: cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 开 issue 或追加评论
+        if: steps.check.outputs.alert == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 标签不存在时建一次；--force 幂等。
+          gh label create upstream-sync --color 0E8A16 \
+            --description "上游仓库有更新或访问异常" --force || true
+
+          dow=$(date -u +%u)
+          week_start=$(date -u -d "-$((dow - 1)) days" +%F)
+
+          # 同类 issue 只保留一个：已存在开启中的就追加评论，避免每周刷屏。
+          existing=$(gh issue list --label upstream-sync --state open --limit 10 \
+            --json number,title --jq 'sort_by(.number) | .[0].number // empty' || true)
+
+          if [ -n "$existing" ]; then
+            echo "追加评论到 #$existing"
+            gh issue comment "$existing" --body-file report.md || echo "追加评论失败，详见 job summary"
+          else
+            echo "创建 issue：$week_start 当周"
+            gh issue create --title "上游同步巡检 ${week_start} 当周" \
+              --body-file report.md --label upstream-sync \
+              || echo "创建 issue 失败，详见 job summary"
+          fi
+
+          # 通知失败不应让工作流失败。
+          exit 0

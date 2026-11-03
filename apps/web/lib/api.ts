@@ -5,7 +5,6 @@ import type {Realm} from './realm-context';
 import type {ProviderCredential, ProviderCredentialInput, ProviderInfo} from './providers';
 import type {
   Account,
-  CreditExpiry,
   CreditsMeta,
   AccountsResponse,
   ApiKey,
@@ -17,7 +16,6 @@ import type {
   LoginFailuresResponse,
   ModelListResponse,
   Page,
-  ReloadState,
   RequestLog,
   Changelog,
   StatsSummary,
@@ -157,17 +155,6 @@ export const accountApi = {
       already?: boolean;
       credits?: number | null;
     }>(`/api/accounts/${encodeURIComponent(file)}/checkin`),
-  /** 单个账号的实时积分（直接向腾讯查询） */
-  credits: (file: string) =>
-    get<{
-      ok: boolean;
-      credits: number | null;
-      message: string;
-      cached: boolean;
-      cache_age: number | null;
-      expiries?: CreditExpiry[];
-    }>(`/api/accounts/${encodeURIComponent(file)}/credits`),
-  /** 并发刷新所有账号的实时积分 */
   /** 查询全部账号积分；force=false 时 60 秒内命中服务端缓存 */
   refreshCredits: (force = true) =>
     post<{
@@ -340,11 +327,6 @@ export const settingsApi = {
   /** 测试 Upstash 连通性；token 留空表示使用已保存的值 */
   testUpstash: (url: string, token?: string) =>
     post<{ok: boolean; message: string}>('/api/settings/upstash/test', {url, token}),
-  /** 上游重载状态（保存配置后自动重启） */
-  reloadState: () => get<ReloadState>('/api/upstream/reload-state'),
-  /** 立即重启上游（一般无需手动调用，保存配置会自动重载） */
-  reloadUpstream: () =>
-    post<{ok: boolean; message: string}>('/api/settings/upstash/reload'),
   modelMap: () => get<Record<string, string>>('/api/settings/model-map'),
   saveModelMap: (body: Record<string, string>) =>
     post<Record<string, string>>('/api/settings/model-map', body),

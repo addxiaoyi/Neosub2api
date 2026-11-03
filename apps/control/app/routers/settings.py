@@ -1,14 +1,33 @@
+import json
+import logging
+import re
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..adapters.base import ProviderError
 from ..api_utils import mask_secret, now, parse_bool
-from ..db import get_json_setting, set_json_setting
+from ..db import get_json_setting, put_settings, set_json_setting
 from ..security import admin_user, audit_event, current_user, hash_password, revoke_user_sessions, verify_password
 
-router = APIRouter(prefix="/api", tags=["settings"])
+logger = logging.getLogger("unified.settings")
+
+
+@asynccontextmanager
+async def _settings_lifespan(app):
+    """数据库里的运行参数在启动时覆盖 env 默认值；读库失败只告警，不阻塞启动。"""
+    try:
+        _apply_stored_runtime(app)
+    except Exception:  # noqa: BLE001 - 配置读失败不能打挂控制面
+        logger.warning("读取数据库运行参数失败，全部沿用环境变量默认值", exc_info=True)
+    yield
+
+
+router = APIRouter(prefix="/api", tags=["settings"], lifespan=_settings_lifespan)
 
 CONFIG_GROUPS = (
     "schedule",
@@ -108,6 +127,308 @@ def _deep_merge(base: dict, patch: dict) -> dict:
         else:
             base[key] = value
     return base
+
+
+# ===== 运行参数：非密钥、改后即时生效，数据库值优先于 env 默认值 =====
+
+RUNTIME_KEY = "runtime_config"
+GATEWAY_KEY = "gateway"  # 匿名开关沿用既有键，v1 网关直接读它
+
+# 导出/导入明确排除的密钥来源（只是说明，结构上也没有读取路径）
+SECRET_EXCLUSIONS = (
+    "provider_credentials.secret",
+    "providers 表与 provider_config 中的 api_key / token / secret / password",
+    "upstream_config 中的密钥字段",
+    "环境变量里的密钥（CODEBUDDY_API_KEY 等）",
+)
+
+
+@dataclass(frozen=True)
+class RuntimeItem:
+    """一条可在界面改的运行参数。store=gateway 的项沿用既有 key，其余进 runtime_config。"""
+
+    key: str
+    kind: str  # "int" | "bool"
+    minimum: int | None = None
+    maximum: int | None = None
+    ui: bool = True
+    store: str = "runtime"
+
+
+RUNTIME_ITEMS: tuple[RuntimeItem, ...] = (
+    RuntimeItem("models_cache_ttl_sec", "int", 0, 86400),
+    RuntimeItem("failure_window_sec", "int", 0, 86400),
+    RuntimeItem("failure_window_max", "int", 0, 100000),
+    RuntimeItem("model_fallback_first", "bool"),
+    RuntimeItem("sse_max_seconds", "int", 1, 86400),
+    RuntimeItem("session_ttl_sec", "int", 60, 2592000),
+    # 已有入口在「服务商」分组，这里只参与导出/导入，不重复放开关
+    RuntimeItem("allow_anonymous_gateway", "bool", ui=False, store="gateway"),
+)
+RUNTIME_BY_KEY = {item.key: item for item in RUNTIME_ITEMS}
+
+_INT_TEXT = re.compile(r"-?\d+$")
+
+
+class _InvalidValue(Exception):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
+def _coerce(item: RuntimeItem, raw: Any) -> bool | int:
+    """严格校验：布尔只认 bool 与 true/false 字符串，整数只认整数（含数字字符串）。"""
+    if item.kind == "bool":
+        try:
+            return parse_bool(raw, item.key)
+        except HTTPException as exc:
+            raise _InvalidValue("invalid_boolean", str(exc.detail)) from exc
+    if isinstance(raw, bool):
+        raise _InvalidValue("not_an_integer", f"{item.key} 必须是整数")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and _INT_TEXT.match(raw.strip()):
+        value = int(raw.strip())
+    else:
+        raise _InvalidValue("not_an_integer", f"{item.key} 必须是整数")
+    if item.minimum is not None and value < item.minimum:
+        raise _InvalidValue("out_of_range", f"{item.key} 不能小于 {item.minimum}，当前 {value}")
+    if item.maximum is not None and value > item.maximum:
+        raise _InvalidValue("out_of_range", f"{item.key} 不能大于 {item.maximum}，当前 {value}")
+    return value
+
+
+def _stored_runtime(conn) -> tuple[dict[str, Any], dict[str, Any]]:
+    runtime = get_json_setting(conn, RUNTIME_KEY, {})
+    gateway = get_json_setting(conn, GATEWAY_KEY, {})
+    return (
+        runtime if isinstance(runtime, dict) else {},
+        gateway if isinstance(gateway, dict) else {},
+    )
+
+
+def _stored_raw(item: RuntimeItem, runtime: dict[str, Any], gateway: dict[str, Any]) -> Any:
+    if item.store == "gateway":
+        return gateway.get("allow_anonymous")
+    return runtime.get(item.key)
+
+
+def _defaults(app) -> dict[str, bool | int]:
+    """env 推导出来的默认值，启动时快照一份，避免被数据库覆盖后丢失基准。"""
+    cached = getattr(app.state, "runtime_defaults", None)
+    if isinstance(cached, dict) and cached:
+        return cached
+    snapshot = {item.key: getattr(app.state.settings, item.key) for item in RUNTIME_ITEMS}
+    app.state.runtime_defaults = snapshot
+    return snapshot
+
+
+def _apply_stored_runtime(app) -> None:
+    defaults = _defaults(app)
+    conn = app.state.db.connect()
+    try:
+        runtime, gateway = _stored_runtime(conn)
+    finally:
+        conn.close()
+    for item in RUNTIME_ITEMS:
+        raw = _stored_raw(item, runtime, gateway)
+        if raw is None:
+            continue
+        try:
+            value = _coerce(item, raw)
+        except _InvalidValue as exc:
+            logger.warning("数据库里的 %s 不合法（%s），沿用默认值 %s", item.key, exc.message, defaults[item.key])
+            continue
+        # Settings 是 frozen dataclass：用 object.__setattr__ 就地改，持有同一实例的组件也能看到新值
+        object.__setattr__(app.state.settings, item.key, value)
+
+
+def _runtime_payload(app) -> dict[str, Any]:
+    defaults = _defaults(app)
+    conn = app.state.db.connect()
+    try:
+        runtime, gateway = _stored_runtime(conn)
+    finally:
+        conn.close()
+    items: list[dict[str, Any]] = []
+    for item in RUNTIME_ITEMS:
+        raw = _stored_raw(item, runtime, gateway)
+        source = "default"
+        value = defaults[item.key]
+        if raw is not None:
+            try:
+                value = _coerce(item, raw)
+                source = "db"
+            except _InvalidValue:
+                source = "invalid"
+        items.append(
+            {
+                "key": item.key,
+                "type": item.kind,
+                "value": value,
+                "default": defaults[item.key],
+                "source": source,
+                "min": item.minimum,
+                "max": item.maximum,
+                "ui": item.ui,
+            }
+        )
+    return {"ok": True, "items": items, "excluded_secrets": list(SECRET_EXCLUSIONS)}
+
+
+def _bad_request(errors: list[dict[str, Any]], message: str = "配置校验失败") -> JSONResponse:
+    return JSONResponse(
+        {"ok": False, "error": {"type": "invalid_config", "message": message, "errors": errors}},
+        status_code=400,
+    )
+
+
+def _write_runtime(request: Request, patch: Any, actor: dict, action: str) -> JSONResponse | dict[str, Any]:
+    """校验全部通过后才写库；两项存储键在同一事务提交，失败整体回滚。"""
+    if not isinstance(patch, dict) or not patch:
+        return _bad_request([{"key": "", "reason": "empty_payload", "message": "没有可写入的配置项"}])
+    clean: dict[str, bool | int] = {}
+    errors: list[dict[str, Any]] = []
+    for key, raw in patch.items():
+        name = str(key).strip()
+        item = RUNTIME_BY_KEY.get(name)
+        if item is None:
+            reason = "secret_not_allowed" if _is_secret_key(name) else "unknown_key"
+            message = "密钥类配置请走凭据体系，不能从这里导入" if reason == "secret_not_allowed" else f"未知配置项：{name}"
+            errors.append({"key": name, "value": raw, "reason": reason, "message": message})
+            continue
+        try:
+            clean[name] = _coerce(item, raw)
+        except _InvalidValue as exc:
+            errors.append(
+                {
+                    "key": name,
+                    "value": raw,
+                    "reason": exc.reason,
+                    "message": exc.message,
+                    "min": item.minimum,
+                    "max": item.maximum,
+                }
+            )
+    if errors:
+        return _bad_request(errors)
+
+    app = request.app
+    conn = app.state.db.connect()
+    try:
+        runtime, gateway = _stored_runtime(conn)
+        touched_runtime = False
+        touched_gateway = False
+        for name, value in clean.items():
+            if RUNTIME_BY_KEY[name].store == "gateway":
+                gateway["allow_anonymous"] = value
+                touched_gateway = True
+            else:
+                runtime[name] = value
+                touched_runtime = True
+        writes: dict[str, str] = {}
+        if touched_runtime:
+            writes[RUNTIME_KEY] = json.dumps(runtime, ensure_ascii=False)
+        if touched_gateway:
+            writes[GATEWAY_KEY] = json.dumps(gateway, ensure_ascii=False)
+        try:
+            put_settings(conn, writes)
+            conn.commit()
+        except Exception:  # noqa: BLE001 - 写失败整体回滚，不能留半套配置
+            conn.rollback()
+            logger.exception("运行参数写入失败，已回滚")
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "write_failed",
+                        "message": "写入数据库失败，本次改动已整体回滚",
+                        "errors": [],
+                    },
+                },
+                status_code=500,
+            )
+    finally:
+        conn.close()
+
+    # 落库成功后才改内存：请求处理链下一次读取就生效，无需重启
+    for name, value in clean.items():
+        object.__setattr__(app.state.settings, name, value)
+
+    conn = app.state.db.connect()
+    try:
+        audit_event(
+            conn,
+            actor["username"],
+            action,
+            ",".join(sorted(clean)),
+            json.dumps(clean, ensure_ascii=False),
+            request.client.host if request.client else "",
+        )
+    finally:
+        conn.close()
+    payload = _runtime_payload(app)
+    payload["saved"] = sorted(clean)
+    return payload
+
+
+@router.get("/settings/runtime-config")
+def get_runtime_config(request: Request, user: dict = Depends(admin_user)):
+    return _runtime_payload(request.app)
+
+
+@router.post("/settings/runtime-config")
+def save_runtime_config(
+    body: dict[str, Any],
+    request: Request,
+    user: dict = Depends(admin_user),
+):
+    patch = body.get("items") if isinstance(body.get("items"), dict) else body
+    return _write_runtime(request, patch, user, "settings.runtime_config")
+
+
+@router.get("/settings/runtime-config/export")
+def export_runtime_config(request: Request, user: dict = Depends(admin_user)):
+    state = _runtime_payload(request.app)
+    return {
+        "kind": "unified-2api-runtime-config",
+        "version": 1,
+        "exported_at": now(),
+        "items": {item["key"]: item["value"] for item in state["items"]},
+        "excluded_secrets": state["excluded_secrets"],
+        "note": "只含非密钥运行参数；凭据请在「服务商」页按 provider 管理。",
+    }
+
+
+@router.post("/settings/runtime-config/import")
+def import_runtime_config(
+    body: dict[str, Any],
+    request: Request,
+    user: dict = Depends(admin_user),
+):
+    if not isinstance(body, dict):
+        return _bad_request([{"key": "", "reason": "invalid_shape", "message": "导入内容必须是 JSON 对象"}])
+    kind = body.get("kind")
+    if kind is not None and kind != "unified-2api-runtime-config":
+        return _bad_request([{"key": "kind", "value": kind, "reason": "kind_mismatch", "message": "不是运行参数导出文件"}])
+    version = body.get("version")
+    if version is not None and version != 1:
+        return _bad_request(
+            [{"key": "version", "value": version, "reason": "unsupported_version", "message": "只支持 version=1"}]
+        )
+    items = body.get("items")
+    if isinstance(items, dict):
+        patch = items
+    else:
+        # 也接受扁平的 {key: value}；导出文件的元数据字段先剥掉
+        meta = {"kind", "version", "exported_at", "excluded_secrets", "note"}
+        patch = {k: v for k, v in body.items() if k not in meta}
+    result = _write_runtime(request, patch, user, "settings.runtime_config.import")
+    if isinstance(result, JSONResponse):
+        return result
+    result["imported"] = sorted(patch)
+    return result
 
 
 def _read_config(request: Request, *, reveal: bool = False) -> dict[str, Any]:

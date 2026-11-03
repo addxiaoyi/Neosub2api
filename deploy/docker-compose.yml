@@ -1,0 +1,84 @@
+# 两服务自托管编排：control（FastAPI）+ web（apps/web 静态导出，nginx 托管）。
+# 启动：docker compose -f deploy/docker-compose.yml up -d --build
+# 变量：复制 deploy/.env.example 为 deploy/.env（与未 -f 时的根 compose 不同，这里只读同目录 .env）。
+# 数据：仓库根目录 data/ 以 bind mount 挂到容器 /data。
+name: unified-2api-local
+
+services:
+  control:
+    build:
+      context: ../apps/control
+    env_file:
+      - path: ./.env
+        required: false          # 缺文件也能构建；管理员口令留空时容器首次启动随机生成
+    environment:
+      # 容器内固定路径，覆盖 .env 里给本机开发用的相对路径
+      UNIFIED_DATA_DIR: /data
+      UNIFIED_DB_PATH: /data/unified.db
+      UNIFIED_HOST: 0.0.0.0
+      UNIFIED_PORT: 8000
+      # 未经 TLS 的本地入口，会话 Cookie 不能强制 Secure；前面加 HTTPS 反代后再改 true
+      UNIFIED_COOKIE_SECURE: ${UNIFIED_COOKIE_SECURE:-false}
+      UNIFIED_ADMIN_USER: ${UNIFIED_ADMIN_USER:-admin}
+      UNIFIED_ADMIN_PASSWORD: ${UNIFIED_ADMIN_PASSWORD:-}
+      UNIFIED_SESSION_TTL_SEC: ${UNIFIED_SESSION_TTL_SEC:-86400}
+      UNIFIED_CORS_ORIGINS: ${UNIFIED_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
+      UNIFIED_SSE_MAX_SECONDS: ${UNIFIED_SSE_MAX_SECONDS:-600}
+      UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
+      UNIFIED_FAILURE_WINDOW_SEC: ${UNIFIED_FAILURE_WINDOW_SEC:-60}
+      UNIFIED_FAILURE_WINDOW_MAX: ${UNIFIED_FAILURE_WINDOW_MAX:-20}
+      UNIFIED_MODELS_CACHE_TTL_SEC: ${UNIFIED_MODELS_CACHE_TTL_SEC:-60}
+      UNIFIED_MODEL_FALLBACK_FIRST: ${UNIFIED_MODEL_FALLBACK_FIRST:-0}
+      # sidecar 跑在宿主机上；容器内必须用 host.docker.internal 而不是 .env 里的 127.0.0.1
+      CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
+      CODEBUDDY_API_KEY: ${CODEBUDDY_API_KEY:-}
+      OPENCODE_UPSTREAM_BASE: ${OPENCODE_UPSTREAM_BASE:-https://opencode.ai/zen}
+      GROK_REGISTER_EXECUTOR_URL: ${GROK_REGISTER_EXECUTOR_URL:-}
+      GROK_REGISTER_MAX_CONCURRENCY: ${GROK_REGISTER_MAX_CONCURRENCY:-2}
+      GROK_REGISTER_MAX_WORKERS: ${GROK_REGISTER_MAX_WORKERS:-4}
+      TRAE_SIDECAR_BASE: ${TRAE_SIDECAR_BASE:-http://host.docker.internal:7871}
+      DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:5001}
+      QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
+      CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
+    volumes:
+      - ../data:/data              # 仓库根 data/：SQLite 与 admin-password.txt 都落这里
+    ports:
+      - "127.0.0.1:8010:8000"      # 宿主机 8010 → 容器 8000；只绑本机
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 下也能访问宿主机 sidecar
+    restart: unless-stopped
+    stop_grace_period: 30s         # 给 SQLite WAL 收尾时间
+    healthcheck:
+      # 控制面真实探针：GET /healthz（apps/control/app/main.py 已注册）
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).getcode()==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    build:
+      context: ../apps/web      # Dockerfile 里 npm run build:export → nginx:alpine 托管 out/
+    depends_on:
+      control:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"      # 静态页 + /api、/v1、/healthz 反代到 control:8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

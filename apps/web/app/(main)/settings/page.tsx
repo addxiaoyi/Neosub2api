@@ -19,6 +19,7 @@ import {
   DownloadCloud,
   FileText,
   KeyRound,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {getExpiryDailyGroup, setExpiryDailyGroup} from '@/lib/display-prefs';
@@ -36,6 +37,7 @@ import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
 import {TokensPanel} from '@/components/common/settings/TokensPanel';
 import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
 import {ProvidersSection} from '@/components/common/settings/ProvidersSection';
+import {RuntimeConfigSection} from './RuntimeConfigSection';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
@@ -1100,6 +1102,9 @@ export default function SettingsPage() {
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
         <TabsList className="w-max">
           <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUpstream')}</TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="runtime"><SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabRuntime')}</TabsTrigger>
+          )}
           <TabsTrigger value="models"><Shuffle className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabModels')}</TabsTrigger>
           <TabsTrigger value="users"><Users className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUsers')}</TabsTrigger>
           <TabsTrigger value="tokens"><KeyRound className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabTokens')}</TabsTrigger>
@@ -1109,7 +1114,11 @@ export default function SettingsPage() {
         </TabsList>
         </div>
 
-        {/* ═══ 上游配置 ═══ */}
+        {/* ═══ 运行参数（仅 admin） ═══ */}
+        <TabsContent value="runtime" className="mt-4">
+          <RuntimeConfigSection isAdmin={isAdmin} />
+        </TabsContent>
+
         <TabsContent value="upstream" className="mt-3 space-y-3">
           {isAdmin ? (
             <>

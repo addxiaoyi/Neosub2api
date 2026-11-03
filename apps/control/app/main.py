@@ -15,11 +15,20 @@ from .api_utils import mask_access_args
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
 from .gateway_errors import GatewayError
+from .observability import (
+    REQUEST_ID_HEADER,
+    bind_request,
+    configure_logging,
+    log_access,
+    request_id_from,
+    reset_request,
+)
 from .registry import ProviderRegistry
 from .routers import (
     accounts,
     auth,
     grok,
+    health,
     keys,
     logs,
     models,
@@ -122,6 +131,8 @@ def _announce_password(settings, *, created: bool) -> None:
 
 
 def create_app() -> FastAPI:
+    # 日志格式在第一个 logger 使用前确定：UNIFIED_LOG_FORMAT=json 时全局换 formatter
+    configure_logging()
     settings = load_settings()
     db = Database(settings.db_path)
     _seed_admin(db, settings)
@@ -174,6 +185,31 @@ def create_app() -> FastAPI:
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response
 
+    @app.middleware("http")
+    async def request_tracking(request: Request, call_next):
+        """request id 贯穿：透传调用方的 X-Request-Id，缺失就生成；回写响应头并落访问日志。
+
+        最后注册 → 包在最外层，安全头/CORS 的响应也能带上这个头。
+        """
+        request_id = request_id_from(request.headers.get(REQUEST_ID_HEADER))
+        token = bind_request(request_id, request.url.path)
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            log_access(
+                request.method,
+                request.url.path,
+                status,
+                (time.perf_counter() - started) * 1000,
+                request_id,
+            )
+            reset_request(token)
+
     @app.exception_handler(ProviderError)
     async def provider_error_handler(request: Request, exc: ProviderError):
         return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
@@ -205,7 +241,7 @@ def create_app() -> FastAPI:
             payload["error"] = error
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
-    for module in (auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
+    for module in (health, auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
                    sub2api, pricing, quota, grok, system, v1, logs, security_router):
         app.include_router(module.router)
 

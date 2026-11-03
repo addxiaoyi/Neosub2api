@@ -19,7 +19,13 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import {useProviders} from '@/lib/use-providers';
-import {capabilitiesOf, providerLabel} from '@/lib/providers';
+import {providerLabel} from '@/lib/providers';
+import {
+  NO_ACCOUNT_OPS,
+  accountOpsApi,
+  type AccountOps,
+  type ProviderAccountOps,
+} from '@/components/common/accounts/account-ops';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
@@ -54,6 +60,21 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
+/** CodeBuddy 是唯一实现了全部账号方法的 provider；能力接口未返回前按它兜底，避免首屏按钮闪烁 */
+const CODEBUDDY_ACCOUNT_OPS: AccountOps = {
+  list: true,
+  oauth: true,
+  checkin: true,
+  credits: true,
+  test: true,
+  refresh: true,
+  clear_cooling: true,
+  disabled: true,
+  delete: true,
+  note: true,
+  restart: true,
+};
+
 export default function AccountsPage() {
   const {realm} = useRealm();
   const t = useT();
@@ -65,11 +86,23 @@ export default function AccountsPage() {
    * 需要一层筛选才能在同一张表里容纳多家。
    */
   const [providerFilter, setProviderFilter] = useState<string>('all');
-  /** 当前筛选服务商的能力位；`all` 时按 CodeBuddy（唯一已实现的服务商）判断 */
-  const caps = useMemo(
-    () => capabilitiesOf(providers, providerFilter === 'all' ? undefined : providerFilter),
-    [providers, providerFilter],
+  /**
+   * 后端真实能力（按适配器实际覆写的方法计算，不看 spec 的能力声明）。
+   * 声明位会把 trae_sidecar 的 oauth/credits 标成可用，但主仓并没有实现，
+   * 按声明画按钮点下去必然 501。
+   */
+  const [opsMeta, setOpsMeta] = useState<Record<string, ProviderAccountOps>>({});
+  const opsOf = useCallback(
+    (pid?: string): AccountOps => {
+      const id = pid || 'codebuddy';
+      return opsMeta[id]?.ops ?? (id === 'codebuddy' ? CODEBUDDY_ACCOUNT_OPS : NO_ACCOUNT_OPS);
+    },
+    [opsMeta],
   );
+  /** 当前筛选服务商的账号能力；`all` 时按 CodeBuddy（唯一已接入统一账号页的一家）判断 */
+  const selectedId = providerFilter === 'all' ? 'codebuddy' : providerFilter;
+  const selectedOps = opsOf(selectedId);
+  const selectedMeta = providerFilter === 'all' ? undefined : opsMeta[providerFilter];
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -92,13 +125,17 @@ export default function AccountsPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, upRes] = await Promise.allSettled([
+    const [accRes, upRes, capRes] = await Promise.allSettled([
       accountApi.list(),
       upstreamApi.status(),
+      accountOpsApi.capabilities(),
     ]);
     if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
     else notify.err(errText(accRes.reason));
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
+    if (capRes.status === 'fulfilled') {
+      setOpsMeta(Object.fromEntries(capRes.value.map((p) => [p.id, p])));
+    }
     setLoading(false);
   }, []);
 
@@ -109,14 +146,14 @@ export default function AccountsPage() {
   // 打开页面时自动拉一次实时积分：上游 /status 的 credits 可能滞后数小时，
   // 首次进入应展示真实余额。服务端有 TTL 缓存，重复进入不会频繁请求。
   useEffect(() => {
-    // 没有积分能力的服务商（占位适配器）不必发这个请求；实时积分是 admin-only
-    if (!caps.credits || !isAdmin) return;
+    // 没有积分能力的服务商（占位适配器 / sidecar）不必发这个请求；实时积分是 admin-only
+    if (!selectedOps.credits || !isAdmin) return;
     let alive = true;
     (async () => {
       try {
         // force=false：60 秒内重复打开页面直接命中服务端缓存，
         // 不再每次都全量请求腾讯；命中时界面会明确标注「缓存」
-        const r = await accountApi.refreshCredits(false);
+        const r = await accountOpsApi.refreshCredits(false, selectedId);
         if (!alive) return;
         setLiveCredits(
           Object.fromEntries(
@@ -131,7 +168,7 @@ export default function AccountsPage() {
     return () => {
       alive = false;
     };
-  }, [caps.credits, isAdmin]);
+  }, [selectedOps.credits, selectedId, isAdmin]);
 
   // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
   // 否则会一直显示打开页面那一刻的旧数据。
@@ -142,7 +179,7 @@ export default function AccountsPage() {
   const refreshCredits = useCallback(async () => {
     setCreditsBusy(true);
     try {
-      const r = await accountApi.refreshCredits(true);
+      const r = await accountOpsApi.refreshCredits(true, selectedId);
       setLiveCredits(
         Object.fromEntries(
           Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
@@ -159,13 +196,13 @@ export default function AccountsPage() {
     } finally {
       setCreditsBusy(false);
     }
-  }, []);
+  }, [selectedId, t]);
 
   /** 批量签到：逐账号记录结果 */
   const checkinAll = useCallback(async () => {
     setCheckinAllBusy(true);
     try {
-      const r = await accountApi.checkinAll();
+      const r = await accountOpsApi.checkinAll(selectedId);
       const failed = r.total - r.succeeded;
       // 两类账号都不计入分母，各自补一句说明，否则用户会以为漏签了：
       //   skipped — 国际版没有签到体系，点多少次都是「已跳过」
@@ -204,7 +241,7 @@ export default function AccountsPage() {
     } finally {
       setCheckinAllBusy(false);
     }
-  }, [load]);
+  }, [load, selectedId, t]);
 
   /**
    * 将本地 auths 文件与上游账号池状态按 uid 合并。
@@ -213,7 +250,17 @@ export default function AccountsPage() {
    * 规则（此前它只看 Token 有效期，于是同一个账号首页说「在线」、这里说
    * 「未加载」，用户看到自相矛盾的面板）。
    */
-  const merged = useMemo(() => mergePoolStatus(accounts, upstream), [accounts, upstream]);
+  const merged = useMemo(() => {
+    const codebuddy = accounts.filter((a) => (a.provider ?? 'codebuddy') === 'codebuddy');
+    const others = accounts.filter((a) => (a.provider ?? 'codebuddy') !== 'codebuddy');
+    // 上游 /status 只覆盖 CodeBuddy 的账号池。别家的账号没有池状态，
+    // 套用这份快照会被判成「不在池里 / 未加载」，属于硬造数据，故如实标未知。
+    if (others.length === 0) return mergePoolStatus(accounts, upstream);
+    return [
+      ...mergePoolStatus(codebuddy, upstream),
+      ...others.map((a) => ({...a, in_pool: undefined, poolUnknown: true})),
+    ];
+  }, [accounts, upstream]);
 
   /**
    * 按服务商筛选 + 按当前版本过滤。
@@ -243,18 +290,17 @@ export default function AccountsPage() {
    * 账号已完全退出账号池、签到也跟着停了，把它算进「待签到」会让按钮牌子上
    * 永远留着一个点不掉、也签不了的数字。
    */
-  const pendingCheckin = useMemo(
-    () =>
-      !caps.checkin
-        ? 0
-        : visible.filter(
-            (a) =>
-              (a.realm ?? 'cn') === 'cn' &&
-              a.disabled_by_panel !== true &&
-              a.checkin_today == null,
-          ).length,
-    [visible, caps.checkin],
-  );
+  const pendingCheckin = useMemo(() => {
+    if (!selectedOps.checkin) return 0;
+    return visible.filter((a) => {
+      const provider = a.provider ?? 'codebuddy';
+      // 少数服从多数：按**这一行自己的 provider** 判断，而不是当前筛选的能力，
+      // 否则混合列表里会把不支持签到的行也数进去。
+      if (!opsOf(provider).checkin) return false;
+      if (provider !== 'codebuddy') return true;
+      return (a.realm ?? 'cn') === 'cn' && a.disabled_by_panel !== true && a.checkin_today == null;
+    }).length;
+  }, [visible, selectedOps.checkin, opsOf]);
 
   /** 执行单账号操作（签到 / 测活 / 刷新 / 删除），成功后同步底栏计数 */
   async function run(
@@ -298,7 +344,7 @@ export default function AccountsPage() {
   async function restartUpstream() {
     setRestarting(true);
     try {
-      const res = await accountApi.restart();
+      const res = await accountOpsApi.restart(selectedId);
       (res.ok ? notify.ok : notify.err)(res.message || t('accounts.restarted'));
       await load();
     } catch (e) {
@@ -523,9 +569,10 @@ export default function AccountsPage() {
    *  「确实没积分」，不该报警。
    */
   function renderCredits(a: Account) {
-    // 该服务商没有积分能力（占位适配器）：整列少一个数据源，显示破折号而不是 0，
-    // 「0」会被读成余额耗尽。
-    if (!caps.credits) {
+    // 该服务商没有积分能力（占位适配器 / sidecar）：这一行少一个数据源，
+    // 显示破折号而不是 0，「0」会被读成余额耗尽。按**行自己的 provider** 判断，
+    // 混合列表里不能拿当前筛选的能力一刀切。
+    if (!opsOf(a.provider).credits) {
       return <span className="text-xs text-muted-foreground">—</span>;
     }
     // 优先用刚查到的实时值，其次上游 /status 的快照值
@@ -587,6 +634,11 @@ export default function AccountsPage() {
 
   /** Token 有效期进度条 */
   function renderExpiry(a: Account) {
+    // 没有到期概念的服务商（sidecar / token 型）remain_seconds 恒为 0，
+    // 直接画进度条会显示成「已过期」，属于硬造数据；空值一律破折号。
+    if (!a.expires_at) {
+      return <span className="text-xs text-muted-foreground">—</span>;
+    }
     const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
     const vis = expiryVisual(a.remain_seconds);
     // 「有效期」是剩余时间，刷新会把它重新拉满，所以单看天数分不清
@@ -616,10 +668,12 @@ export default function AccountsPage() {
   /** 单账号操作按钮组 */
   function renderActions(a: Account) {
     const busy = busyFile === a.file;
+    // 按钮按**这一行自己的 provider** 的真实能力渲染。后端没覆写的方法一律不画，
+    // 否则点下去只会得到 501 / 400，属于假按钮。
+    const op = opsOf(a.provider);
     // 国际版没有签到体系（上游对 global 账号直接过滤，不发请求）。
     // 这一行的「签到」按钮对国际版账号只会返回「已跳过」，属误导，故不显示。
-    // 签到能力由 provider 提供，占位适配器没有这一项。
-    const canCheckin = caps.checkin && (a.realm ?? 'cn') === 'cn';
+    const canCheckin = op.checkin && (a.realm ?? 'cn') === 'cn';
     // 今天已经签过：按钮转为「已签到」并禁用。
     // 为什么要在界面上拦：腾讯对重复签到回 10001（幂等成功），所以点下去「看着
     // 也能成功」——但每次都真打一次 RPC，还会在签到记录里堆一串「今日已签到」，
@@ -674,19 +728,23 @@ export default function AccountsPage() {
             {checkinDone ? <Check className="h-3.5 w-3.5" /> : <Gift className="h-3.5 w-3.5" />}
           </Button>
         )}
-        {(!off || viaBit) && (
+        {(!off || viaBit) && (op.test || op.refresh) && (
           <>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.test')} disabled={busy}
-              onClick={() => run(a.file, () => accountApi.test(a.file), t('accounts.testDone'))}>
-              <Zap className="h-3.5 w-3.5" />
-            </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.refreshToken')} disabled={busy}
-              onClick={() => run(a.file, () => accountApi.refresh(a.file), t('accounts.refreshDone'))}>
-              <KeyRound className="h-3.5 w-3.5" />
-            </Button>
+            {op.test && (
+              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.test')} disabled={busy}
+                onClick={() => run(a.file, () => accountApi.test(a.file), t('accounts.testDone'))}>
+                <Zap className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {op.refresh && (
+              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.refreshToken')} disabled={busy}
+                onClick={() => run(a.file, () => accountApi.refresh(a.file), t('accounts.refreshDone'))}>
+                <KeyRound className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </>
         )}
-        {!paused && hasClearableState && (
+        {!paused && op.clear_cooling && hasClearableState && (
           <ConfirmDialog
             title={t('accounts.forceClearCoolingTitle')}
             description={t('accounts.forceClearCoolingDesc')}
@@ -711,39 +769,77 @@ export default function AccountsPage() {
             }
           />
         )}
-        <Button
-          variant="ghost"
-          size="icon"
-          className={
-            'h-7 w-7 rounded-md ' +
-            (off ? 'text-emerald-600 hover:text-emerald-600' : 'text-amber-600 hover:text-amber-600')
-          }
-          title={off ? t('accounts.enableTitle') : t('accounts.disableTitle')}
-          disabled={busy}
-          onClick={() => run(
-            a.file,
-            () => accountApi.setDisabled(a.file, !off),
-            // 文案如实反映用的是哪种机制：状态位停用后任务照常，改名停用则全停。
-            off ? t('accounts.enabled')
-                : (viaBit ? t('accounts.manualDisabled') : t('accounts.disabled')),
-          )}
-        >
-          {off ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-        </Button>
-        <ConfirmDialog
-          title={t('accounts.deleteTitle', {name: a.nickname || a.uid})}
-          description={t('accounts.deleteDesc')}
-          confirmText={t('accounts.delete')}
-          destructive
-          onConfirm={() => run(a.file, () => accountApi.remove(a.file), t('accounts.deleted'))}
-          trigger={
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('accounts.delete')}>
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          }
-        />
+        {op.disabled && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={
+              'h-7 w-7 rounded-md ' +
+              (off ? 'text-emerald-600 hover:text-emerald-600' : 'text-amber-600 hover:text-amber-600')
+            }
+            title={off ? t('accounts.enableTitle') : t('accounts.disableTitle')}
+            disabled={busy}
+            onClick={() => run(
+              a.file,
+              () => accountApi.setDisabled(a.file, !off),
+              // 文案如实反映用的是哪种机制：状态位停用后任务照常，改名停用则全停。
+              off ? t('accounts.enabled')
+                  : (viaBit ? t('accounts.manualDisabled') : t('accounts.disabled')),
+            )}
+          >
+            {off ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+          </Button>
+        )}
+        {op.delete && (
+          <ConfirmDialog
+            title={t('accounts.deleteTitle', {name: a.nickname || a.uid})}
+            description={t('accounts.deleteDesc')}
+            confirmText={t('accounts.delete')}
+            destructive
+            onConfirm={() => run(a.file, () => accountApi.remove(a.file), t('accounts.deleted'))}
+            trigger={
+              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('accounts.delete')}>
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            }
+          />
+        )}
       </div>
     );
+  }
+
+  /**
+   * 最近使用 / 失败原因。
+   *
+   * 混合多家时这一格的数据来源差异很大：CodeBuddy 有上游池状态（真实 last_used、
+   * err_total），sidecar / token 型 provider 根本没有这些字段。取不到就写 `—`，
+   * 不能拿 0 或「从未」冒充事实。
+   */
+  function renderUsage(a: Account) {
+    const used = a.last_used ? fmtAgo(a.last_used) : '—';
+    const errs = typeof a.err_total === 'number' && a.err_total > 0 ? a.err_total : null;
+    const reason = String(a.disabled_reason || a.invalid_reason || '');
+    return (
+      <div
+        className="text-[10px] text-muted-foreground/80"
+        title={reason || undefined}
+      >
+        {t('accounts.lastUsedShort', {ago: used})}
+        {' · '}
+        {errs ? t('accounts.failCountShort', {n: errs}) : '—'}
+      </div>
+    );
+  }
+
+  /** 服务商徽章的悬停说明：这是哪家、是否就绪、还缺什么配置 */
+  function providerTitle(a: Account): string | undefined {
+    const meta = opsMeta[a.provider ?? 'codebuddy'];
+    if (!meta) return undefined;
+    if (meta.readiness === 'ready') return t('accounts.providerReadyTitle', {provider: meta.label});
+    return t('accounts.providerNeedsConfigTitle', {
+      provider: meta.label,
+      requires: meta.requires.join(t('common.listSeparator')) || t('accounts.providerNoRequires'),
+    });
   }
 
   /** 头像（首字母） */
@@ -771,7 +867,7 @@ export default function AccountsPage() {
         }
         actions={
           <>
-            {isAdmin && caps.oauth && (
+            {isAdmin && selectedOps.restart && (
               <ConfirmDialog
                 title={t('accounts.restartTitle')}
                 description={t('accounts.restartDesc')}
@@ -790,7 +886,7 @@ export default function AccountsPage() {
                 只读账号页面加载时本来就会走缓存路径拿到实时值，所以这个按钮
                 对它们没有意义 —— 显示出来只会点了报 403（issue #56 之后权限
                 是明确的：force 仍限管理员）。与上面几个管理员操作同一个口径。 */}
-            {isAdmin && caps.credits && (
+            {isAdmin && selectedOps.credits && (
             <Button
               size="sm"
               variant="outline"
@@ -813,7 +909,7 @@ export default function AccountsPage() {
                   更好：重复点击本来就不该发生，让按钮自己说出原因，比点完再报错省一次往返。
                 判据 pendingCheckin 与每行签到按钮的可见条件一致，不会出现
                 「按钮说还有 1 个、列表里却找不到那个号」的矛盾。 */}
-            {isAdmin && caps.checkin && realm === 'cn' && (
+            {isAdmin && selectedOps.checkin && realm === 'cn' && (
               <Button
                 size="sm"
                 variant="outline"
@@ -833,7 +929,7 @@ export default function AccountsPage() {
                 )}
               </Button>
             )}
-            {isAdmin && caps.oauth && (
+            {isAdmin && selectedOps.oauth && (
               <>
                 <Button size="sm" className="rounded-full" onClick={() => setOAuthOpen(true)}>
                   <ExternalLink className="mr-2 h-3 w-3" />
@@ -856,17 +952,38 @@ export default function AccountsPage() {
       {/* 服务商筛选：只有一家在册时没有筛选的意义，直接不显示 */}
       {providers.length > 1 && (
         <div className="-mt-1 flex flex-wrap items-center gap-1.5 px-1">
-          {[{id: 'all', label: t('providers.filterAll')}, ...providers.map((p) => ({id: p.id, label: p.label}))].map((item) => (
-            <Button
-              key={item.id}
-              size="sm"
-              variant={providerFilter === item.id ? 'default' : 'outline'}
-              className="h-7 rounded-full px-3 text-[11px]"
-              onClick={() => setProviderFilter(item.id)}
-            >
-              {item.label}
-            </Button>
-          ))}
+          {[{id: 'all', label: t('providers.filterAll')}, ...providers.map((p) => ({id: p.id, label: p.label}))].map((item) => {
+            const meta = item.id === 'all' ? undefined : opsMeta[item.id];
+            const sep = t('common.listSeparator');
+            return (
+              <Button
+                key={item.id}
+                size="sm"
+                variant={providerFilter === item.id ? 'default' : 'outline'}
+                className="h-7 rounded-full px-3 text-[11px]"
+                onClick={() => setProviderFilter(item.id)}
+                title={
+                  meta
+                    ? meta.readiness === 'ready'
+                      ? t('accounts.providerReadyTitle', {provider: item.label})
+                      : t('accounts.providerNeedsConfigTitle', {
+                          provider: item.label,
+                          requires: meta.requires.join(sep) || t('accounts.providerNoRequires'),
+                        })
+                    : undefined
+                }
+              >
+                {item.label}
+              </Button>
+            );
+          })}
+          {/* 选中的这家如果账号不归本页管，直接说清楚账号在哪，
+              避免用户对着一个永远为空的列表反复刷新 */}
+          {selectedMeta && selectedMeta.managed !== 'unified' && (
+            <span className="px-1 text-[11px] text-muted-foreground">
+              {t(`accounts.managed_${selectedMeta.managed}`)}
+            </span>
+          )}
         </div>
       )}
 
@@ -888,6 +1005,7 @@ export default function AccountsPage() {
                       {a.nickname || t('accounts.unnamed')}
                     </div>
                     <div className="truncate font-mono text-[10px] text-muted-foreground">{a.uid}</div>
+                    {renderUsage(a)}
                     {a.note ? (
                       <div className="truncate text-[10px] text-muted-foreground" title={a.note}>
                         {t('accounts.noteLabel')}{a.note}
@@ -951,6 +1069,7 @@ export default function AccountsPage() {
                     </div>
                     <Badge
                       variant="secondary"
+                      title={providerTitle(a)}
                       className={
                         'shrink-0 rounded-md px-1.5 py-0 text-[10px] ' +
                         ((a.provider ?? 'codebuddy') === 'codebuddy' && (a.realm ?? 'cn') === 'global'
@@ -966,7 +1085,10 @@ export default function AccountsPage() {
                     </Badge>
                   </div>
                 </TableCell>
-                <TableCell className="font-mono text-xs text-muted-foreground">{a.uid}</TableCell>
+                <TableCell>
+                  <div className="font-mono text-xs text-muted-foreground">{a.uid}</div>
+                  {renderUsage(a)}
+                </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap items-center gap-1.5">
                     {renderStatus(a)}
@@ -986,10 +1108,16 @@ export default function AccountsPage() {
           <EmptyState
             icon={Users}
             title={t('accounts.emptyTitle')}
-            description={isAdmin ? t('accounts.emptyDescAdmin') : t('accounts.emptyDescViewer')}
+            description={
+              selectedMeta && selectedMeta.managed !== 'unified'
+                ? t(`accounts.managed_${selectedMeta.managed}`)
+                : isAdmin
+                  ? t('accounts.emptyDescAdmin')
+                  : t('accounts.emptyDescViewer')
+            }
             className="flex flex-col items-center justify-center py-16 text-center"
           >
-            {isAdmin && caps.oauth && (
+            {isAdmin && selectedOps.oauth && (
               <div className="mt-4 flex flex-wrap justify-center gap-2">
                 <Button className="rounded-full" onClick={() => setOAuthOpen(true)}>
                   <ExternalLink className="mr-2 h-4 w-4" />

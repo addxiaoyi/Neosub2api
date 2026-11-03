@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -52,15 +53,34 @@ def _anonymous_allowed(request: Request) -> bool:
     return request.app.state.settings.allow_anonymous_gateway
 
 
+def _bearer_token(header: str) -> str:
+    """Authorization 解析沿用旧口径：剥 `Bearer ` 前缀，裸 token 原样返回。"""
+    return header[7:].strip() if header.lower().startswith("bearer ") else header
+
+
 def _gateway_key(request: Request) -> dict[str, Any]:
-    header = request.headers.get("authorization", "").strip()
-    if not header:
+    # Anthropic 官方 SDK 默认发 x-api-key；Authorization 仍然优先且行为不变
+    auth_header = request.headers.get("authorization", "").strip()
+    api_key = request.headers.get("x-api-key", "").strip()
+    if auth_header and api_key:
+        # 两个头都带就必须同值：静默取其一会让调用方无从判断哪把 key 生效
+        if not hmac.compare_digest(_bearer_token(auth_header).encode(), api_key.encode()):
+            raise GatewayError(
+                401,
+                "鉴权头冲突：Authorization 与 x-api-key 的值不一致，请只保留一个",
+                type_="authentication_error",
+                code="conflicting_auth_headers",
+            )
+    if not auth_header and not api_key:
         if _anonymous_allowed(request):
             return {"id": None, "name": "anonymous"}
         raise GatewayError(
-            401, "缺少 Authorization: Bearer <key>", type_="authentication_error", code="invalid_api_key"
+            401,
+            "缺少 Authorization: Bearer <key> 或 x-api-key",
+            type_="authentication_error",
+            code="invalid_api_key",
         )
-    token = header[7:].strip() if header.lower().startswith("bearer ") else header
+    token = _bearer_token(auth_header) if auth_header else api_key
     digest = hashlib.sha256(token.encode()).hexdigest()
     conn = request.app.state.db.connect()
     try:

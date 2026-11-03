@@ -49,6 +49,10 @@ jobs:
         working-directory: apps/web
         run: npm run lint || echo "lint 有警告但放行"
 
+      - name: Typecheck
+        working-directory: apps/web
+        run: npx tsc --noEmit
+
       - name: Build export
         working-directory: apps/web
         run: npm run build:export

@@ -45,8 +45,7 @@ class DeepseekSidecarAdapter(OpenAICompatAdapter):
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
-        self._settings = settings
-        super().__init__(base_url)
+        super().__init__(settings, base_url)
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         """sidecar 的 Anthropic 端点路径非标准（/anthropic/v1/messages），做一层重写。"""
