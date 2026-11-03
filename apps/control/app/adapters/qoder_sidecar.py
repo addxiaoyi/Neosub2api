@@ -45,8 +45,7 @@ class QoderSidecarAdapter(OpenAICompatAdapter):
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
-        self._settings = settings
-        super().__init__(base_url)
+        super().__init__(settings, base_url)
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         """标准 Anthropic 路径 /v1/messages，非流式与流式都支持。"""

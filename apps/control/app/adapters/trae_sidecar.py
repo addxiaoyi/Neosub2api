@@ -40,8 +40,7 @@ class TraeSidecarAdapter(OpenAICompatAdapter):
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
-        self._settings = settings
-        super().__init__(base_url)
+        super().__init__(settings, base_url)
 
 
 def build(settings: Settings, base_url: str = "") -> TraeSidecarAdapter:
