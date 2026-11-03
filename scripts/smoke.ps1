@@ -4,7 +4,17 @@ $ErrorActionPreference = "Stop"
 
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ctrl = Join-Path $repo "apps\control"
-$py = Join-Path $repo ".runtime\python\python.exe"
+$bundled = Join-Path $repo ".runtime\python\python.exe"
+if (Test-Path $bundled) {
+    $py = $bundled
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    $py = "python"
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    $py = "py"
+} else {
+    Write-Host "Python 3 not found (looked for .runtime\python\python.exe, python, py)" -ForegroundColor Red
+    exit 1
+}
 $fakePort = 8021
 $ctrlPort = 8020
 
