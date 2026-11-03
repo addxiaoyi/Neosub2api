@@ -1,6 +1,8 @@
 from ..config import Settings
 from . import (
     codebuddy,
+    codar,
+    codar_sidecar,
     deepseek_sidecar,
     gptgrok,
     grok_register,
@@ -28,6 +30,8 @@ BUILDERS = (
     deepseek_sidecar.build,
     qoder.build,
     qoder_sidecar.build,
+    codar.build,
+    codar_sidecar.build,
 )
 
 

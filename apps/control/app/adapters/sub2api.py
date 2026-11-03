@@ -50,6 +50,10 @@ class Sub2ApiAdapter(ProviderAdapter):
         default_base_url="",
         capabilities=stub_capabilities(chat=True, messages=True, models=True),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        readiness="needs_config",
+        requires=(
+            "先建分组与账号（/api/sub2api/groups、/api/sub2api/accounts，缺了请求直接 503）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -148,20 +152,17 @@ class Sub2ApiAdapter(ProviderAdapter):
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         return await self._forward("messages", payload, stream=stream)
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def fetch_models(self) -> list[dict[str, Any]]:
         groups = self._store.list_groups()
         if not groups:
-            return []
+            raise ProviderError(503, "尚未创建配额分组（/api/sub2api/groups）")
         group_id = self._group_id()
         account = self._store.peek_account_credentials(group_id) if any(
             item["id"] == group_id for item in groups
         ) else None
         if account is None:
-            return []
-        try:
-            data = await self._client(account).get_json("/v1/models")
-        except ProviderError:
-            return []
+            raise ProviderError(503, f"分组 {group_id} 无可用账号")
+        data = await self._client(account).get_json("/v1/models")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []

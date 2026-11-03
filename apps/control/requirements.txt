@@ -1,3 +1,5 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
+# 价格表种子导入（config/prices.yaml）
+PyYAML==6.0.3

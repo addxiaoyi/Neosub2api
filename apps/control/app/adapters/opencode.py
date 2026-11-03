@@ -46,7 +46,7 @@ class OpenCodeAdapter(ProviderAdapter):
         return ""
 
     def _keys(self) -> list[str]:
-        raw = [self.api_key, *(self.options.get("extra_keys") or [])]
+        raw = [self.api_key, *(self.api_keys or []), *(self.options.get("extra_keys") or [])]
         keys: list[str] = []
         for item in raw:
             key = str(item or "").strip()
@@ -107,16 +107,17 @@ class OpenCodeAdapter(ProviderAdapter):
             raise ProviderError(
                 502,
                 f"{network_error.message}；已轮换 {attempts} 次密钥仍未连通",
+                upstream_code=network_error.upstream_code,
+                upstream_message=network_error.upstream_message,
             )
         if isinstance(last, ProviderError):
             raise last
         return last
 
-    async def list_models(self) -> list[dict[str, Any]]:
-        try:
-            data = await self._request("GET", f"{self._tier_prefix()}/v1/models", None, stream=False, anthropic=False)
-        except ProviderError:
-            return []
+    async def fetch_models(self) -> list[dict[str, Any]]:
+        data = await self._request(
+            "GET", f"{self._tier_prefix()}/v1/models", None, stream=False, anthropic=False
+        )
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []
@@ -146,4 +147,4 @@ class OpenCodeAdapter(ProviderAdapter):
 
 
 def build(settings: Settings, base_url: str = "") -> OpenCodeAdapter:
-    return OpenCodeAdapter(settings, base_url or settings.opencode_upstream_base)
+    return OpenCodeAdapter(settings, base_url)

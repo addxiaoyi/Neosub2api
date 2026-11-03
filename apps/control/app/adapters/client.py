@@ -1,9 +1,12 @@
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from .base import ProviderError
+from .base import ProviderError, parse_vendor_error
+
+logger = logging.getLogger("unified.upstream")
 
 
 @dataclass
@@ -74,11 +77,19 @@ class UnifiedApiClient:
         try:
             resp = await client.request(method, path, json=payload, headers=self._headers())
             if resp.status_code >= 400:
-                detail = resp.text[:200]
-                raise ProviderError(resp.status_code, f"上游 {path} 返回 {resp.status_code}：{detail}")
+                # 完整响应体只进服务端日志；对外只给解析后的厂商 code/描述（掩码后）与状态码
+                logger.warning("上游 %s%s 返回 %s：%s", self.base_url, path, resp.status_code, resp.text[:200])
+                code, vendor_message = parse_vendor_error(resp.text)
+                raise ProviderError(
+                    resp.status_code,
+                    f"上游 {path} 返回 {resp.status_code}",
+                    upstream_code=code,
+                    upstream_message=vendor_message,
+                )
             return resp.json()
         except httpx.RequestError as exc:
-            raise ProviderError(502, f"上游不可达（{self.base_url}）：{exc}") from exc
+            logger.warning("上游 %s 不可达：%s", self.base_url, exc)
+            raise ProviderError(502, "上游不可达") from exc
         finally:
             await client.aclose()
 
@@ -96,10 +107,17 @@ class UnifiedApiClient:
         try:
             resp = await client.get(path, params=params, headers=self._headers())
             if resp.status_code >= 400:
-                raise ProviderError(resp.status_code, f"上游 {path} 返回 {resp.status_code}")
+                code, vendor_message = parse_vendor_error(resp.text)
+                raise ProviderError(
+                    resp.status_code,
+                    f"上游 {path} 返回 {resp.status_code}",
+                    upstream_code=code,
+                    upstream_message=vendor_message,
+                )
             return resp.json()
         except httpx.RequestError as exc:
-            raise ProviderError(502, f"上游不可达（{self.base_url}）：{exc}") from exc
+            logger.warning("上游 %s 不可达：%s", self.base_url, exc)
+            raise ProviderError(502, "上游不可达") from exc
         finally:
             await client.aclose()
 
@@ -127,12 +145,18 @@ class UnifiedApiClient:
             response = await client.send(request, stream=stream)
         except httpx.RequestError as exc:
             await client.aclose()
-            raise ProviderError(502, f"上游不可达（{self.base_url}）：{exc}") from exc
+            logger.warning("上游 %s 不可达：%s", self.base_url, exc)
+            raise ProviderError(502, "上游不可达") from exc
+
+        # 429 的 Retry-After 要原样带回调用方，否则限流节奏只能靠猜
+        passthrough = {"content-type": response.headers.get("content-type", "text/event-stream")}
+        if response.headers.get("retry-after"):
+            passthrough["retry-after"] = response.headers["retry-after"]
 
         if stream:
             return UpstreamReply(
                 status_code=response.status_code,
-                headers={"content-type": response.headers.get("content-type", "text/event-stream")},
+                headers=passthrough,
                 response=response,
                 client=client,
             )
@@ -144,6 +168,6 @@ class UnifiedApiClient:
             await client.aclose()
         return UpstreamReply(
             status_code=response.status_code,
-            headers={"content-type": response.headers.get("content-type", "application/json")},
+            headers={**passthrough, "content-type": response.headers.get("content-type", "application/json")},
             body=body,
         )

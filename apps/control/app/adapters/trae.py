@@ -250,17 +250,21 @@ class TraeAdapter(ProviderAdapter):
     def _classify(self, status: int | None, code: int | None, message: str) -> ProviderError:
         text = message or ""
         if status == 401:
-            return ProviderError(401, "Trae 会话已失效：JWT 被拒，请重新登录并更新 api_key")
-        if code in CREDIT_CODES or ("1005" in text and "plan" in text.lower()):
-            return ProviderError(429, f"Trae 积分/套餐受限：code={code} {text}".strip())
-        if status == 429 or code in SOFT_RATE_CODES:
-            return ProviderError(429, f"Trae 触发限流：code={code} {text}".strip())
-        if status == 404:
-            return ProviderError(404, f"Trae 上游端点不存在：{text}".strip())
-        if status is not None and status >= 500:
-            return ProviderError(502, f"Trae 上游服务异常（{status}）：{text}".strip())
-        detail = text or (f"HTTP {status}" if status else "上游返回业务错误")
-        return ProviderError(400, f"Trae 请求被拒：{detail}")
+            err = ProviderError(401, "Trae 会话已失效：JWT 被拒，请重新登录并更新 api_key")
+        elif code in CREDIT_CODES or ("1005" in text and "plan" in text.lower()):
+            err = ProviderError(429, f"Trae 积分/套餐受限：code={code} {text}".strip())
+        elif status == 429 or code in SOFT_RATE_CODES:
+            err = ProviderError(429, f"Trae 触发限流：code={code} {text}".strip())
+        elif status == 404:
+            err = ProviderError(404, f"Trae 上游端点不存在：{text}".strip())
+        elif status is not None and status >= 500:
+            err = ProviderError(502, f"Trae 上游服务异常（{status}）：{text}".strip())
+        else:
+            detail = text or (f"HTTP {status}" if status else "上游返回业务错误")
+            err = ProviderError(400, f"Trae 请求被拒：{detail}")
+        if code is not None:
+            err.upstream_code = str(code)
+        return err.with_vendor_detail(text)
 
     async def _reply_text(self, reply) -> str:
         if reply.body is not None:
@@ -375,7 +379,7 @@ class TraeAdapter(ProviderAdapter):
                 code = self._error_code(json.loads(text))
             except (json.JSONDecodeError, TypeError):
                 code = None
-            raise self._classify(reply.status_code, code, text[:200])
+            raise self._classify(reply.status_code, code, text)
 
         if stream:
             return _Reply(200, stream=self._render_solo_stream(reply, model), content_type="text/event-stream")
@@ -534,7 +538,7 @@ class TraeAdapter(ProviderAdapter):
         reply = await client.forward(EP_CREATE_TASK, body, stream=True)
         if reply.status_code >= 400:
             text = await self._reply_text(reply)
-            raise self._classify(reply.status_code, None, text[:200])
+            raise self._classify(reply.status_code, None, text)
 
         events = _sse_events(reply.iter_bytes())
         first: tuple[str, str] | None = None
@@ -821,14 +825,11 @@ class TraeAdapter(ProviderAdapter):
             return await self._work_chat(payload, stream=stream)
         return await self._solo_chat(payload, stream=stream)
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def fetch_models(self) -> list[dict[str, Any]]:
         if not self._jwt():
-            return []
-        try:
-            client = self._client(self._solo_headers())
-            data = await client.post_json(EP_MODELS, {})
-        except ProviderError:
-            return []
+            raise ProviderError(401, "Trae 未配置 JWT（服务商页 api_key 或 options.extra_keys）")
+        client = self._client(self._solo_headers())
+        data = await client.post_json(EP_MODELS, {})
         items = data.get("models") if isinstance(data, dict) else None
         if not isinstance(items, list):
             items = data.get("data") if isinstance(data, dict) else None

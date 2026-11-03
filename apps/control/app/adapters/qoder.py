@@ -528,20 +528,20 @@ class QoderAdapter(ProviderAdapter):
         if status == 401 or code in SESSION_DEAD_CODES or any(word in joined for word in SESSION_DEAD_WORDS):
             err = ProviderError(429, f"Qoder 会话已失效或鉴权被拒（需重新登录刷新 token）：{text[:160]}")
             err.session_dead = True
-            return err
-        if status == 429:
+        elif status == 429:
             retry_after = self._retry_after(text)
             note = f"，Retry-After={retry_after}s" if retry_after else ""
             err = ProviderError(429, f"Qoder 触发限流{note}：{text[:160]}")
             err.retry_after = retry_after
-            return err
-        if status == 404:
-            return ProviderError(404, f"Qoder 上游端点不存在：{text[:160]}")
-        if status is not None and status >= 500:
-            return ProviderError(502, f"Qoder 上游服务异常（{status}）：{text[:160]}（可换 fallback host）")
-        if status == 400:
-            return ProviderError(400, f"Qoder 请求被拒：{text[:160]}")
-        return ProviderError(status or 400, f"Qoder 上游错误：{text[:160]}")
+        elif status == 404:
+            err = ProviderError(404, f"Qoder 上游端点不存在：{text[:160]}")
+        elif status is not None and status >= 500:
+            err = ProviderError(502, f"Qoder 上游服务异常（{status}）：{text[:160]}（可换 fallback host）")
+        elif status == 400:
+            err = ProviderError(400, f"Qoder 请求被拒：{text[:160]}")
+        else:
+            err = ProviderError(status or 400, f"Qoder 上游错误：{text[:160]}")
+        return err.with_vendor_detail(text)
 
     @staticmethod
     def _retry_after(text: str) -> int:
@@ -649,7 +649,9 @@ class QoderAdapter(ProviderAdapter):
                 raw = await reply.response.aread()
                 await reply.aclose()
                 text = raw.decode("utf-8", "ignore")
-            raise self._classify(reply.status_code, f"{text} {self._direct_note(region)}")
+            err = self._classify(reply.status_code, text)
+            err.message = f"{err.message} {self._direct_note(region)}".strip()
+            raise err
         return _Reply(reply.status_code, body=reply.body, stream=reply.iter_bytes(), content_type=reply.headers.get("content-type", "application/json"))
 
     async def _open_upstream(self, model: str, region: str, payload: dict[str, Any]):
@@ -668,7 +670,12 @@ class QoderAdapter(ProviderAdapter):
             try:
                 reply = await client.forward(EP_CHAT, raw=encoded.encode(), stream=True)
             except ProviderError as exc:
-                last = ProviderError(502, f"{exc.message}{self._direct_note(region)}")
+                last = ProviderError(
+                    502,
+                    f"{exc.message}{self._direct_note(region)}",
+                    upstream_code=exc.upstream_code,
+                    upstream_message=exc.upstream_message,
+                )
                 continue
             if reply.status_code >= 400:
                 raw = await reply.response.aread()
@@ -1007,12 +1014,14 @@ class QoderAdapter(ProviderAdapter):
 
     # ---------- 清单与健康 ----------
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def fetch_models(self) -> list[dict[str, Any]]:
         token = self._token()
         if not token:
-            return []
+            raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
         region = str(self.options.get("region") or "cn")
         models: list[dict[str, Any]] = []
+        last_error: ProviderError | None = None
+        reached = False
         for host in self._hosts(region):
             encoded = qoder_encode(b"{}")
             headers = self._headers(region, encoded, EP_MODELS, sse=False)
@@ -1021,13 +1030,17 @@ class QoderAdapter(ProviderAdapter):
             )
             try:
                 reply = await client.forward(EP_MODELS, raw=encoded.encode(), stream=False, method="GET")
-            except ProviderError:
+            except ProviderError as exc:
+                last_error = exc
                 continue
             if reply.status_code >= 400:
+                last_error = ProviderError(reply.status_code, f"Qoder 模型目录返回 {reply.status_code}")
                 continue
+            reached = True
             try:
                 outer = json.loads(reply.body or b"{}")
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                last_error = ProviderError(502, f"Qoder 模型目录返回非 JSON：{exc}")
                 continue
             entries = outer.get("body") if isinstance(outer, dict) else None
             if isinstance(entries, str):

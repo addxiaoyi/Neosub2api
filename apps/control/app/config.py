@@ -9,6 +9,21 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LEGACY_ADMIN_PASSWORD = "unified-admin"
 ADMIN_PASSWORD_FILE = "admin-password.txt"
 
+# 有 env 地址入口的 provider；用于区分「env 显式配置」与「代码内置默认值」
+ENV_BASE_VARS = {
+    "codebuddy": "CODEBUDDY_BASE",
+    "opencode": "OPENCODE_UPSTREAM_BASE",
+    "codar_sidecar": "CODAR_SIDECAR_BASE",
+    "trae_sidecar": "TRAE_SIDECAR_BASE",
+    "deepseek_sidecar": "DEEPSEEK_SIDECAR_BASE",
+    "qoder_sidecar": "QODER_SIDECAR_BASE",
+}
+
+# 历史版本写进 providers 表默认地址的旧值；老库可能残留这些种子，启动时只告警、绝不改写
+LEGACY_PROVIDER_BASES = {
+    "deepseek_sidecar": ("http://127.0.0.1:7872",),
+}
+
 
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -64,6 +79,21 @@ class Settings:
     allow_private_upstreams: bool = False
     # 流式响应单请求最大时长（秒），0 表示不限制
     sse_max_seconds: int = 600
+    # codar2api sidecar 地址；默认值便于 Settings(...) 在测试里省略该字段
+    codar_sidecar_base: str = "http://127.0.0.1:8801"
+    # 其余三家 sidecar 同链路；默认值与 .env.example 一致
+    trae_sidecar_base: str = "http://127.0.0.1:7871"
+    deepseek_sidecar_base: str = "http://127.0.0.1:5001"
+    qoder_sidecar_base: str = "http://127.0.0.1:7873"
+    # OpenAPI 文档默认关闭，生产不暴露 /docs /openapi.json /redoc（S-09）
+    enable_docs: bool = False
+    # 显式设置了 env 地址的 provider；registry 据此区分 env / default 两种来源
+    env_base_pids: frozenset[str] = frozenset()
+    # 失败请求滑动窗口限流：同一密钥窗内失败次数达上限即 429；0 表示关闭
+    failure_window_sec: int = 60
+    failure_window_max: int = 20
+    # 上游实拉模型目录的进程内缓存时长（秒）；0 表示不缓存
+    models_cache_ttl_sec: int = 60
 
 
 def load_settings() -> Settings:
@@ -83,6 +113,11 @@ def load_settings() -> Settings:
         cookie_secure=_bool("UNIFIED_COOKIE_SECURE", False),
         codebuddy_base=os.getenv("CODEBUDDY_BASE", "http://127.0.0.1:7864").rstrip("/"),
         codebuddy_api_key=os.getenv("CODEBUDDY_API_KEY", ""),
+        # codar2api sidecar 的 HTTP 入口；未启动时该 provider 明确显示不可达
+        codar_sidecar_base=os.getenv("CODAR_SIDECAR_BASE", "http://127.0.0.1:8801").rstrip("/"),
+        trae_sidecar_base=os.getenv("TRAE_SIDECAR_BASE", "http://127.0.0.1:7871").rstrip("/"),
+        deepseek_sidecar_base=os.getenv("DEEPSEEK_SIDECAR_BASE", "http://127.0.0.1:5001").rstrip("/"),
+        qoder_sidecar_base=os.getenv("QODER_SIDECAR_BASE", "http://127.0.0.1:7873").rstrip("/"),
         # OpenCode Zen/Go 的直连上游（不再经过 opencode2api 进程；Go 层由 options.tier 选择）
         opencode_upstream_base=os.getenv("OPENCODE_UPSTREAM_BASE", "https://opencode.ai/zen").rstrip("/"),
         # 注册任务执行器：外部浏览器运行时的 HTTP 入口；留空则任务失败而不是假装成功
@@ -95,4 +130,12 @@ def load_settings() -> Settings:
         port=int(os.getenv("UNIFIED_PORT", "8010")),
         allow_private_upstreams=_bool("UNIFIED_ALLOW_PRIVATE_UPSTREAMS", False),
         sse_max_seconds=int(os.getenv("UNIFIED_SSE_MAX_SECONDS", "600")),
+        enable_docs=_bool("UNIFIED_ENABLE_DOCS", False),
+        # 失败请求限流：窗口长度与窗内失败上限，两个都 >0 才生效
+        failure_window_sec=int(os.getenv("UNIFIED_FAILURE_WINDOW_SEC", "60")),
+        failure_window_max=int(os.getenv("UNIFIED_FAILURE_WINDOW_MAX", "20")),
+        models_cache_ttl_sec=int(os.getenv("UNIFIED_MODELS_CACHE_TTL_SEC", "60")),
+        env_base_pids=frozenset(
+            pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
+        ),
     )

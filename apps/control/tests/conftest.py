@@ -1,6 +1,7 @@
-"""pytest 基建：起临时控制面（端口 8020）+ 假上游（端口 8021），fixture 化 httpx client。
+"""pytest 基建：起临时控制面（默认 8060）+ 假上游（默认 8061），fixture 化 httpx client。
 
-端口 8020 避开开发实例（8010），假上游走 8021 避免冲突。
+端口可用 UNIFIED_TEST_CTRL_PORT / UNIFIED_TEST_FAST_PORT（兼容旧的 ...FAKE_PORT）覆盖，
+避开开发实例（8010/8011）。
 所有业务代码引用通过 importlib 动态 reload，防止上一个测试残留状态污染。
 """
 
@@ -21,8 +22,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 CONTROL = REPO / "apps" / "control"
 PY = REPO / ".runtime" / "python" / "python.exe"
-FAKE_PORT = 8021
-CTRL_PORT = 8020
+# FAST_PORT 是审计后约定的端口名；FAKE_PORT 为历史写法，保留兼容
+FAKE_PORT = int(os.getenv("UNIFIED_TEST_FAST_PORT", os.getenv("UNIFIED_TEST_FAKE_PORT", "8061")))
+CTRL_PORT = int(os.getenv("UNIFIED_TEST_CTRL_PORT", "8060"))
 
 
 def _port_free(port: int) -> bool:
@@ -50,7 +52,7 @@ def _wait_up(url: str, timeout: float = 15.0) -> bool:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _bring_up_services(tmp_path_factory) -> Iterator[None]:
+def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
     """会话级：起假上游 + 控制面；退出时强杀。"""
     if not _port_free(FAKE_PORT):
         pytest.skip(f"端口 {FAKE_PORT} 已被占用")
@@ -103,7 +105,8 @@ def _bring_up_services(tmp_path_factory) -> Iterator[None]:
             pytest.skip("假上游启动失败")
         if not _wait_up(f"http://127.0.0.1:{CTRL_PORT}/healthz"):
             pytest.skip("控制面启动失败")
-        yield
+        # /healthz 不再回传库路径，测试直接拿临时 data_dir（S-09）
+        yield {"data_dir": data_dir}
     finally:
         for p in (ctrl, fake):
             try:
@@ -148,9 +151,7 @@ def fake_base() -> str:
     return f"http://127.0.0.1:{FAKE_PORT}"
 
 
-@pytest.fixture(scope="function")
-def db_path(base_url, admin) -> str:
-    """临时 SQLite 路径（从 /healthz 取）。"""
-    r = admin.get("/healthz")
-    assert r.status_code == 200
-    return r.json()["db"]
+@pytest.fixture(scope="session")
+def db_path(_bring_up_services) -> str:
+    """临时 SQLite 路径（由启动 fixture 提供，不再从 /healthz 取）。"""
+    return str(Path(_bring_up_services["data_dir"]) / "unified.db")

@@ -406,25 +406,3 @@ def remove_user(username: str, request: Request, actor: dict = Depends(admin_use
     finally:
         conn.close()
     return {"ok": True}
-
-
-@router.get("/system/check-update")
-def check_update(request: Request, user: dict = Depends(current_user)):
-    return {
-        "checked_at": now(),
-        "cached": False,
-        "has_any": False,
-        "manager": {},
-        "upstream": {},
-        "note": "M1 自更新通道未启用",
-    }
-
-
-@router.get("/system/versions")
-def versions(request: Request, user: dict = Depends(current_user)):
-    return {
-        "manager": "unified-2api M2",
-        "upstream_connected": False,
-        "upstream_accounts": None,
-        "upstream_dir": "",
-    }

@@ -35,11 +35,8 @@ class OpenAICompatAdapter(ProviderAdapter):
         """转发前的请求改写钩子，子类按需覆盖（风控开关落这里）。"""
         return payload
 
-    async def list_models(self) -> list[dict[str, Any]]:
-        try:
-            data = await self._client(timeout=30.0).get_json("/v1/models")
-        except ProviderError:
-            return []
+    async def fetch_models(self) -> list[dict[str, Any]]:
+        data = await self._client(timeout=30.0).get_json("/v1/models")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []

@@ -24,7 +24,7 @@ class DeepseekSidecarAdapter(OpenAICompatAdapter):
         runtime="独立进程 sidecar（Go + WASM PoW）",
         status="sidecar",
         description="DeepSeek 官方 chat.deepseek.com 代理，含 WASM PoW。sidecar 自行管理账号登录与 token 刷新。",
-        default_base_url="http://127.0.0.1:7872",
+        default_base_url="http://127.0.0.1:5001",
         capabilities={
             "chat": True,
             "messages": True,
@@ -38,6 +38,10 @@ class DeepseekSidecarAdapter(OpenAICompatAdapter):
         protocols=("openai.chat.completions", "anthropic.messages"),
         risk_level="danger",
         risk_note="上游无 LICENSE，版权全保留。本 provider 仅供个人评估，商用前必须移除 sidecar 及其适配器。",
+        readiness="needs_config",
+        requires=(
+            "sidecar 进程（Deepseek2Go，默认端口 5001）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:

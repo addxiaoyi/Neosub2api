@@ -23,6 +23,10 @@ class GrokRegisterAdapter(ProviderAdapter):
         default_base_url="",
         capabilities=stub_capabilities(register=True),
         protocols=(),
+        readiness="needs_config",
+        requires=(
+            "GROK_REGISTER_EXECUTOR_URL 指向浏览器执行器（留空则任务入队后以明确原因失败）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:

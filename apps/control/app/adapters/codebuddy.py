@@ -58,6 +58,10 @@ class CodeBuddyAdapter(ProviderAdapter):
             credits=True,
         ),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        readiness="needs_config",
+        requires=(
+            "7864 管理端进程 + wbt_ token（缺了账号同步、签到与设置下发全部失败）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -65,7 +69,7 @@ class CodeBuddyAdapter(ProviderAdapter):
         super().__init__(base_url)
 
     def _client(self, timeout: float = 120.0) -> UnifiedApiClient:
-        return UnifiedApiClient(self.base_url, api_key=self.api_key or self._settings.codebuddy_api_key, timeout=timeout)
+        return UnifiedApiClient(self.base_url, api_key=self.api_key, timeout=timeout)
 
     @staticmethod
     def _map_account(raw: dict[str, Any]) -> dict[str, Any]:
@@ -117,20 +121,20 @@ class CodeBuddyAdapter(ProviderAdapter):
                 merged[key] = payload[key]
         return merged
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def fetch_models(self) -> list[dict[str, Any]]:
         client = self._client(timeout=30.0)
         try:
             data = await client.get_json("/v1/models")
-        except Exception:
-            # 管理端网关不通时退到管理端 /api/models（含静态表回退）
+        except ProviderError as first_error:
+            # 管理端网关不通时退到管理端 /api/models（上游静态表，仍算上游实拉）
             try:
                 payload = await client.get_json("/api/models")
-                items = payload.get("models") if isinstance(payload, dict) else None
-                if isinstance(items, list):
-                    return [m for m in items if isinstance(m, dict) and m.get("id")]
-            except Exception:
-                pass
-            return []
+            except ProviderError:
+                raise first_error
+            items = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                raise first_error
+            return [m for m in items if isinstance(m, dict) and m.get("id")]
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []

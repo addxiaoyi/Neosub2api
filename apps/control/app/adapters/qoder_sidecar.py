@@ -38,6 +38,10 @@ class QoderSidecarAdapter(OpenAICompatAdapter):
         protocols=("openai.chat.completions", "anthropic.messages"),
         risk_level="danger",
         risk_note="PolyForm Noncommercial 1.0.0 禁止任何商用（包括内部商业项目与托管服务）。作者书面授权前不得商用。",
+        readiness="needs_config",
+        requires=(
+            "sidecar 进程（buddy-switch-gateway，默认端口 7873）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:

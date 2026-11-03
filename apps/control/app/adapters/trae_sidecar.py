@@ -33,6 +33,10 @@ class TraeSidecarAdapter(OpenAICompatAdapter):
         protocols=("openai.chat.completions",),
         risk_level="safe",
         risk_note="",
+        readiness="needs_config",
+        requires=(
+            "sidecar 进程（trae2api，默认端口 7871）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
