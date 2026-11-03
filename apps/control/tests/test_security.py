@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -12,8 +13,10 @@ from fastapi import HTTPException
 from app.adapters.base import ProviderError
 from app.adapters.sub2api_store import QuotaStore
 from app.api_utils import mask_secret, parse_bool
-from app.config import _admin_password
+from app.config import _admin_password, load_settings
+from app.db import Database
 from app.net_guard import UpstreamAddressError, guard_upstream_url
+from app.registry import ProviderRegistry
 
 pytestmark = pytest.mark.security
 
@@ -154,7 +157,7 @@ def test_private_upstreams_are_blocked() -> None:
 
     assert guard_upstream_url("http://93.184.216.34", allow_private=False) == "http://93.184.216.34"
     assert (
-        guard_upstream_url("http://127.0.0.1:8021/", allow_private=True) == "http://127.0.0.1:8021"
+        guard_upstream_url("http://127.0.0.1:8061/", allow_private=True) == "http://127.0.0.1:8061"
     )
     with pytest.raises(UpstreamAddressError):
         guard_upstream_url("ftp://example.com", allow_private=False)
@@ -166,3 +169,106 @@ def test_sub2_store_rejects_private_upstream(tmp_path) -> None:
     with pytest.raises(ProviderError) as ctx:
         store.add_account("g1", upstream_base="http://127.0.0.1:7899")
     assert ctx.value.status_code == 400
+
+
+def _fresh_registry(monkeypatch: pytest.MonkeyPatch, tmp_path, *, allow_private: bool = False) -> ProviderRegistry:
+    """按当前守卫默认配置建一个内存外的临时 registry（不依赖正在跑的控制面）。"""
+    for var in (
+        "TRAE_SIDECAR_BASE",
+        "DEEPSEEK_SIDECAR_BASE",
+        "QODER_SIDECAR_BASE",
+        "CODAR_SIDECAR_BASE",
+        "CODEBUDDY_BASE",
+        "OPENCODE_UPSTREAM_BASE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("UNIFIED_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("UNIFIED_DB_PATH", str(tmp_path / "unified.db"))
+    monkeypatch.setenv("UNIFIED_ADMIN_PASSWORD", "test")
+    if allow_private:
+        monkeypatch.setenv("UNIFIED_ALLOW_PRIVATE_UPSTREAMS", "1")
+    else:
+        monkeypatch.delenv("UNIFIED_ALLOW_PRIVATE_UPSTREAMS", raising=False)
+    settings = load_settings()
+    return ProviderRegistry(Database(settings.db_path), settings)
+
+
+def test_sidecar_loopback_base_allowed(monkeypatch: pytest.MonkeyPatch, tmp_path, fake_base: str) -> None:
+    """spec 默认地址是 loopback 的 provider，可以把地址改成假上游的 loopback 端口。"""
+    registry = _fresh_registry(monkeypatch, tmp_path)
+    for pid in ("trae_sidecar", "deepseek_sidecar", "qoder_sidecar", "codar_sidecar"):
+        assert registry.allows_loopback(pid) is True, pid
+        item = registry.update(pid, base_url=fake_base)
+        assert item["base_url"] == fake_base
+        assert item["allows_local_base_url"] is True
+
+
+def test_non_loopback_provider_loopback_base_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, fake_base: str
+) -> None:
+    """默认地址是公网的 provider 仍然拒绝 loopback，错误文案要点明这家未开放。"""
+    registry = _fresh_registry(monkeypatch, tmp_path)
+    for pid in ("opencode", "muse", "sub2api", "trae", "qoder"):
+        assert registry.allows_loopback(pid) is False, pid
+        with pytest.raises(ProviderError) as ctx:
+            registry.update(pid, base_url=fake_base)
+        assert ctx.value.status_code == 400
+        assert "未开放本地地址" in ctx.value.message
+        assert pid in ctx.value.message
+        assert "UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1" in ctx.value.message
+
+
+def test_sidecar_private_ranges_still_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, fake_base: str
+) -> None:
+    """放行 loopback 不等于放行整个私网：10/172.16/192.168 仍然拒绝。"""
+    port = urlparse(fake_base).port or 80
+    registry = _fresh_registry(monkeypatch, tmp_path)
+    for host in ("10.0.0.5", "172.16.0.9", "192.168.1.10"):
+        with pytest.raises(ProviderError) as ctx:
+            registry.update("trae_sidecar", base_url=f"http://{host}:{port}")
+        assert ctx.value.status_code == 400
+        assert "内网" in ctx.value.message
+
+
+def test_metadata_address_never_allowed(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """云元数据地址即使 provider 允许 loopback、即使全局放开也始终拒绝。"""
+    url = "http://169.254.169.254/latest/meta-data"
+    for allow_private in (False, True):
+        registry = _fresh_registry(monkeypatch, tmp_path, allow_private=allow_private)
+        with pytest.raises(ProviderError) as ctx:
+            registry.update("trae_sidecar", base_url=url)
+        assert ctx.value.status_code == 400
+        assert "元数据" in ctx.value.message
+    with pytest.raises(UpstreamAddressError):
+        guard_upstream_url(url, allow_private=True, allow_loopback=True, provider="trae_sidecar")
+
+
+def test_public_address_unaffected(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """公网地址不受新白名单影响，两类 provider 都能保存。"""
+    registry = _fresh_registry(monkeypatch, tmp_path)
+    public = "http://93.184.216.34:8080"
+    for pid in ("trae_sidecar", "opencode"):
+        assert registry.update(pid, base_url=public)["base_url"] == public
+
+
+def test_guard_accepts_only_loopback_when_provider_allows(fake_base: str) -> None:
+    port = urlparse(fake_base).port or 80
+    loopbacks = (
+        f"http://127.0.0.1:{port}",
+        f"http://127.0.0.2:{port}",
+        f"http://[::1]:{port}",
+        f"http://localhost:{port}",
+    )
+    for url in loopbacks:
+        assert guard_upstream_url(url, allow_loopback=True, provider="trae_sidecar") == url
+        with pytest.raises(UpstreamAddressError):
+            guard_upstream_url(url, allow_loopback=False, provider="opencode")
+
+
+def test_providers_expose_local_base_allowance(admin: httpx.Client) -> None:
+    items = {item["id"]: item for item in admin.get("/api/providers").json()}
+    for pid in ("codebuddy", "trae_sidecar", "deepseek_sidecar", "qoder_sidecar", "codar_sidecar"):
+        assert items[pid]["allows_local_base_url"] is True, pid
+    for pid in ("opencode", "muse", "sub2api", "trae", "qoder"):
+        assert items[pid]["allows_local_base_url"] is False, pid

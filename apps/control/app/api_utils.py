@@ -1,6 +1,7 @@
 """账号/统计等跨 router 共用的小工具。"""
 
 import json
+import re
 import time
 from typing import Any
 
@@ -35,6 +36,22 @@ def mask_secret(value: str) -> str:
     if len(text) <= 8:
         return "***"
     return f"{text[:4]}…{text[-4:]}"
+
+
+_KEY_IN_TEXT = re.compile(r"u2a_[A-Za-z0-9_-]{4,}")
+
+
+def mask_text(value: str) -> str:
+    """把任意文本里疑似 u2a_ 密钥的片段换成掩码，日志/审计落库前统一走这里。"""
+    text = "" if value is None else str(value)
+    return _KEY_IN_TEXT.sub(lambda match: mask_secret(match.group(0)), text)
+
+
+def mask_access_args(args: Any) -> Any:
+    """uvicorn.access 的 record.args 是元组，逐项脱敏以覆盖查询串里的密钥。"""
+    if not isinstance(args, tuple):
+        return args
+    return tuple(mask_text(item) if isinstance(item, str) else item for item in args)
 
 
 def db_of(request: Request):

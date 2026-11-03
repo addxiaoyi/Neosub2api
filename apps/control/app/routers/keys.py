@@ -2,6 +2,9 @@
 
 存 sha256 哈希，不落明文。配额/模型白名单属 M3 计费范畴，M2 不收录字段，
 避免「界面能配、网关不执行」的假承诺。
+
+归属（owner_user_id）沿用 users 主键：users.username 是 TEXT 主键，所以这里存用户名。
+admin 可查全部、可建任意归属的 key；非 admin 只列自己的 key。
 """
 
 import hashlib
@@ -26,6 +29,7 @@ def _row_to_public(row) -> dict:
         "enabled": bool(row["enabled"]),
         "created_at": row["created_at"],
         "last_used_at": row["last_used_at"],
+        "owner_user_id": row["owner_user_id"],
     }
 
 
@@ -33,9 +37,14 @@ def _row_to_public(row) -> dict:
 def list_keys(request: Request, user: dict = Depends(current_user)):
     conn = request.app.state.db.connect()
     try:
-        rows = conn.execute(
-            "SELECT * FROM api_keys ORDER BY created_at DESC"
-        ).fetchall()
+        if user.get("role") == "admin":
+            rows = conn.execute("SELECT * FROM api_keys ORDER BY created_at DESC").fetchall()
+        else:
+            # NULL 归属的老 key 对非 admin 不可见
+            rows = conn.execute(
+                "SELECT * FROM api_keys WHERE owner_user_id = ? ORDER BY created_at DESC",
+                (user.get("username") or "",),
+            ).fetchall()
     finally:
         conn.close()
     return [_row_to_public(r) for r in rows]
@@ -43,6 +52,21 @@ def list_keys(request: Request, user: dict = Depends(current_user)):
 
 class KeyCreate(BaseModel):
     name: str
+    # 仅 admin 生效：不传就归当前登录用户；显式指定则归他人
+    owner_user_id: str | None = None
+
+
+def create_key_record(conn, name: str, owner_user_id: str | None = None) -> tuple[int, str]:
+    """建一把网关密钥，返回 (id, 明文)。明文只在该请求里回传一次。"""
+    token = KEY_PREFIX + secrets.token_urlsafe(24)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    cur = conn.execute(
+        "INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, owner_user_id) "
+        "VALUES(?,?,?,1,?,?)",
+        (name, digest, token[:10], now(), owner_user_id or None),
+    )
+    conn.commit()
+    return cur.lastrowid, token
 
 
 @router.post("")
@@ -50,27 +74,18 @@ def create_key(body: KeyCreate, request: Request, user: dict = Depends(admin_use
     name = body.name.strip()
     if not (1 <= len(name) <= 64):
         raise HTTPException(400, "名称长度需为 1-64 个字符")
-    token = KEY_PREFIX + secrets.token_urlsafe(24)
-    digest = hashlib.sha256(token.encode()).hexdigest()
+    owner = (body.owner_user_id or "").strip() or user["username"]
     conn = request.app.state.db.connect()
     try:
-        cur = conn.execute(
-            "INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at) VALUES(?,?,?,1,?)",
-            (name, digest, token[:10], now()),
-        )
-        conn.commit()
-        key_id = cur.lastrowid
+        if owner != user["username"]:
+            exists = conn.execute("SELECT 1 FROM users WHERE username = ?", (owner,)).fetchone()
+            if exists is None:
+                raise HTTPException(400, f"归属用户不存在：{owner}")
+        key_id, token = create_key_record(conn, name, owner_user_id=owner)
+        row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
     finally:
         conn.close()
-    return {
-        "id": key_id,
-        "name": name,
-        "prefix": token[:10],
-        "enabled": True,
-        "created_at": now(),
-        "last_used_at": None,
-        "key": token,  # 只此一次
-    }
+    return {**_row_to_public(row), "key": token}  # 只此一次
 
 
 class KeyPatch(BaseModel):

@@ -46,6 +46,8 @@ def audit_event(conn, actor: str, action: str, target: str, detail: str = "", ip
 def create_session(conn, username: str, ttl: int) -> str:
     token = secrets.token_urlsafe(32)
     now = int(time.time())
+    # 顺手清过期会话，避免 sessions 表只增不减（S-13）
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
     conn.execute(
         "INSERT INTO sessions(token, username, created_at, expires_at) VALUES(?, ?, ?, ?)",
         (token, username, now, now + ttl),

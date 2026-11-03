@@ -1,3 +1,6 @@
+import threading
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
@@ -12,6 +15,39 @@ from ..security import (
 )
 
 router = APIRouter(prefix="/api", tags=["auth"])
+
+# 登录失败节流：同一 IP + 用户名窗口内失败过多就短暂拒绝（S-12）
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SEC = 900
+_login_failures: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+
+
+def _login_key(ip: str, username: str) -> str:
+    return f"{ip}|{username.strip().lower()}"
+
+
+def _login_wait(key: str) -> int:
+    now_ts = time.time()
+    with _login_lock:
+        stamps = [ts for ts in _login_failures.get(key, ()) if now_ts - ts < LOGIN_WINDOW_SEC]
+        if stamps:
+            _login_failures[key] = stamps
+        else:
+            _login_failures.pop(key, None)
+        if len(stamps) < LOGIN_MAX_FAILURES:
+            return 0
+        return max(1, int(LOGIN_WINDOW_SEC - (now_ts - stamps[0])))
+
+
+def _login_failed(key: str) -> None:
+    with _login_lock:
+        _login_failures.setdefault(key, []).append(time.time())
+
+
+def _login_ok(key: str) -> None:
+    with _login_lock:
+        _login_failures.pop(key, None)
 
 
 class LoginBody(BaseModel):
@@ -50,14 +86,21 @@ def audit(conn, actor: str, action: str, target: str, detail: str, ip: str) -> N
 def login(body: LoginBody, request: Request, response: Response):
     conn = request.app.state.db.connect()
     ip = request.client.host if request.client else ""
+    key = _login_key(ip, body.username)
+    wait = _login_wait(key)
+    if wait:
+        conn.close()
+        raise HTTPException(status_code=429, detail=f"登录失败次数过多，请 {wait} 秒后再试")
     try:
         row = conn.execute(
             "SELECT username, password_hash, role FROM users WHERE username = ?",
             (body.username.strip(),),
         ).fetchone()
         if row is None or not verify_password(body.password, row["password_hash"]):
+            _login_failed(key)
             audit(conn, body.username.strip() or "anonymous", "login_failed", "", "用户名或密码错误", ip)
             raise HTTPException(status_code=401, detail="用户名或密码错误")
+        _login_ok(key)
         token = create_session(conn, row["username"], request.app.state.settings.session_ttl_sec)
         audit(conn, row["username"], "login", "", "", ip)
     finally:

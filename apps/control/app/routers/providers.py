@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..adapters.base import ProviderError
-from ..security import admin_user, current_user
+from ..security import admin_user, audit_event, current_user
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
@@ -31,7 +31,7 @@ def patch_provider(
     user: dict = Depends(admin_user),
 ):
     try:
-        return request.app.state.registry.update(
+        result = request.app.state.registry.update(
             provider_id,
             enabled=body.enabled,
             base_url=body.base_url,
@@ -41,3 +41,18 @@ def patch_provider(
         )
     except ProviderError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    # 只记字段名，不落密钥值（S-21）
+    fields = sorted(body.model_dump(exclude_none=True).keys())
+    conn = request.app.state.db.connect()
+    try:
+        audit_event(
+            conn,
+            user["username"],
+            "providers.patch",
+            provider_id,
+            ",".join(fields),
+            request.client.host if request.client else "",
+        )
+    finally:
+        conn.close()
+    return result

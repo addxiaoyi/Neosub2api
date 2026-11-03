@@ -8,7 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .adapters.base import ProviderError
+from .api_utils import mask_access_args
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
 from .registry import ProviderRegistry
@@ -17,6 +19,27 @@ from .security import hash_password, verify_password
 from .services.grok_register import GrokRegisterService
 
 logger = logging.getLogger("unified.security")
+
+
+class _AccessLogRedactor(logging.Filter):
+    """uvicorn 访问日志会记录完整 URL，落盘前把疑似 u2a_ 片段替换成掩码。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.args = mask_access_args(record.args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_AccessLogRedactor())
+
+
+WEAK_PASSWORDS = {"unified-admin", "admin", "password", "123456", "12345678", "changeme"}
+
+
+def _warn_if_weak(settings) -> None:
+    """库里的管理员口令就是 settings 里这个时才有意义，别的来源无法读到明文。"""
+    secret = settings.admin_password
+    if len(secret) < 8 or secret.strip().lower() in WEAK_PASSWORDS:
+        logger.warning("管理员口令偏弱，建议通过 UNIFIED_ADMIN_PASSWORD 或删除 %s 后重启更换", ADMIN_PASSWORD_FILE)
 
 
 def _seed_admin(db: Database, settings) -> None:
@@ -37,12 +60,17 @@ def _seed_admin(db: Database, settings) -> None:
             )
             conn.commit()
             _announce_password(settings, created=True)
+            _warn_if_weak(settings)
             return
         if settings.admin_password_source == "env":
-            needs_rotate = not verify_password(settings.admin_password, row["password_hash"])
+            matches = verify_password(settings.admin_password, row["password_hash"])
+            needs_rotate = not matches
         else:
+            matches = False  # 无法读到库里的明文
             needs_rotate = verify_password(LEGACY_ADMIN_PASSWORD, row["password_hash"])
         if not needs_rotate:
+            if matches:
+                _warn_if_weak(settings)
             return
         conn.execute(
             "UPDATE users SET password_hash = ? WHERE username = ?",
@@ -55,6 +83,7 @@ def _seed_admin(db: Database, settings) -> None:
         else:
             logger.warning("检测到历史默认口令，已轮换管理员「%s」口令，旧会话全部失效", row["username"])
             _announce_password(settings, created=False)
+        _warn_if_weak(settings)
     finally:
         conn.close()
 
@@ -87,7 +116,15 @@ def create_app() -> FastAPI:
         finally:
             await grok_service.stop()
 
-    app = FastAPI(title="unified-2api control plane", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="unified-2api control plane",
+        version=__version__,
+        lifespan=lifespan,
+        # 生产默认不暴露接口文档；本地调试显式 UNIFIED_ENABLE_DOCS=1（S-09）
+        docs_url="/docs" if settings.enable_docs else None,
+        redoc_url="/redoc" if settings.enable_docs else None,
+        openapi_url="/openapi.json" if settings.enable_docs else None,
+    )
     app.state.settings = settings
     app.state.db = db
     app.state.registry = registry
@@ -97,9 +134,25 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        # 精确放行管理面实际用到的方法/头，避免配置放宽后 allow_* 全通（S-11）
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["authorization", "content-type", "x-provider", "x-requested-with"],
     )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        """服务端安全头兜底；反代层没配时也能挡住 iframe 嵌入与 MIME 嗅探（S-16）。"""
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault(
+            "Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+        )
+        if settings.cookie_secure:
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
 
     @app.exception_handler(ProviderError)
     async def provider_error_handler(request: Request, exc: ProviderError):
@@ -110,11 +163,8 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
-        return {
-            "ok": True,
-            "providers": len(registry.list_public()),
-            "db": str(settings.db_path),
-        }
+        # 不返回数据库路径：未认证端点不该泄露部署目录（S-09）
+        return {"ok": True, "providers": len(registry.list_public())}
 
     if settings.web_dir.is_dir():
         app.mount("/", StaticFiles(directory=settings.web_dir, html=True), name="web")
