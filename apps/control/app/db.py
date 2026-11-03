@@ -126,6 +126,99 @@ CREATE TABLE IF NOT EXISTS sub2_ledger(
   reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sub2_ledger_group ON sub2_ledger(group_id, ts);
+
+-- ===== M3-1 消费侧计费域：只算钱、不拦人 =====
+-- 价格表 append-only：改价只插新行，(provider, model, token_class, effective_from) 是版本键
+CREATE TABLE IF NOT EXISTS price_books(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,            -- 行 id；billing_ledger 通过快照间接引用
+  provider TEXT NOT NULL,                          -- 适配器 id；'*' = 通配（当前排他解析优先精确行）
+  model TEXT NOT NULL,                             -- 解析后的实际模型名；'*' = 通配
+  token_class TEXT NOT NULL CHECK (token_class IN ('input','output','cache_read','cache_write','reasoning')),
+  price_micro_per_1m INTEGER NOT NULL CHECK (price_micro_per_1m >= 0), -- 每 1M token 的 micro-USD（1e-6 美元）
+  currency TEXT NOT NULL DEFAULT 'USD',            -- M3 只落 USD，不做多币种
+  effective_from INTEGER NOT NULL,                 -- 生效 epoch 秒；未来时间=定时生效
+  created_by TEXT NOT NULL DEFAULT '',             -- 操作者用户名（审计）
+  note TEXT NOT NULL DEFAULT '',                   -- 价格来源与口径说明
+  UNIQUE (provider, model, token_class, effective_from)
+);
+CREATE INDEX IF NOT EXISTS idx_price_books_lookup ON price_books(token_class, provider, model, effective_from);
+
+-- 每请求价格快照：准入时解析一次，整行冻结，ledger 只引用快照 id
+CREATE TABLE IF NOT EXISTS price_book_snapshots(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resolved_at INTEGER NOT NULL,                    -- 解析时间（= 请求准入时刻，不是落库时刻）
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  lines_json TEXT NOT NULL DEFAULT '{}'            -- {"input":{"price_id":1,"price_micro_per_1m":2500000},...}
+);
+
+-- 消费侧流水：每请求一行，金额已定格，可重算可审计
+CREATE TABLE IF NOT EXISTS billing_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  key_id INTEGER,                                  -- 与 usage_records 同口径：匿名/失效密钥写 NULL
+  key_name TEXT NOT NULL DEFAULT '',
+  billing_account_id INTEGER,                      -- 冗余自 api_keys（M3-2 补列后回填），M3-1 恒 NULL
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  status INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,         -- OpenAI: prompt - cached；Anthropic: input_tokens
+  output_tokens INTEGER NOT NULL DEFAULT 0,        -- 已扣除 reasoning 的可见输出
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  billed_micro INTEGER NOT NULL DEFAULT 0,         -- 定格金额 micro-USD，只增不改成负数（退款走负行）
+  price_snapshot_id INTEGER,                       -- 指向 price_book_snapshots.id
+  estimated INTEGER NOT NULL DEFAULT 0,            -- 1=金额不完整/为估值（命中未定价档）
+  note TEXT NOT NULL DEFAULT ''                    -- usage_missing / unpriced:input,output / ...
+);
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_ts ON billing_ledger(ts);
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_key ON billing_ledger(key_id, ts);
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_account ON billing_ledger(billing_account_id, ts);
+
+-- ===== M3-2 配额域：按网关密钥（u2a_）设日/月额度，可再按 provider/模型收窄 =====
+-- 金额与请求数都从 billing_ledger 聚合，不再维护第二套累加器
+CREATE TABLE IF NOT EXISTS quota_policies(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_id INTEGER NOT NULL,                        -- api_keys.id（调用方维度）
+  provider TEXT NOT NULL DEFAULT '',             -- 空 = 不限 provider；否则精确匹配适配器 id
+  model TEXT NOT NULL DEFAULT '',                -- 空 = 不限模型；否则精确匹配解析后的模型名
+  window TEXT NOT NULL CHECK (window IN ('day','month')),
+  limit_micro INTEGER NOT NULL DEFAULT 0,         -- 金额上限 micro-USD，0 = 不设
+  limit_requests INTEGER NOT NULL DEFAULT 0,      -- 请求数上限，0 = 不设
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (key_id, provider, model, window)
+);
+CREATE INDEX IF NOT EXISTS idx_quota_policies_key ON quota_policies(key_id, enabled);
+
+-- 阈值（百分比），同一策略可设多个，如 80 / 100
+CREATE TABLE IF NOT EXISTS quota_alert_thresholds(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id INTEGER NOT NULL,
+  percent INTEGER NOT NULL CHECK (percent >= 1),
+  created_at INTEGER NOT NULL,
+  UNIQUE (policy_id, percent)
+);
+
+-- 告警历史：独立表而不是 audit_logs，理由见路由模块 docstring
+CREATE TABLE IF NOT EXISTS quota_alerts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id INTEGER NOT NULL,
+  threshold_percent INTEGER NOT NULL,
+  window TEXT NOT NULL,
+  period_start INTEGER NOT NULL,                  -- 触发时所在周期的起点，周期翻转后自然允许新告警
+  triggered_at INTEGER NOT NULL,
+  metric TEXT NOT NULL DEFAULT '',                -- micro / requests，说明是哪类额度跨阈值
+  used_micro INTEGER NOT NULL DEFAULT 0,
+  limit_micro INTEGER NOT NULL DEFAULT 0,
+  used_requests INTEGER NOT NULL DEFAULT 0,
+  limit_requests INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (policy_id, threshold_percent, period_start)
+);
+CREATE INDEX IF NOT EXISTS idx_quota_alerts_policy ON quota_alerts(policy_id, period_start);
+
 CREATE TABLE IF NOT EXISTS grok_tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   status TEXT NOT NULL DEFAULT 'queued',
@@ -171,6 +264,8 @@ class Database:
         conn = self.connect()
         try:
             conn.executescript(SCHEMA)
+            # M3-1 的 price_books / price_book_snapshots / billing_ledger 是纯新表，
+            # 靠 SCHEMA 里的 CREATE TABLE IF NOT EXISTS 自动补到已有库，不需要 ALTER。
             # 轻量迁移：给已有库补列（CREATE TABLE IF NOT EXISTS 不会改旧表）
             _ensure_column(conn, "accounts", "meta_json", "TEXT NOT NULL DEFAULT '{}'")
             # 归属列：老库没有，启动时幂等补列；补完再建索引，避免旧库上索引先于列失败

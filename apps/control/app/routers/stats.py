@@ -3,6 +3,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, Request
 
 from ..api_utils import log_success_sql, now
+from ..billing import to_usd
 from ..security import current_user
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -69,6 +70,16 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
                     result["failures"]["week_5xx"] += 1
         result["total_requests"] = int(total["n"] or 0)
         result["total_tokens"] = int(total["tokens"] or 0)
+        credit = conn.execute(
+            "SELECT COALESCE(SUM(billed_micro), 0) AS total_micro, "
+            "COALESCE(SUM(CASE WHEN ts >= ? THEN billed_micro ELSE 0 END), 0) AS week_micro, "
+            "COALESCE(SUM(CASE WHEN ts >= ? THEN billed_micro ELSE 0 END), 0) AS today_micro "
+            "FROM billing_ledger",
+            (week, today),
+        ).fetchone()
+        result["total_credit"] = to_usd(credit["total_micro"])
+        result["week_credit"] = to_usd(credit["week_micro"])
+        result["today_credit"] = to_usd(credit["today_micro"])
         result["active_keys"] = int(
             conn.execute("SELECT COUNT(*) AS n FROM api_keys WHERE enabled = 1").fetchone()["n"] or 0
         )
@@ -120,6 +131,14 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
                 bucket["completion_tokens"] += int(row["completion_tokens"] or 0)
             else:
                 bucket["failed"] += 1
+        # 金额按日归集：口径与 request_logs 的 success 分桶无关，失败请求通常本来就没有金额
+        micro_by_day: dict[str, int] = {label: 0 for label in buckets}
+        for row in conn.execute("SELECT ts, billed_micro FROM billing_ledger WHERE ts >= ?", (start,)):
+            label = dt.datetime.fromtimestamp(row["ts"]).date().isoformat()
+            if label in micro_by_day:
+                micro_by_day[label] += int(row["billed_micro"] or 0)
+        for label, bucket in buckets.items():
+            bucket["credit"] = to_usd(micro_by_day[label])
         return list(buckets.values())
     finally:
         conn.close()

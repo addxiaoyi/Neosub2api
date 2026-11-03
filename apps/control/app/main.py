@@ -16,7 +16,25 @@ from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
 from .gateway_errors import GatewayError
 from .registry import ProviderRegistry
-from .routers import accounts, auth, grok, keys, models, providers, settings as settings_router, stats, sub2api, v1
+from .routers import (
+    accounts,
+    auth,
+    grok,
+    keys,
+    logs,
+    models,
+    pricing,
+    provider_credentials,
+    providers,
+    quota,
+    security as security_router,
+    settings as settings_router,
+    stats,
+    sub2api,
+    system,
+    tokens,
+    v1,
+)
 from .security import hash_password, verify_password
 from .services.grok_register import GrokRegisterService
 
@@ -187,7 +205,8 @@ def create_app() -> FastAPI:
             payload["error"] = error
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
-    for module in (auth, providers, accounts, keys, models, stats, settings_router, sub2api, grok, v1):
+    for module in (auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
+                   sub2api, pricing, quota, grok, system, v1, logs, security_router):
         app.include_router(module.router)
 
     @app.get("/healthz")

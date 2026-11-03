@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from typing import Any
 
@@ -10,11 +11,22 @@ from fastapi.responses import Response, StreamingResponse
 from ..adapters.base import ProviderError
 from ..adapters.stream_util import DONE, sse_error
 from ..api_utils import mask_text, now, parse_bool
-from ..billing import extract_usage, record_usage, totals, usage_from_stream, usage_in_chunk
+from ..billing import (
+    check_failure_rate,
+    check_quota,
+    extract_usage,
+    record_usage,
+    resolve_prices,
+    settle,
+    totals,
+    usage_from_stream,
+    usage_in_chunk,
+)
 from ..db import get_json_setting
 from ..gateway_errors import GatewayError, from_provider_error, from_upstream_reply
 
 router = APIRouter(tags=["gateway"])
+logger = logging.getLogger("unified.billing")
 
 # last_used_at 只在超过这个间隔才写库，否则每个请求一次 UPDATE 会把 SQLite 写锁放大（S-06）
 LAST_USED_THROTTLE_SEC = 60
@@ -66,6 +78,104 @@ def _gateway_key(request: Request) -> dict[str, Any]:
         conn.close()
 
 
+def _price_snapshot(request: Request, provider: str, model: str, at: int) -> dict[str, Any] | None:
+    """准入时解析一次价格并随请求冻结。
+
+    计费是旁路：价格表读失败只记日志、不回滚请求；settle 侧按"未定价"记 0 元。
+    """
+    conn = request.app.state.db.connect()
+    try:
+        lines = resolve_prices(conn, provider=provider, model=model, at=at)
+    except Exception as exc:  # noqa: BLE001 - 旁路不能阻断网关
+        logger.warning("价格解析失败 provider=%s model=%s：%s", provider, model, exc)
+        return None
+    finally:
+        conn.close()
+    return {"provider": provider, "model": model, "at": at, "lines": lines}
+
+
+def _log_rejection(
+    conn, *, key: dict[str, Any], provider: str, model: str, denial: dict[str, Any]
+) -> None:
+    """被拒请求只留 request_logs 痕迹（现有 /api/logs 可见），不写 usage/ledger。"""
+    conn.execute(
+        "INSERT INTO request_logs(ts, provider, model, status, prompt_tokens, completion_tokens, "
+        "latency_ms, stream, error, key_id, key_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (now(), mask_text(provider), mask_text(model), 429, 0, 0, 0, 0,
+         mask_text(json.dumps(denial, ensure_ascii=False)),
+         key.get("id"), mask_text(key.get("name") or "")),
+    )
+
+
+def _quota_guard(request: Request, key: dict[str, Any], provider: str, model: str) -> None:
+    """准入校验：超限直接 429，必须在打上游之前完成。
+
+    与计费旁路同一容错口径：配额读库失败只记日志、不阻断网关。
+    """
+    key_id = key.get("id")
+    if key_id is None:  # 匿名请求没有密钥归属，策略只按 u2a_ 密钥生效
+        return
+    denial: dict[str, Any] | None = None
+    conn = request.app.state.db.connect()
+    try:
+        denial = check_quota(conn, key_id=int(key_id), provider=provider, model=model, at=now())
+        if denial is not None:
+            _log_rejection(conn, key=key, provider=provider, model=model, denial=denial)
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - 查询失败不能打挂请求
+        logger.warning("配额检查失败 key_id=%s：%s", key_id, exc)
+        return
+    finally:
+        conn.close()
+    if denial is not None:
+        # 结构化 detail：窗口 / 指标 / 当前用量 / 上限 / 重置时间，不是笼统的「配额不足」
+        raise GatewayError(
+            429,
+            str(denial.get("message") or "配额已用尽"),
+            type_="insufficient_quota",
+            code="quota_exceeded",
+            detail=denial,
+            retry_after=str(denial["reset_after"]),
+        )
+
+
+def _failure_guard(request: Request, key: dict[str, Any], provider: str, model: str) -> None:
+    """失败请求限流：窗口内失败过多就 429，插在配额校验之后、打上游之前。
+
+    只拦失败刷量，不写 usage/ledger；被拒请求本身落 request_logs(status=429)，
+    日志与计数同一份数据。读库失败按旁路口径放过请求。
+    """
+    key_id = key.get("id")
+    if key_id is None:  # 匿名请求没有可归属的计数维度
+        return
+    settings = request.app.state.settings
+    window_sec = int(getattr(settings, "failure_window_sec", 60))
+    max_failures = int(getattr(settings, "failure_window_max", 20))
+    denial: dict[str, Any] | None = None
+    conn = request.app.state.db.connect()
+    try:
+        denial = check_failure_rate(
+            conn, key_id=int(key_id), window_sec=window_sec, max_failures=max_failures, at=now()
+        )
+        if denial is not None:
+            _log_rejection(conn, key=key, provider=provider, model=model, denial=denial)
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - 限流读库失败不能打挂请求
+        logger.warning("失败限流检查失败 key_id=%s：%s", key_id, exc)
+        return
+    finally:
+        conn.close()
+    if denial is not None:
+        raise GatewayError(
+            429,
+            str(denial.get("message") or "失败请求过多"),
+            type_="rate_limit_error",
+            code="failure_rate_limited",
+            detail=denial,
+            retry_after=str(denial["reset_after"]),
+        )
+
+
 def _record(
     request: Request,
     *,
@@ -77,16 +187,19 @@ def _record(
     latency_ms: int,
     stream: bool,
     error: str | None,
+    pricing: dict[str, Any] | None = None,
 ) -> None:
-    """写 request_logs（汇总列）+ usage_records（原始 usage 直通，M3 计费用）。"""
+    """写 request_logs（汇总列）+ usage_records（原始 usage 直通）+ billing_ledger（金额定格）。"""
     prompt_tokens, completion_tokens = totals(usage)
+    ts = now()
     conn = request.app.state.db.connect()
     try:
         conn.execute(
             "INSERT INTO request_logs(ts, provider, model, status, prompt_tokens, completion_tokens, "
             "latency_ms, stream, error, key_id, key_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (now(), provider, model, status, prompt_tokens, completion_tokens, latency_ms,
-             1 if stream else 0, error, key.get("id"), key.get("name") or ""),
+            (ts, mask_text(provider), mask_text(model), status, prompt_tokens, completion_tokens,
+             latency_ms, 1 if stream else 0, mask_text(error) if error else error,
+             key.get("id"), mask_text(key.get("name") or "")),
         )
         record_usage(
             conn,
@@ -98,8 +211,23 @@ def _record(
             stream=stream,
             usage=usage,
             latency_ms=latency_ms,
-            ts=now(),
+            ts=ts,
         )
+        # 同一 conn、同一 commit：正常情况下流水与日志一起落
+        try:
+            settle(
+                conn,
+                ts=ts,
+                key_id=key.get("id"),
+                key_name=key.get("name") or "",
+                provider=provider,
+                model=model,
+                status=status,
+                usage=usage,
+                pricing=pricing,
+            )
+        except Exception:  # noqa: BLE001 - 计费失败不能带走已产生的日志
+            logger.exception("计费 settle 失败 provider=%s model=%s，保留日志与原始 usage", provider, model)
         conn.commit()
     finally:
         conn.close()
@@ -193,7 +321,12 @@ async def _proxy(request: Request, capability: str):
     payload = await _json_payload(request)
     adapter, effective = _resolve(request, payload, capability)
     payload["model"] = effective
+    # 先校验额度再冻结价格：被拒请求不产生快照与流水，通过后仍按原逻辑冻结价格
+    _quota_guard(request, key, adapter.spec.id, effective)
+    _failure_guard(request, key, adapter.spec.id, effective)
     stream = bool(payload.get("stream"))
+    # 价格在准入时定格：请求进行中改价（新插入更晚生效的行）不会改变这笔请求的金额
+    pricing = _price_snapshot(request, adapter.spec.id, effective, now())
     started = time.perf_counter()
     try:
         if capability == "chat":
@@ -207,7 +340,7 @@ async def _proxy(request: Request, capability: str):
             request, key=key, provider=adapter.spec.id, model=effective,
             status=exc.status_code, usage=None,
             latency_ms=int((time.perf_counter() - started) * 1000),
-            stream=stream, error=exc.message,
+            stream=stream, error=exc.message, pricing=pricing,
         )
         raise from_provider_error(exc, adapter.spec.id) from exc
 
@@ -257,7 +390,7 @@ async def _proxy(request: Request, capability: str):
                     request, key=key, provider=adapter.spec.id, model=effective,
                     status=reply.status_code, usage=usage_from_stream(usage_chunks),
                     latency_ms=int((time.perf_counter() - started) * 1000),
-                    stream=True, error=error,
+                    stream=True, error=error, pricing=pricing,
                 )
 
         return StreamingResponse(
@@ -285,8 +418,7 @@ async def _proxy(request: Request, capability: str):
         request, key=key, provider=adapter.spec.id, model=effective,
         status=reply.status_code, usage=usage,
         latency_ms=int((time.perf_counter() - started) * 1000),
-        stream=False,
-        error=None if reply.status_code < 400 else body[:200].decode("utf-8", "ignore"),
+        stream=False, error=None, pricing=pricing,
     )
     return Response(
         content=body,

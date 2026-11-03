@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from ..adapters.base import ProviderError
 from ..adapters.sub2api_store import build_store
-from ..security import admin_user, current_user
+from ..security import admin_user, quota_admin
 
 router = APIRouter(prefix="/api/sub2api", tags=["sub2api"])
 
@@ -55,7 +55,7 @@ def _guard(exc: ProviderError) -> HTTPException:
 
 
 @router.get("/groups")
-def list_groups(request: Request, user: dict = Depends(current_user)):
+def list_groups(request: Request, user: dict = Depends(quota_admin)):
     return _store(request).list_groups()
 
 
@@ -94,7 +94,7 @@ def delete_group(group_id: str, request: Request, user: dict = Depends(admin_use
 
 
 @router.get("/accounts")
-def list_accounts(request: Request, group_id: str | None = None, user: dict = Depends(current_user)):
+def list_accounts(request: Request, group_id: str | None = None, user: dict = Depends(quota_admin)):
     return _store(request).list_accounts(group_id)
 
 
@@ -152,7 +152,7 @@ def ledger(
     request: Request,
     group_id: str | None = None,
     limit: int = 50,
-    user: dict = Depends(current_user),
+    user: dict = Depends(quota_admin),
 ):
     data: list[dict[str, Any]] = _store(request).ledger(group_id, limit)
     return data

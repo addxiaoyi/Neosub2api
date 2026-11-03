@@ -101,5 +101,15 @@ class PermissionDenied(HTTPException):
 
 def admin_user(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
+        raise PermissionDenied("需要管理员权限", role=user["role"])
+    return user
+
+
+QUOTA_DENIED_MESSAGE = "无权查看配额数据"
+
+
+def quota_admin(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """配额域只读闸门：与 /api/quota 同一口径，非 admin 在解析任何 id 前直接 403。"""
+    if user.get("role") != "admin":
+        raise PermissionDenied(QUOTA_DENIED_MESSAGE, role=user.get("role"))
     return user
