@@ -1,9 +1,10 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {ShieldCheck, LockKeyhole, FileClock, ChevronLeft, ChevronRight, Ban} from 'lucide-react';
+import {ShieldCheck, LockKeyhole, FileClock, ChevronLeft, ChevronRight, Ban, Lock} from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
+import {useAuth} from '@/lib/auth-context';
 import {useT} from '@/lib/i18n/provider';
 import {securityApi, errText} from '@/lib/api';
 import type {AuditLog, GuardInfo, LoginFailuresResponse} from '@/lib/types';
@@ -116,6 +117,7 @@ function AuditTable({rows}: {rows: AuditLog[]}) {
 
 export default function SecurityPage() {
   const t = useT();
+  const {isAdmin} = useAuth();
   const [guard, setGuard] = useState<GuardInfo | null>(null);
   const [failures, setFailures] = useState<LoginFailuresResponse | null>(null);
   const [audit, setAudit] = useState<AuditLog[]>([]);
@@ -128,11 +130,14 @@ export default function SecurityPage() {
     const [g, f, a] = await Promise.allSettled([
       securityApi.guard(),
       securityApi.loginFailures(50),
-      securityApi.audit({limit: AUDIT_PAGE_SIZE, offset: (auditPage - 1) * AUDIT_PAGE_SIZE}),
+      // 审计日志接口对后端只放行 admin 的全量视图，非 admin 不必白跑一次 403
+      isAdmin
+        ? securityApi.audit({limit: AUDIT_PAGE_SIZE, offset: (auditPage - 1) * AUDIT_PAGE_SIZE})
+        : Promise.resolve(null),
     ]);
     if (g.status === 'fulfilled') setGuard(g.value);
     if (f.status === 'fulfilled') setFailures(f.value);
-    if (a.status === 'fulfilled') {
+    if (a.status === 'fulfilled' && a.value) {
       setAudit(a.value.items);
       setAuditTotal(a.value.total);
     }
@@ -140,7 +145,7 @@ export default function SecurityPage() {
       notify.err(errText(g.reason));
     }
     setLoading(false);
-  }, [auditPage]);
+  }, [auditPage, isAdmin]);
 
   useEffect(() => {
     load();
@@ -239,11 +244,28 @@ export default function SecurityPage() {
           </div>
           {failures && (
             <Badge variant="secondary" className="shrink-0 rounded-full tabular-nums">
-              {t('security.loginStats', {today: failures.stats.today, total: failures.stats.total})}
+              {failures.scope === 'self'
+                ? t('security.loginStatsSelf', {today: failures.stats.today, total: failures.stats.total})
+                : t('security.loginStats', {today: failures.stats.today, total: failures.stats.total})}
             </Badge>
           )}
         </div>
-        {failures && failures.active.length > 0 ? (
+        {failures?.scope === 'self' ? (
+          // 非 admin：后端只给聚合数字，这里也就不渲染 IP / 用户名表
+          <div className="grid grid-cols-1 gap-3 px-4 pb-4 md:grid-cols-2">
+            <div className="rounded-2xl bg-background/60 px-3 py-2.5">
+              <div className="mb-1.5 text-[11px] text-muted-foreground">{t('security.loginColFailures')}</div>
+              <div className="text-sm tabular-nums">{failures.window_failures ?? 0}</div>
+            </div>
+            <div className="rounded-2xl bg-background/60 px-3 py-2.5">
+              <div className="mb-1.5 text-[11px] text-muted-foreground">{t('security.loginColLast')}</div>
+              <div className="text-sm tabular-nums text-muted-foreground">
+                {failures.last_failed_ts ? fmtDateTime(failures.last_failed_ts) : '—'}
+              </div>
+            </div>
+            <div className="text-[11px] text-muted-foreground md:col-span-2">{t('security.loginSelfHint')}</div>
+          </div>
+        ) : failures && failures.active.length > 0 ? (
           <Table>
             <TableHeader>
               <TableRow className="border-b border-border/60 hover:bg-transparent">
@@ -300,47 +322,60 @@ export default function SecurityPage() {
               {t('security.auditLogHint')}
             </span>
           </div>
-          <Badge variant="secondary" className="shrink-0 rounded-full tabular-nums">
-            {t('security.auditCount', {count: auditTotal, n: auditTotal})}
-          </Badge>
+          {isAdmin && (
+            <Badge variant="secondary" className="shrink-0 rounded-full tabular-nums">
+              {t('security.auditCount', {count: auditTotal, n: auditTotal})}
+            </Badge>
+          )}
         </div>
-        {audit.length > 0 ? (
-          <AuditTable rows={audit} />
+        {isAdmin ? (
+          <>
+            {audit.length > 0 ? (
+              <AuditTable rows={audit} />
+            ) : (
+              !loading && (
+                <EmptyState
+                  icon={FileClock}
+                  title={t('security.noAudit')}
+                  description={t('security.noAuditDesc')}
+                  className="flex flex-col items-center justify-center py-14 text-center"
+                />
+              )
+            )}
+            <div className="flex items-center justify-between px-4 py-3">
+              <div className="text-[11px] text-muted-foreground">
+                {t('logs.pageInfo', {total: fmtNumber(auditTotal), page: auditPage, pages: auditPages})}
+              </div>
+              <div className="flex gap-1">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7 rounded-md"
+                  disabled={auditPage <= 1}
+                  onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7 rounded-md"
+                  disabled={auditPage >= auditPages}
+                  onClick={() => setAuditPage((p) => Math.min(auditPages, p + 1))}
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </>
         ) : (
-          !loading && (
-            <EmptyState
-              icon={FileClock}
-              title={t('security.noAudit')}
-              description={t('security.noAuditDesc')}
-              className="flex flex-col items-center justify-center py-14 text-center"
-            />
-          )
+          <EmptyState
+            icon={Lock}
+            title={t('security.auditAdminOnly')}
+            description={t('security.auditAdminOnlyDesc')}
+            className="flex flex-col items-center justify-center py-14 text-center"
+          />
         )}
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="text-[11px] text-muted-foreground">
-            {t('logs.pageInfo', {total: fmtNumber(auditTotal), page: auditPage, pages: auditPages})}
-          </div>
-          <div className="flex gap-1">
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-7 w-7 rounded-md"
-              disabled={auditPage <= 1}
-              onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-7 w-7 rounded-md"
-              disabled={auditPage >= auditPages}
-              onClick={() => setAuditPage((p) => Math.min(auditPages, p + 1))}
-            >
-              <ChevronRight className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </div>
       </section>
     </div>
   );

@@ -601,14 +601,20 @@ export interface LoginFailureActive {
 }
 
 export interface LoginFailuresResponse {
+  /** all = 全站（仅 admin）；self = 当前账号的聚合数字 */
+  scope: 'all' | 'self';
   window_sec: number;
   max_failures: number;
-  /** 窗口内仍在计数的 IP+用户名组合 */
+  /** 窗口内仍在计数的 IP+用户名组合（scope=self 时恒为空） */
   active: LoginFailureActive[];
-  /** audit_logs 里 login_failed 的历史统计 */
+  /** audit_logs 里 login_failed 的历史统计（scope=self 时只算自己账号） */
   stats: {total: number; today: number};
-  /** 最近的失败审计记录 */
+  /** 最近的失败审计记录（scope=self 时恒为空） */
   recent: AuditLog[];
+  /** 仅 scope=self：窗口内针对自己账号的失败次数 */
+  window_failures?: number;
+  /** 仅 scope=self：针对自己账号的最近一次失败时刻，0 表示没有 */
+  last_failed_ts?: number;
 }
 
 /* ── sub2api 配额域（订阅账号池 / 分组 / 扣减流水）──────── */

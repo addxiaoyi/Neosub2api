@@ -109,8 +109,8 @@ export default function AccountsPage() {
   // 打开页面时自动拉一次实时积分：上游 /status 的 credits 可能滞后数小时，
   // 首次进入应展示真实余额。服务端有 TTL 缓存，重复进入不会频繁请求。
   useEffect(() => {
-    // 没有积分能力的服务商（占位适配器）不必发这个请求
-    if (!caps.credits) return;
+    // 没有积分能力的服务商（占位适配器）不必发这个请求；实时积分是 admin-only
+    if (!caps.credits || !isAdmin) return;
     let alive = true;
     (async () => {
       try {
@@ -131,7 +131,7 @@ export default function AccountsPage() {
     return () => {
       alive = false;
     };
-  }, [caps.credits]);
+  }, [caps.credits, isAdmin]);
 
   // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
   // 否则会一直显示打开页面那一刻的旧数据。

@@ -14,6 +14,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {getExpiryDailyGroup, groupExpiriesByDay} from '@/lib/display-prefs';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
+import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import type {
   Account,
@@ -51,6 +52,7 @@ import {notify} from '@/lib/toast';
 
 export default function DashboardPage() {
   const {realm, label: realmName} = useRealm();
+  const {isAdmin, loading: authLoading} = useAuth();
   const t = useT();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [summary, setSummary] = useState<StatsSummary | null>(null);
@@ -73,13 +75,14 @@ export default function DashboardPage() {
       statsApi.daily(14, realm),
       upstreamApi.status(),
       // force=false：命中服务端 60 秒缓存，30 秒轮询不会反复打腾讯
-      accountApi.refreshCredits(false),
+      // 实时积分是 admin-only：viewer 不发请求，占位保持后续下标不变
+      isAdmin ? accountApi.refreshCredits(false) : Promise.resolve(null),
     ]);
     if (results[0].status === 'fulfilled') setAccounts(results[0].value.accounts);
     if (results[1].status === 'fulfilled') setSummary(results[1].value);
     if (results[2].status === 'fulfilled') setDaily(results[2].value);
     if (results[3].status === 'fulfilled') setUpstream(results[3].value);
-    if (results[4].status === 'fulfilled') {
+    if (results[4].status === 'fulfilled' && results[4].value) {
       const r = results[4].value;
       setLiveCredits(
         Object.fromEntries(
@@ -97,7 +100,7 @@ export default function DashboardPage() {
     if (!allFailed && core.some((r) => r.status === 'rejected')) {
       notify.err(t('dashboard.partialLoadFailed'));
     }
-  }, [realm, t]);
+  }, [realm, t, isAdmin]);
 
   const retry = useCallback(() => {
     setPending(true);
@@ -105,8 +108,10 @@ export default function DashboardPage() {
   }, [load]);
 
   useEffect(() => {
+    // 等登录态还原后再首拉：否则 admin 会先按 viewer 拉一轮，紧接着再拉一轮
+    if (authLoading) return;
     load();
-  }, [load]);
+  }, [load, authLoading]);
 
   // 账号健康度与用量会持续变化，用心跳刷新避免展示陈旧数据
   useHeartbeat(load, 30000);
