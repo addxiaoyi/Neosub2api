@@ -1,34 +1,99 @@
+# 一键起（本机自托管）：control（FastAPI）+ web（apps/web 静态导出，nginx 托管）。
+# 启动：docker compose up -d --build
+# 变量：仓库根 .env（compose 自动读取做 ${VAR} 插值），模板见根 .env.example。
+# 需要 TLS / 域名 / 访问日志脱敏时改用 deploy/docker-compose.prod.yml，不要直接把它暴露到公网。
+name: unified-2api
+
 services:
   control:
     build:
-      context: ./apps/control
+      # context 是仓库根：Dockerfile 要按仓库布局放 app/，还要拷 config/ 与 CHANGELOG.md
+      context: .
+      dockerfile: apps/control/Dockerfile
     environment:
+      # 容器内固定路径，覆盖根 .env 里给本机脚本用的相对路径
       UNIFIED_DATA_DIR: /data
+      UNIFIED_DB_PATH: /data/unified.db
+      UNIFIED_HOST: 0.0.0.0
+      UNIFIED_PORT: 8000
       UNIFIED_ADMIN_USER: ${UNIFIED_ADMIN_USER:-admin}
       # 不提供默认口令：留空则容器首次启动随机生成，写到 /data/admin-password.txt 并打印在日志里
       UNIFIED_ADMIN_PASSWORD: ${UNIFIED_ADMIN_PASSWORD:-}
-      UNIFIED_HOST: 0.0.0.0
-      UNIFIED_PORT: 8000
-      UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
       UNIFIED_SESSION_TTL_SEC: ${UNIFIED_SESSION_TTL_SEC:-86400}
+      # 根编排没有 TLS；需要 HTTPS 时改用 deploy/docker-compose.prod.yml 并把这里置 true
+      UNIFIED_COOKIE_SECURE: ${UNIFIED_COOKIE_SECURE:-false}
+      UNIFIED_CORS_ORIGINS: ${UNIFIED_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
+      UNIFIED_SSE_MAX_SECONDS: ${UNIFIED_SSE_MAX_SECONDS:-600}
       UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
+      UNIFIED_FAILURE_WINDOW_SEC: ${UNIFIED_FAILURE_WINDOW_SEC:-60}
+      UNIFIED_FAILURE_WINDOW_MAX: ${UNIFIED_FAILURE_WINDOW_MAX:-20}
+      UNIFIED_MODELS_CACHE_TTL_SEC: ${UNIFIED_MODELS_CACHE_TTL_SEC:-60}
+      UNIFIED_MODEL_FALLBACK_FIRST: ${UNIFIED_MODEL_FALLBACK_FIRST:-0}
+      # 日志与上游连接池：与其余键同走根 .env 插值；不加 env_file，避免缺 .env 时的文件依赖
+      UNIFIED_LOG_LEVEL: ${UNIFIED_LOG_LEVEL:-info}
+      UNIFIED_LOG_FORMAT: ${UNIFIED_LOG_FORMAT:-text}
+      UNIFIED_ENABLE_DOCS: ${UNIFIED_ENABLE_DOCS:-0}
+      UNIFIED_UPSTREAM_MAX_CONNECTIONS: ${UNIFIED_UPSTREAM_MAX_CONNECTIONS:-100}
+      UNIFIED_UPSTREAM_MAX_KEEPALIVE: ${UNIFIED_UPSTREAM_MAX_KEEPALIVE:-50}
+      # 演示模式只在本机用 scripts/demo.*；容器编排强制关闭，避免反代把来源地址变成 127.0.0.1 后绕过请求级 403
+      UNIFIED_DEMO_MODE: "0"
+      # sidecar 跑在宿主机上（非 compose 服务），容器内必须用 host.docker.internal
       CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
+      CODEBUDDY_API_KEY: ${CODEBUDDY_API_KEY:-}
+      OPENCODE_UPSTREAM_BASE: ${OPENCODE_UPSTREAM_BASE:-https://opencode.ai/zen}
+      # 注册任务执行器：留空则任务明确失败，不伪造成功
+      GROK_REGISTER_EXECUTOR_URL: ${GROK_REGISTER_EXECUTOR_URL:-}
+      GROK_REGISTER_MAX_CONCURRENCY: ${GROK_REGISTER_MAX_CONCURRENCY:-2}
+      GROK_REGISTER_MAX_WORKERS: ${GROK_REGISTER_MAX_WORKERS:-4}
       TRAE_SIDECAR_BASE: ${TRAE_SIDECAR_BASE:-http://host.docker.internal:7871}
-      # 连接地址：sidecar 跑在宿主机上（非 compose 服务），端口须与 sidecar 实际监听一致，上游默认 5001
+      # Deepseek2Go 上游默认端口 5001；若自行改 sidecar 端口需同步
       DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:5001}
       QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
-      # codar2api（MIT）默认关闭：需自行 clone 上游并在宿主机启动，未启动时该 provider 如实显示不可达
+      # codar2api（MIT）默认关闭：需自行 clone 上游并在宿主机启动
       CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
     volumes:
+      # SQLite 与 admin-password.txt 都落在仓库根 data/，删容器不丢数据；
+      # 只挂数据目录，应用与 config 已在镜像里，不再挂源码改布局
       - ./data:/data
     ports:
       # 默认只映射到本机；需要局域网/公网访问时显式 UNIFIED_BIND_HOST=0.0.0.0 并前置 TLS
       - "${UNIFIED_BIND_HOST:-127.0.0.1}:8010:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 下也能访问宿主机 sidecar
+    restart: unless-stopped
+    stop_grace_period: 30s         # 给 SQLite WAL 收尾时间
+    healthcheck:
+      # 控制面真实探针：GET /healthz（apps/control/app/main.py 已注册）
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).getcode()==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   web:
     build:
       context: ./apps/web
     depends_on:
-      - control
+      control:
+        condition: service_healthy
     ports:
-      - "8080:80"
+      # 只绑本机：这个入口会同时反代 /api、/v1，别在未加 TLS 时暴露到局域网
+      - "${UNIFIED_BIND_HOST:-127.0.0.1}:8080:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -117,5 +117,5 @@ detail 形如 `<provider> 不支持 <capability>` 或 `<provider> 适配器未�
 
 - **统计页 credit 全是 0**：先确认请求是否落进了 `billing_ledger`（`status >= 400` 且没有 usage 的请求不写流水，属于设计行为），再查 `price_books` 是否命中该模型（未定价时金额为 0 且 `estimated=1`，可用 `GET /api/pricing/resolve` 干跑确认）。缺价格就补价，见 [API-REFERENCE.md](API-REFERENCE.md) 第 10 节与 [pricing-sources.md](pricing-sources.md)。
 - **忘记管理员密码**：停控制面，删除 `./data/unified.db` 会全量重置（密钥、日志全丢）。只想改密码且还有另一个 admin 账号登录：用户管理页直接改。当前版本没有 CLI 改密工具（待确认后续版本是否提供）。
-- **Upstash 相关**：`/api/settings/upstash/test` 恒返回「未接入」，Upstash 不属于当前版本功能。
+- **Upstash 测试失败**：`/api/settings/upstash/test` 是真实只读 PING 探测，按 `error.code` 分流——`upstash_auth_rejected` 凭据被拒、`upstash_timeout` 超时、`upstash_unreachable` 连不上、`invalid_upstash_url`/`upstash_token_missing` 输入问题；SSRF 加固新增三码——`upstash_target_forbidden` 目标是内网/环回/保留地址/云元数据（字面量或 DNS 解析后任一结果命中，未发出请求，改填公网 Upstash 地址）、`upstash_redirect_blocked` 上游返回 3xx（探测不跟随跳转，直接填目标地址）、`upstash_response_too_large` 响应超 64KB 被中止（多半是地址填错打到了别的服务）。端点细节见 [API-REFERENCE.md](API-REFERENCE.md) 设置章节。
 - **grok 注册任务全部失败**：先看 `/api/grok/register/worker` 的 `executor` 字段——`unconfigured` 说明没配 `GROK_REGISTER_EXECUTOR_URL`，任务会以明确原因失败，这是设计行为。

@@ -63,7 +63,7 @@ function quotaText(used: number, limit: number): string {
 
 function statusBadge(enabled: boolean, t: (k: string) => string) {
   return enabled ?
-    <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+    <Badge variant="secondary" className="rounded-full text-emerald-700 dark:text-emerald-400">
       {t('quota.enabled')}
     </Badge> :
     <Badge variant="secondary" className="rounded-full text-muted-foreground">
@@ -405,7 +405,9 @@ function AdminQuotaPage() {
       />
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as TabKey)}>
-        <TabsList className="w-max">
+        {/* 与设置页同一模式：390 宽下先换行保证 tab 全在视口内，再留横向滚动兜底 */}
+        <div className="-mx-1 scroll-slim overflow-x-auto px-1 pb-1">
+        <TabsList className="h-auto w-max max-w-full flex-wrap gap-1">
           <TabsTrigger value="groups">
             <Layers3 className="mr-1.5 h-3.5 w-3.5" />
             {t('quota.tabGroups')}
@@ -419,6 +421,7 @@ function AdminQuotaPage() {
             {t('quota.tabLedger')}
           </TabsTrigger>
         </TabsList>
+        </div>
 
         {/* ── 分组 ── */}
         <TabsContent value="groups" className="mt-3">
@@ -443,25 +446,26 @@ function AdminQuotaPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="border-b border-border/60 hover:bg-transparent">
-                    <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('quota.colName')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colPlatform')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colLimit')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colAccounts')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colStatus')}</TableHead>
-                    <TableHead className="pr-4 text-right text-[11px] text-muted-foreground" />
+                    <TableHead scope="col" className="min-w-[152px] pl-4 text-[11px] text-muted-foreground">{t('quota.colName')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colPlatform')}</TableHead>
+                    <TableHead scope="col" className="min-w-[104px] text-[11px] text-muted-foreground">{t('quota.colLimit')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colAccounts')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colStatus')}</TableHead>
+                    <TableHead scope="col" className="min-w-[112px] pr-4 text-right text-[11px] text-muted-foreground" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {groups.map((g) => (
                     <TableRow key={g.id} className="border-b border-border/40">
-                      <TableCell className="pl-4">
+                      <TableCell className="min-w-[152px] pl-4">
                         <div className="font-medium">{g.name || g.id}</div>
                         <div className="text-[11px] text-muted-foreground">{g.id}</div>
+                        <div className="mt-1 md:hidden">{statusBadge(g.enabled, t)}</div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden md:table-cell">
                         <Badge variant="secondary" className="rounded-full">{g.platform}</Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="min-w-[104px]">
                         <div className="tabular-nums">{quotaText(g.quota_used, g.quota_limit)}</div>
                         {g.quota_limit > 0 && (
                           <div className="mt-1 h-1 w-24 overflow-hidden rounded-full bg-border">
@@ -472,19 +476,19 @@ function AdminQuotaPage() {
                           </div>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden md:table-cell">
                         <span className="tabular-nums">{g.accounts}</span>
                         <span className="text-muted-foreground"> / {g.active_accounts} {t('quota.colActive')}</span>
                       </TableCell>
-                      <TableCell>{statusBadge(g.enabled, t)}</TableCell>
-                      <TableCell className="pr-4">
+                      <TableCell className="hidden md:table-cell">{statusBadge(g.enabled, t)}</TableCell>
+                      <TableCell className="min-w-[112px] pr-4">
                         <div className="flex items-center justify-end gap-1">
                           {isAdmin && (
                             <>
-                              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md" onClick={() => toggleGroup(g)} title={g.enabled ? t('quota.disabled') : t('quota.enabled')}>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md md:h-8 md:w-8" onClick={() => toggleGroup(g)} title={g.enabled ? t('quota.disabled') : t('quota.enabled')} aria-label={g.enabled ? t('quota.disabled') : t('quota.enabled')}>
                                 <Snowflake className="h-4 w-4" />
                               </Button>
-                              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md" onClick={() => openGroupEdit(g)} title={t('quota.editGroup')}>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md md:h-8 md:w-8" onClick={() => openGroupEdit(g)} title={t('quota.editGroup')} aria-label={t('quota.editGroup')}>
                                 <Pencil className="h-4 w-4" />
                               </Button>
                               <ConfirmDialog
@@ -494,7 +498,7 @@ function AdminQuotaPage() {
                                 destructive
                                 onConfirm={() => deleteGroup(g)}
                                 trigger={
-                                  <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md text-destructive" title={t('quota.delete')}>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-destructive md:h-8 md:w-8" title={t('quota.delete')} aria-label={t('quota.delete')}>
                                     <Trash2 className="h-4 w-4" />
                                   </Button>
                                 }
@@ -574,12 +578,12 @@ function AdminQuotaPage() {
                       <Table>
                         <TableHeader>
                           <TableRow className="border-b border-border/60 hover:bg-transparent">
-                            <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('quota.colName')}</TableHead>
-                            <TableHead className="text-[11px] text-muted-foreground">{t('quota.colUpstream')}</TableHead>
-                            <TableHead className="text-[11px] text-muted-foreground">{t('quota.colWeight')}</TableHead>
-                            <TableHead className="text-[11px] text-muted-foreground">{t('quota.colLimit')}</TableHead>
-                            <TableHead className="text-[11px] text-muted-foreground">{t('quota.colStatus')}</TableHead>
-                            <TableHead className="pr-4 text-right text-[11px] text-muted-foreground" />
+                            <TableHead scope="col" className="pl-4 text-[11px] text-muted-foreground">{t('quota.colName')}</TableHead>
+                            <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colUpstream')}</TableHead>
+                            <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colWeight')}</TableHead>
+                            <TableHead scope="col" className="text-[11px] text-muted-foreground">{t('quota.colLimit')}</TableHead>
+                            <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colStatus')}</TableHead>
+                            <TableHead scope="col" className="pr-4 text-right text-[11px] text-muted-foreground" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -587,33 +591,38 @@ function AdminQuotaPage() {
                             const cooling = a.cooldown_until > now;
                             return (
                               <TableRow key={a.id} className="border-b border-border/40">
-                                <TableCell className="pl-4">
+                                <TableCell className="min-w-[152px] pl-4">
                                   <div className="font-medium">{a.name || `#${a.id}`}</div>
                                   <div className="text-[11px] text-muted-foreground">
                                     {a.has_api_key ? t('quota.hasKey') : t('quota.noKey')}
                                   </div>
+                                  <div className="mt-1 md:hidden">
+                                    {!a.enabled ? statusBadge(false, t) : cooling ? (
+                                      <Badge variant="secondary" className="rounded-full text-warning-text">{t('quota.coolingShort')}</Badge>
+                                    ) : statusBadge(true, t)}
+                                  </div>
                                 </TableCell>
-                                <TableCell className="max-w-[200px] truncate text-muted-foreground" title={a.upstream_base}>
+                                <TableCell className="hidden max-w-[200px] truncate text-muted-foreground md:table-cell" title={a.upstream_base}>
                                   {a.upstream_base || '—'}
                                 </TableCell>
-                                <TableCell className="tabular-nums">{a.weight}</TableCell>
-                                <TableCell>
+                                <TableCell className="hidden tabular-nums md:table-cell">{a.weight}</TableCell>
+                                <TableCell className="min-w-[104px]">
                                   <div className="tabular-nums">{quotaText(a.quota_used, a.quota_limit)}</div>
                                 </TableCell>
-                                <TableCell>
+                                <TableCell className="hidden md:table-cell">
                                   {!a.enabled ? statusBadge(false, t) :
                                    cooling ? (
-                                    <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">
+                                    <Badge variant="secondary" className="rounded-full text-warning-text">
                                       {t('quota.coolingShort')}
                                     </Badge>
                                   ) : statusBadge(true, t)}
                                 </TableCell>
-                                <TableCell className="pr-4">
+                                <TableCell className="min-w-[112px] pr-4">
                                   <div className="flex items-center justify-end gap-1">
                                     {isAdmin && (
                                       <>
                                         {cooling && (
-                                          <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md" onClick={() => clearCooldown(a)} title={t('quota.clearCooldown')}>
+                                          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md md:h-8 md:w-8" onClick={() => clearCooldown(a)} title={t('quota.clearCooldown')} aria-label={t('quota.clearCooldown')}>
                                             <Snowflake className="h-4 w-4" />
                                           </Button>
                                         )}
@@ -623,12 +632,12 @@ function AdminQuotaPage() {
                                           confirmText={t('quota.reset')}
                                           onConfirm={() => resetAccount(a)}
                                           trigger={
-                                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md" title={t('quota.reset')}>
+                                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md md:h-8 md:w-8" title={t('quota.reset')} aria-label={t('quota.reset')}>
                                               <RefreshCcw className="h-4 w-4" />
                                             </Button>
                                           }
                                         />
-                                        <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md" onClick={() => openAccountEdit(a)} title={t('quota.editAccount')}>
+                                        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md md:h-8 md:w-8" onClick={() => openAccountEdit(a)} title={t('quota.editAccount')} aria-label={t('quota.editAccount')}>
                                           <Pencil className="h-4 w-4" />
                                         </Button>
                                         <ConfirmDialog
@@ -638,7 +647,7 @@ function AdminQuotaPage() {
                                           destructive
                                           onConfirm={() => deleteAccount(a)}
                                           trigger={
-                                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-md text-destructive" title={t('quota.delete')}>
+                                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-destructive md:h-8 md:w-8" title={t('quota.delete')} aria-label={t('quota.delete')}>
                                               <Trash2 className="h-4 w-4" />
                                             </Button>
                                           }
@@ -672,9 +681,9 @@ function AdminQuotaPage() {
           <section className="rounded-[20px] bg-muted p-4">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">{t('quota.colGroup')}</Label>
+                <Label htmlFor="ledger-group" className="text-[11px] text-muted-foreground">{t('quota.colGroup')}</Label>
                 <Select value={ledgerGroupFilter} onValueChange={setLedgerGroupFilter}>
-                  <SelectTrigger>
+                  <SelectTrigger id="ledger-group">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -686,9 +695,9 @@ function AdminQuotaPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">{t('quota.colLimit')}</Label>
+                <Label htmlFor="ledger-limit" className="text-[11px] text-muted-foreground">{t('quota.colLimit')}</Label>
                 <Select value={String(ledgerLimit)} onValueChange={(v) => setLedgerLimit(Number(v))}>
-                  <SelectTrigger>
+                  <SelectTrigger id="ledger-limit">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -716,29 +725,29 @@ function AdminQuotaPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="border-b border-border/60 hover:bg-transparent">
-                    <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('quota.colTime')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colGroup')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colAccount')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colModel')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colCost')}</TableHead>
-                    <TableHead className="text-[11px] text-muted-foreground">{t('quota.colHttpStatus')}</TableHead>
-                    <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('quota.colReason')}</TableHead>
+                    <TableHead scope="col" className="min-w-[160px] pl-4 text-xs text-muted-foreground">{t('quota.colTime')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colGroup')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colAccount')}</TableHead>
+                    <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quota.colModel')}</TableHead>
+                    <TableHead scope="col" className="text-[11px] text-muted-foreground">{t('quota.colCost')}</TableHead>
+                    <TableHead scope="col" className="text-[11px] text-muted-foreground">{t('quota.colHttpStatus')}</TableHead>
+                    <TableHead scope="col" className="pr-4 text-[11px] text-muted-foreground">{t('quota.colReason')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {ledger.map((l) => (
                     <TableRow key={l.id} className="border-b border-border/40">
-                      <TableCell className="pl-4 text-muted-foreground">{fmtDateTime(l.ts)}</TableCell>
-                      <TableCell>{l.group_id}</TableCell>
-                      <TableCell>
+                      <TableCell className="min-w-[160px] pl-4 text-muted-foreground">{fmtDateTime(l.ts)}</TableCell>
+                      <TableCell className="hidden md:table-cell">{l.group_id}</TableCell>
+                      <TableCell className="hidden md:table-cell">
                         {l.account_id ? (accountNameMap.get(l.account_id) || `#${l.account_id}`) : '—'}
                       </TableCell>
-                      <TableCell className="max-w-[160px] truncate" title={l.model}>{l.model || '—'}</TableCell>
+                      <TableCell className="hidden max-w-[160px] truncate md:table-cell" title={l.model}>{l.model || '—'}</TableCell>
                       <TableCell className="tabular-nums">{fmtNumber(l.cost)}</TableCell>
                       <TableCell>
                         <Badge
                           variant="secondary"
-                          className={`rounded-full ${l.status >= 400 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}
+                          className={`rounded-full ${l.status >= 400 ? 'text-destructive-text' : 'text-emerald-700 dark:text-emerald-400'}`}
                         >
                           {l.status}
                         </Badge>
@@ -765,8 +774,9 @@ function AdminQuotaPage() {
           <DialogBody>
             <div className="space-y-4 px-5 pb-4">
               <div className="space-y-1.5">
-                <Label>{t('quota.colId')}</Label>
+                <Label htmlFor="group-id">{t('quota.colId')}</Label>
                 <Input
+                  id="group-id"
                   value={gId}
                   onChange={(e) => setGId(e.target.value)}
                   placeholder={t('quota.groupIdPlaceholder')}
@@ -774,16 +784,17 @@ function AdminQuotaPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colName')}</Label>
-                <Input value={gName} onChange={(e) => setGName(e.target.value)} placeholder={t('quota.groupNamePlaceholder')} />
+                <Label htmlFor="group-name">{t('quota.colName')}</Label>
+                <Input id="group-name" value={gName} onChange={(e) => setGName(e.target.value)} placeholder={t('quota.groupNamePlaceholder')} />
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colPlatform')}</Label>
-                <Input value={gPlatform} onChange={(e) => setGPlatform(e.target.value)} />
+                <Label htmlFor="group-platform">{t('quota.colPlatform')}</Label>
+                <Input id="group-platform" value={gPlatform} onChange={(e) => setGPlatform(e.target.value)} />
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colLimit')}</Label>
+                <Label htmlFor="group-limit">{t('quota.colLimit')}</Label>
                 <Input
+                  id="group-limit"
                   type="number"
                   min={0}
                   value={gLimit}
@@ -811,9 +822,9 @@ function AdminQuotaPage() {
           <DialogBody>
             <div className="space-y-4 px-5 pb-4">
               <div className="space-y-1.5">
-                <Label>{t('quota.colGroup')}</Label>
+                <Label htmlFor="account-group">{t('quota.colGroup')}</Label>
                 <Select value={aGroupId} onValueChange={setAGroupId} disabled={!!editingAccount}>
-                  <SelectTrigger>
+                  <SelectTrigger id="account-group">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -824,16 +835,17 @@ function AdminQuotaPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colName')}</Label>
-                <Input value={aName} onChange={(e) => setAName(e.target.value)} placeholder={t('quota.accountNamePlaceholder')} />
+                <Label htmlFor="account-name">{t('quota.colName')}</Label>
+                <Input id="account-name" value={aName} onChange={(e) => setAName(e.target.value)} placeholder={t('quota.accountNamePlaceholder')} />
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colUpstream')}</Label>
-                <Input value={aUpstream} onChange={(e) => setAUpstream(e.target.value)} placeholder={t('quota.upstreamPlaceholder')} />
+                <Label htmlFor="account-upstream">{t('quota.colUpstream')}</Label>
+                <Input id="account-upstream" value={aUpstream} onChange={(e) => setAUpstream(e.target.value)} placeholder={t('quota.upstreamPlaceholder')} />
               </div>
               <div className="space-y-1.5">
-                <Label>{t('quota.colApiKey')}</Label>
+                <Label htmlFor="account-api-key">{t('quota.colApiKey')}</Label>
                 <Input
+                  id="account-api-key"
                   value={aApiKey}
                   onChange={(e) => setAApiKey(e.target.value)}
                   placeholder={editingAccount ? '••••••••' : t('quota.apiKeyPlaceholder')}
@@ -841,13 +853,13 @@ function AdminQuotaPage() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>{t('quota.colWeight')}</Label>
-                  <Input type="number" min={1} value={aWeight} onChange={(e) => setAWeight(Number(e.target.value))} />
+                  <Label htmlFor="account-weight">{t('quota.colWeight')}</Label>
+                  <Input id="account-weight" type="number" min={1} value={aWeight} onChange={(e) => setAWeight(Number(e.target.value))} />
                   <p className="text-[11px] text-muted-foreground">{t('quota.weightHint')}</p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>{t('quota.colLimit')}</Label>
-                  <Input type="number" min={0} value={aLimit} onChange={(e) => setALimit(Number(e.target.value))} />
+                  <Label htmlFor="account-limit">{t('quota.colLimit')}</Label>
+                  <Input id="account-limit" type="number" min={0} value={aLimit} onChange={(e) => setALimit(Number(e.target.value))} />
                   <p className="text-[11px] text-muted-foreground">{t('quota.limitHint')}</p>
                 </div>
               </div>

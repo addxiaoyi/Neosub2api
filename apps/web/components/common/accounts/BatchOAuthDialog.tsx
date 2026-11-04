@@ -302,7 +302,9 @@ export function BatchOAuthDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex w-full flex-col gap-4 px-6 pb-6">
+        {/* 390 宽下这列会比视口高，超出的部分由这里滚动，弹窗整体才不会
+            被居中定位顶出屏幕、把「开始逐个添加」连同标题一起裁掉 */}
+        <div className="flex max-h-[calc(100dvh-8rem)] w-full flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 pb-6">
           {/* 粘贴清单：有内容就按它排队，下面的「数量 / 前缀」自动让位 */}
           <div className="space-y-1">
             <div className="flex items-center justify-between">
@@ -326,9 +328,11 @@ export function BatchOAuthDialog({
             <div className="text-[10px] text-muted-foreground">{t('oauth.batchRosterHint')}</div>
           </div>
 
-          {/* 控制栏 */}
-          <div className="flex items-end gap-3">
-            <div className="w-[110px] space-y-1">
+          {/* 控制栏：窄屏换行排布（数量/前缀一行、操作按钮掉到下一行靠右），
+              否则按钮会被弹窗的 overflow-hidden 裁在 390 宽之外点不到；
+              md 及以上内容本来就放得下，保持原来的单行观感 */}
+          <div className="flex flex-wrap items-end gap-3 md:flex-nowrap">
+            <div className="w-[110px] min-w-0 space-y-1">
               <div className="text-[11px] font-medium">{t('oauth.batchCount')}</div>
               <Input
                 type="number" min={1} max={MAX_N} value={count}
@@ -337,7 +341,7 @@ export function BatchOAuthDialog({
                 disabled={phase === 'running' || usingRoster}
               />
             </div>
-            <div className="w-[160px] space-y-1">
+            <div className="w-[160px] min-w-0 space-y-1">
               <div className="text-[11px] font-medium">{t('oauth.batchPrefix')}</div>
               <Input
                 value={prefix} onChange={(e) => setPrefix(e.target.value)}
@@ -348,11 +352,11 @@ export function BatchOAuthDialog({
 
             <div className="flex-1" />
 
-            <div className="flex items-center gap-2">
+            <div className="ml-auto flex flex-wrap items-center gap-2">
               <span className="font-mono text-[12px]">
                 <span className="text-emerald-500">{ok}</span>
                 <span className="text-muted-foreground">/{total}</span>
-                {failed > 0 && <span className="text-amber-500"> · {failed} fail</span>}
+                {failed > 0 && <span className="text-warning-text"> · {failed} fail</span>}
               </span>
               {(phase === 'idle' || phase === 'done') && (
                 <Button className="rounded-full gap-1.5" onClick={start}>
@@ -472,7 +476,7 @@ function AuthPanel({
             {t('oauth.batchOpenAuth')}
           </Button>
           {!row.popped && (
-            <span className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+            <span className="flex items-center gap-1 text-[10px] text-warning-text">
               <AlertTriangle className="h-3 w-3 shrink-0" />
               {t('oauth.batchPopupBlocked')}
             </span>
@@ -481,7 +485,8 @@ function AuthPanel({
       )}
 
       <div className="flex items-start justify-between gap-3">
-        <span className="text-[10px] leading-relaxed text-muted-foreground">
+        {/* min-w-0：中文提示是一整段无空格文本，不给收缩就会把这一行撑出弹窗 */}
+        <span className="min-w-0 text-[10px] leading-relaxed text-muted-foreground">
           {t('oauth.batchTabHint')}
         </span>
         <button

@@ -91,7 +91,7 @@ function AuditTable({rows}: {rows: AuditLog[]}) {
                 className={
                   'rounded-full text-[10px] ' +
                   (a.action === 'login_failed'
-                    ? 'bg-red-500/12 text-red-600 dark:text-red-400'
+                    ? 'bg-red-500/12 text-destructive-text'
                     : a.action === 'login'
                       ? 'text-emerald-600 dark:text-emerald-400'
                       : '')
@@ -178,7 +178,7 @@ export default function SecurityPage() {
               <div className="flex items-center justify-between rounded-2xl bg-background/60 px-3 py-2.5">
                 <span className="text-xs">{t('security.guardAllowPrivate')}</span>
                 {guard.allow_private_upstreams ? (
-                  <Badge variant="secondary" className="rounded-full bg-amber-500/12 text-amber-600 dark:text-amber-400">
+                  <Badge variant="secondary" className="rounded-full bg-amber-500/12 text-warning-text">
                     {t('security.guardAllowed')}
                   </Badge>
                 ) : (
@@ -199,7 +199,7 @@ export default function SecurityPage() {
                 <div className="mb-1.5 text-[11px] text-muted-foreground">{t('security.guardCategories')}</div>
                 <div className="flex flex-wrap gap-1.5">
                   {guard.blocked_categories.map((c) => (
-                    <Badge key={c} variant="secondary" className="rounded-full font-mono text-[10px] text-red-600 dark:text-red-400">
+                    <Badge key={c} variant="secondary" className="rounded-full font-mono text-[10px] text-destructive-text">
                       <Ban className="h-3 w-3" />{c}
                     </Badge>
                   ))}
@@ -288,7 +288,7 @@ export default function SecurityPage() {
                         {t('security.loginLocked', {sec: f.retry_after})}
                       </Badge>
                     ) : (
-                      <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">
+                      <Badge variant="secondary" className="rounded-full text-warning-text">
                         {t('security.loginCounting')}
                       </Badge>
                     )}
@@ -351,6 +351,7 @@ export default function SecurityPage() {
                   variant="outline"
                   size="icon"
                   className="h-7 w-7 rounded-md"
+                  aria-label={t('common.prevPage')}
                   disabled={auditPage <= 1}
                   onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
                 >
@@ -360,6 +361,7 @@ export default function SecurityPage() {
                   variant="outline"
                   size="icon"
                   className="h-7 w-7 rounded-md"
+                  aria-label={t('common.nextPage')}
                   disabled={auditPage >= auditPages}
                   onClick={() => setAuditPage((p) => Math.min(auditPages, p + 1))}
                 >

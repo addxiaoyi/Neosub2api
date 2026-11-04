@@ -1,8 +1,8 @@
-# unified-2api 前端信息架构与品牌方案
+# Neosub2api 前端信息架构与品牌方案
 
 > **已判定不采用，仅作存档。** 本文件不是已批准的前端方案，不得作为实现依据；前端基准与红线见 [docs/FRONTEND-BASELINE.md](../FRONTEND-BASELINE.md)。正文保持原样，不再维护。
 
-- 依据：直接读取 `apps/web/app/` 路由、[ManagementBar.tsx](file:///d:/qwq/项目/unified-2api/apps/web/components/common/layout/ManagementBar.tsx)、`ProviderPanel.tsx`（后续重构已并入 `components/common/settings/ProvidersSection.tsx`，原文件不再存在）、`lib/i18n/locales/zh-CN.json`、`apps/control/app/routers/`。
+- 依据：直接读取 `apps/web/app/` 路由、[ManagementBar.tsx](../../apps/web/components/common/layout/ManagementBar.tsx)、`ProviderPanel.tsx`（后续重构已并入 `components/common/settings/ProvidersSection.tsx`，原文件不再存在）、`lib/i18n/locales/zh-CN.json`、`apps/control/app/routers/`。
 - 范围：信息架构、术语、页面清单、风险表达、品牌命名。不含视觉稿（视觉稿见 `prototype.html`）。
 - 约束：未读取/未修改 `apps/web/` 源码以外的运行产物；本文件与原型都落在 `docs/design/`。
 
@@ -34,7 +34,7 @@
 | 10 | `/tasks` | 任务记录 | **无** | 成长任务执行面板、签到记录、上游自动任务、原始日志 |
 | 11 | `/security` | 安全与 IP 管控 | **无** | IP 白/黑名单、全局拦截、审计日志、访问记录 |
 
-导航入口来自 [ManagementBar.tsx L416-L445](file:///d:/qwq/项目/unified-2api/apps/web/components/common/layout/ManagementBar.tsx#L416-L445)，只登记了 5 个 `href`。`nav.tasks / nav.models / nav.playground / nav.stats / nav.logs / nav.security` 在 `zh-CN.json` 里已有译文，属于「文案已备、入口没接」。
+导航入口来自 [ManagementBar.tsx L416-L445](../../apps/web/components/common/layout/ManagementBar.tsx#L416-L445)，只登记了 5 个 `href`。`nav.tasks / nav.models / nav.playground / nav.stats / nav.logs / nav.security` 在 `zh-CN.json` 里已有译文，属于「文案已备、入口没接」。
 
 ### 1.2 与走查报告的对应关系
 
@@ -49,7 +49,7 @@
 
 ### 1.3 一处直接可删的重复
 
-`/providers` 与 `/settings` 的第一个 tab 渲染的是同一个 `ProviderPanel`（[settings/page.tsx L1100-L1102](file:///d:/qwq/项目/unified-2api/apps/web/app/(main)/settings/page.tsx#L1100-L1102)）。两个入口改同一个对象，却出现在「服务商」和「设置」两个一级归属下，是当前导航语义混乱的来源之一。（后续 `/providers` 已并入设置页，这条只作历史记录。）
+`/providers` 与 `/settings` 的第一个 tab 渲染的是同一个 `ProviderPanel`（[settings/page.tsx L1100-L1102](../../apps/web/app/(main)/settings/page.tsx#L1100-L1102)）。两个入口改同一个对象，却出现在「服务商」和「设置」两个一级归属下，是当前导航语义混乱的来源之一。（后续 `/providers` 已并入设置页，这条只作历史记录。）
 
 ## 2. 导航结构
 
@@ -57,10 +57,10 @@
 
 判断依据（全部可对应到代码）：
 
-1. **容量和发现性不够**：5 个图标承载 11 个页面，6 个页面只能靠记 URL 进入；dock 只有图标 + hover 标题，没有分组，也没有「当前在哪一页」的标记——[FloatingDock](file:///d:/qwq/项目/unified-2api/apps/web/components/ui/floating-dock.tsx#L21-L50) 根本没有 `active` 参数。
+1. **容量和发现性不够**：5 个图标承载 11 个页面，6 个页面只能靠记 URL 进入；dock 只有图标 + hover 标题，没有分组，也没有「当前在哪一页」的标记——[FloatingDock](../../apps/web/components/ui/floating-dock.tsx#L21-L50) 根本没有 `active` 参数。
 2. **位置可变**：dock 支持拖拽并写入 `localStorage`（L350-L389、L118-L131），同一产品在不同人的屏幕上导航位置不同，截图/录屏/远程协助都对不上。
-3. **与内容抢空间**：页面底部预留 `pb-24` 给 dock（[layout.tsx L45](file:///d:/qwq/项目/unified-2api/apps/web/app/(main)/layout.tsx#L45)）；首次进入还有一块 17rem 宽的引导浮层压在表格与开关上（U10）。
-4. **版本切换没有归属**：`RealmToggle`、`LanguageToggle` 被放在每页右上角（[layout.tsx L50-L53](file:///d:/qwq/项目/unified-2api/apps/web/app/(main)/layout.tsx#L50-L53)），但版本是全局筛选条件（账号/模型/测试台/任务都跟随），应该和导航在同一层。
+3. **与内容抢空间**：页面底部预留 `pb-24` 给 dock（[layout.tsx L45](../../apps/web/app/(main)/layout.tsx#L45)）；首次进入还有一块 17rem 宽的引导浮层压在表格与开关上（U10）。
+4. **版本切换没有归属**：`RealmToggle`、`LanguageToggle` 被放在每页右上角（[layout.tsx L50-L53](../../apps/web/app/(main)/layout.tsx#L50-L53)），但版本是全局筛选条件（账号/模型/测试台/任务都跟随），应该和导航在同一层。
 5. **桌面端用移动导航的代价**：dock 原本是 codebuddy2api 的移动交互，桌面窗口越宽，导航越远离内容主区，右手操作路径也最长。
 
 结论：**桌面改左侧栏；移动端保留 dock，但把 5 项改成 4 个主入口 + 「更多」抽屉**（更多里放日志、用量、模型、测试台、任务、安全、设置）。
@@ -255,7 +255,7 @@
 
 落地位置：
 
-1. [app/layout.tsx L23-L33](file:///d:/qwq/项目/unified-2api/apps/web/app/layout.tsx#L23-L33)：`title.template` 与 `default`、`description`。
+1. [app/layout.tsx L23-L33](../../apps/web/app/layout.tsx#L23-L33)：`title.template` 与 `default`、`description`。
 2. `ManagementBar` 个人信息面板里的产品名（L488 附近的 `WorkBuddy Manager`）。
 3. `app/favicon/site.webmanifest` 的 `name / short_name`。
 4. **不要改** `localStorage` 键前缀（`workbuddy-manager:*`，L50-L51、L255）：改名会让现有用户的 dock 位置、引导关闭状态、版本偏好全部丢失；保留旧前缀并在 README 注明即可。

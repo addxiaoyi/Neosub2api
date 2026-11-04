@@ -14,11 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..api_utils import now
+from ..key_prefix import KEY_PREFIX, STORED_PREFIX_LEN
 from ..security import admin_user, current_user
 
 router = APIRouter(prefix="/api/keys", tags=["keys"])
-
-KEY_PREFIX = "u2a_"
 
 
 def _row_to_public(row) -> dict:
@@ -63,7 +62,7 @@ def create_key_record(conn, name: str, owner_user_id: str | None = None) -> tupl
     cur = conn.execute(
         "INSERT INTO api_keys(name, key_hash, prefix, enabled, created_at, owner_user_id) "
         "VALUES(?,?,?,1,?,?)",
-        (name, digest, token[:10], now(), owner_user_id or None),
+        (name, digest, token[:STORED_PREFIX_LEN], now(), owner_user_id or None),
     )
     conn.commit()
     return cur.lastrowid, token
@@ -121,6 +120,18 @@ def revoke_key(key_id: int, request: Request, user: dict = Depends(admin_user)):
     """吊销 = 删除记录：哈希没了，这把 key 立刻无法通过 /v1 鉴权。"""
     conn = request.app.state.db.connect()
     try:
+        # 密钥没了，它的配额策略与告警就是孤儿；留着会让 admin 的 /api/quota/policies 列出无主策略
+        policy_ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM quota_policies WHERE key_id = ?", (key_id,)).fetchall()
+        ]
+        if policy_ids:
+            marks = ",".join("?" for _ in policy_ids)
+            conn.execute(f"DELETE FROM quota_alerts WHERE policy_id IN ({marks})", tuple(policy_ids))
+            conn.execute(
+                f"DELETE FROM quota_alert_thresholds WHERE policy_id IN ({marks})", tuple(policy_ids)
+            )
+            conn.execute(f"DELETE FROM quota_policies WHERE id IN ({marks})", tuple(policy_ids))
         cur = conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
         conn.commit()
     finally:

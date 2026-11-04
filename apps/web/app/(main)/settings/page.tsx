@@ -1098,9 +1098,10 @@ export default function SettingsPage() {
       />
 
       <Tabs id="settings-tabs" defaultValue="upstream">
-        {/* 标签较多，手机上会撑破容器，这里允许横向滚动 */}
-        <div className="-mx-1 overflow-x-auto px-1 pb-1">
-        <TabsList className="w-max">
+        {/* 标签较多，窄屏一行放不下：先换行——胶囊换行一眼可见，比藏起来的横向
+            滚动条更容易被发现；再留一层横向滚动兜底，防某个翻译特别长时被切在视口外 */}
+        <div className="-mx-1 scroll-slim overflow-x-auto px-1 pb-1">
+        <TabsList className="h-auto w-max max-w-full flex-wrap gap-1">
           <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabUpstream')}</TabsTrigger>
           {isAdmin && (
             <TabsTrigger value="runtime"><SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />{t('settings.tabRuntime')}</TabsTrigger>
@@ -1124,7 +1125,7 @@ export default function SettingsPage() {
             <>
           {upstreamError && (
             <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
-              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
               <div className="space-y-1">
                 <div className="text-xs font-medium">{t('settings.cfgUnreadable')}</div>
                 <div className="text-[11px] text-muted-foreground">{upstreamError}</div>
@@ -1157,7 +1158,7 @@ export default function SettingsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <span className="shrink-0 text-muted-foreground">{t('settings.upstreamDeclaredDir')}</span>
                     <span
-                      className="min-w-0 flex-1 truncate text-right font-mono text-amber-600 dark:text-amber-400"
+                      className="min-w-0 flex-1 truncate text-right font-mono text-warning-text"
                       title={cfg.upstream_auth_dir}
                     >
                       {cfg.upstream_auth_dir}
@@ -1166,7 +1167,7 @@ export default function SettingsPage() {
                 )}
               </div>
               {cfg?.upstream_auth_dir && (
-                <p className="mt-2 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                <p className="mt-2 text-[11px] leading-4 text-warning-text">
                   {t('settings.authDirMismatch')}
                 </p>
               )}
@@ -1183,7 +1184,7 @@ export default function SettingsPage() {
                   )}
                   {modelSource === 'static' && (
                     <span
-                      className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
+                      className="shrink-0 text-[11px] text-warning-text"
                       title={t('settings.modelsStaticTitle')}
                     >
                       {t('settings.modelsStatic', {count: models.length, n: models.length})}
@@ -1234,7 +1235,7 @@ export default function SettingsPage() {
                   授权，所以「同样的部署、不同账号看到的模型数量不同」是正常的——
                   并非本站少显示。上游自身还会缓存 1 小时。 */}
               {models.length > 0 && (
-                <p className="mt-2 text-[10px] leading-4 text-muted-foreground/80">
+                <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
                   {modelSource === 'static' ? (
                     <RichText text={t('settings.modelsStaticNote')} />
                   ) : (
@@ -1262,6 +1263,7 @@ export default function SettingsPage() {
                 />
               </div>
               <Switch
+                aria-label={t('settings.expiryDailyLabel')}
                 checked={expiryDaily}
                 onCheckedChange={(v) => {
                   setExpiryDaily(v);
@@ -1314,9 +1316,11 @@ export default function SettingsPage() {
                     const err = fieldError(f, form[g.id][f.key]);
                     const caution = 'caution' in f ? f.caution : undefined;
                     return (
+                      // 窄屏纵向排列：右列是定宽控件（最长 w-56），390 宽下与说明
+                      // 挤在一行会把说明列压成一条细缝；sm 起宽度够了再回到左右分栏
                       <div
                         key={f.key}
-                        className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2"
+                        className="flex flex-col items-start gap-2 rounded-2xl bg-background/60 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
                       >
                         <div className="min-w-0">
                           <div className="text-xs font-medium">{tp(f.label)}</div>
@@ -1331,6 +1335,7 @@ export default function SettingsPage() {
 
                         {f.kind === 'bool' ? (
                           <Switch
+                            aria-label={tp(f.label)}
                             checked={!!form[g.id][f.key]}
                             disabled={!isAdmin || !upstreamReady}
                             onCheckedChange={(v) => setField(g.id, f.key, v)}
@@ -1339,6 +1344,7 @@ export default function SettingsPage() {
                           <div className="flex shrink-0 items-center gap-1.5">
                             <Input
                               type="number"
+                              aria-label={tp(f.label)}
                               min={f.min}
                               max={f.max}
                               step={f.step ?? 1}
@@ -1363,7 +1369,7 @@ export default function SettingsPage() {
                             disabled={!isAdmin || !upstreamReady}
                             onValueChange={(v) => setField(g.id, f.key, v)}
                           >
-                            <SelectTrigger className="h-8 w-[168px] shrink-0 bg-background text-xs">
+                            <SelectTrigger aria-label={tp(f.label)} className="h-8 w-[168px] shrink-0 bg-background text-xs">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -1411,7 +1417,7 @@ export default function SettingsPage() {
                       'caution' in f && f.caution ? (
                         <div
                           key={f.key}
-                          className="flex items-start gap-1.5 rounded-xl bg-amber-500/10 px-3 py-2 text-[11px] leading-4 text-amber-600 dark:text-amber-400"
+                          className="flex items-start gap-1.5 rounded-xl bg-amber-500/10 px-3 py-2 text-[11px] leading-4 text-warning-text"
                         >
                           <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
                           <RichText text={tp(f.caution)} />
@@ -1540,7 +1546,7 @@ export default function SettingsPage() {
                     }
                   }}
                   trigger={
-                    <Button size="sm" variant="ghost" className="rounded-full text-red-500" disabled={!isAdmin || upstashBusy}>
+                    <Button size="sm" variant="ghost" className="rounded-full text-destructive-text" disabled={!isAdmin || upstashBusy}>
                       <Trash2 className="h-3.5 w-3.5" />
                       {t('settings.clearConfig')}
                     </Button>
@@ -1796,7 +1802,7 @@ export default function SettingsPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-7 w-7 rounded-md text-red-500 hover:text-red-600"
+                          className="h-7 w-7 rounded-md text-destructive-text hover:text-destructive-text"
                           onClick={() => {
                             const next = {...modelMap};
                             delete next[alias];
@@ -1947,7 +1953,7 @@ export default function SettingsPage() {
                               }
                             }}
                             trigger={
-                              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600">
+                              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-destructive-text hover:text-destructive-text">
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             }

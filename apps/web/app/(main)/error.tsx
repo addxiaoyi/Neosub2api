@@ -29,7 +29,7 @@ export default function MainError({
 
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 px-6 text-center">
-      <AlertTriangle className="h-8 w-8 text-amber-500" />
+      <AlertTriangle className="h-8 w-8 text-warning-text" />
       <div className="space-y-1">
         <p className="text-base font-semibold">{t('crash.title')}</p>
         <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{t('crash.desc')}</p>

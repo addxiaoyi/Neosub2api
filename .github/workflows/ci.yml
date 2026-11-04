@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -18,10 +19,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: apps/control/requirements*.txt
 
       - name: Install backend deps
         working-directory: apps/control
         run: python -m pip install -r requirements-dev.txt
+
+      # 依赖装好再 import：check_indexes 会 import app.db，避免引入第三方依赖后
+      # 在未安装环境里 exit 2（报错只有一句 ImportError，难定位）
+      - name: 索引存在性检查
+        run: python scripts/check_indexes.py
+
+      - name: 契约检查（仅拦幽灵端点）
+        working-directory: apps/control
+        run: python ../../scripts/contract_check.py --fail-on-ghost
 
       - name: Pytest
         working-directory: apps/control
@@ -36,18 +48,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: i18n 键集校验
+        run: python scripts/check_i18n.py --strict
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
 
       - name: Install frontend deps
         working-directory: apps/web
         run: npm ci --no-audit --no-fund
 
+      # ESLint 只在 error 时非 0，warning 本身就是 exit 0，原 `|| echo` 会连 error 一起放行
       - name: Lint (warn-only)
         working-directory: apps/web
-        run: npm run lint || echo "lint 有警告但放行"
+        run: npm run lint
 
       - name: Typecheck
         working-directory: apps/web
@@ -56,3 +79,38 @@ jobs:
       - name: Build export
         working-directory: apps/web
         run: npm run build:export
+
+  # 只在 PR 与手动触发跑，不挂 push main 的高频路径
+  upstream-check:
+    name: upstream-check (drift informational / error fails)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 上游巡检（updated 仅提示，error 才拦）
+        continue-on-error: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::notice::未带令牌，跳过上游巡检（fork PR 等 secret 不可用场景）"
+            exit 0
+          fi
+          code=0
+          output=$(python scripts/check_upstreams.py) || code=$?
+          printf '%s\n' "$output"
+          if [ "$code" -eq 1 ]; then
+            n=$(printf '%s\n' "$output" | sed -n 's/.*，updated \([0-9][0-9]*\)，.*/\1/p')
+            echo "::notice::有 ${n:-未知} 家上游出现新 commit，已记录但未推进基线；协议面影响需人工判定，见 docs/UPSTREAM-SYNC.md"
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            echo "::error::上游巡检有仓 error/不可达（exit=$code），见上方输出"
+          fi
+          exit "$code"

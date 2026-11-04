@@ -7,7 +7,9 @@ name: unified-2api-prod
 services:
   control:
     build:
-      context: ../apps/control
+      # context 是仓库根：Dockerfile 要按仓库布局放 app/，还要拷 config/ 与 CHANGELOG.md
+      context: ..
+      dockerfile: apps/control/Dockerfile
     env_file:
       - path: ./.env
         required: false          # 缺文件时仍能 config/构建，但上线前必须准备好
@@ -15,9 +17,15 @@ services:
       # 容器内固定路径，覆盖 .env 里给本机开发用的相对路径
       UNIFIED_DATA_DIR: /data
       UNIFIED_DB_PATH: /data/unified.db
+      # 必须监听 0.0.0.0，否则 .env 里的 127.0.0.1 会让 nginx 连不上 control:8000
+      UNIFIED_HOST: 0.0.0.0
+      UNIFIED_PORT: 8000
       # nginx 终止 TLS，会话 Cookie 必须只走 HTTPS；纯 HTTP 调试时再临时改回 false
       UNIFIED_COOKIE_SECURE: "true"
+      # 演示模式只在本机用 scripts/demo.*；这里强制关闭，避免反代把来源地址变成 127.0.0.1 后绕过请求级 403
+      UNIFIED_DEMO_MODE: "0"
     volumes:
+      # 只挂命名数据卷：应用与 config 已在镜像里，不再挂源码改容器内布局
       - unified_data:/data
     ports:
       - "127.0.0.1:8010:8000"    # 只绑本机，绕过 nginx 直连仅用于排障

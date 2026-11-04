@@ -13,6 +13,9 @@ CI 消费
 回写巡检日期
     python scripts/check_upstreams.py --update
 
+令牌：优先读 GH_TOKEN / GITHUB_TOKEN 环境变量。无令牌时匿名额度仅 60 次/小时，
+CI/无人值守环境必须注入令牌，否则会撞限流（详见 docs/UPSTREAM-CHECK-RUNBOOK.md）。
+
 退出码：0 全部 unchanged；1 有 updated；2 有 error（可能同时有 updated）。
 """
 
@@ -33,6 +36,13 @@ from pathlib import Path
 API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 20
 USER_AGENT = "unified-2api-upstream-sync"
+
+# 403/429 退避：3 次、4+8+16=28s，总退避封顶 30s 内
+RATE_LIMIT_RETRIES = 3
+BACKOFF_SECONDS = (4, 8, 16)
+
+# 一条请求退避耗尽仍被限流后置位，后续请求直接报错，避免 11 家仓每家都等满 28s
+rate_limit_exhausted = False
 
 UNCHANGED = "unchanged"
 UPDATED = "updated"
@@ -123,7 +133,7 @@ def describe_http_error(err: urllib.error.HTTPError) -> dict:
             hint = f"，限额重置于 {reset_at:%Y-%m-%d %H:%M}Z"
         return {
             "reason": "rate_limited",
-            "message": f"GitHub API 限流（匿名 60 次/小时）{hint}",
+            "message": f"GitHub API 限流（匿名 60 次/小时，带令牌 5000 次/小时）{hint}",
         }
     if err.code == 403:
         return {"reason": "forbidden", "message": "403：无权访问（可能是私有仓库或令牌权限不足）"}
@@ -131,7 +141,13 @@ def describe_http_error(err: urllib.error.HTTPError) -> dict:
 
 
 def api_get(path: str, token: str | None, retries: int = 2) -> tuple[dict | None, dict | None]:
-    """GET 一个 GitHub API 路径，返回 (payload, error)。网络抖动与 5xx 重试两次。"""
+    """GET 一个 GitHub API 路径，返回 (payload, error)。
+
+    网络抖动与 5xx 重试两次；403/429 单独走指数退避（3 次、合计约 28s），
+    退避耗尽仍失败才报 error；一旦耗尽就不再对后续请求重复等待。
+    """
+    global rate_limit_exhausted
+
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
@@ -142,8 +158,9 @@ def api_get(path: str, token: str | None, retries: int = 2) -> tuple[dict | None
 
     url = API_ROOT + path
     last_error: dict | None = None
+    backoff_try = 0
 
-    for attempt in range(retries + 1):
+    for attempt in range(1 + max(retries, RATE_LIMIT_RETRIES)):
         request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -153,6 +170,12 @@ def api_get(path: str, token: str | None, retries: int = 2) -> tuple[dict | None
             if err.code >= 500 and attempt < retries:
                 time.sleep(1)
                 continue
+            if err.code in (403, 429):
+                if not rate_limit_exhausted and backoff_try < RATE_LIMIT_RETRIES:
+                    time.sleep(BACKOFF_SECONDS[backoff_try])
+                    backoff_try += 1
+                    continue
+                rate_limit_exhausted = True
             return None, last_error
         except (urllib.error.URLError, TimeoutError, OSError) as err:
             last_error = {"reason": "network", "message": f"网络错误：{err}"}
@@ -276,13 +299,19 @@ def short(sha: str | None) -> str | None:
     return sha[:7]
 
 
-def rewrite_checked_at(manifest: Manifest, today: str) -> int:
-    """只改 checked_at 值，保留其余行、行序、缩进与换行符。"""
+def rewrite_checked_at(manifest: Manifest, stampable: set[str], today: str) -> int:
+    """只改 checked_at 值，保留其余行、行序、缩进与换行符。
+
+    只回写本次确实拿到 HEAD 的仓库：error 仓（限流/404/网络）没查到东西，
+    盖上今天的日期会谎称"查过"，下次巡检也就无从发现它一直不可达。
+    """
     lines = list(manifest.lines)
     inserts: list[tuple[int, str]] = []
     touched = 0
 
     for record in manifest.records:
+        if record.repo not in stampable:
+            continue
         if record.checked_at_line >= 0:
             line = lines[record.checked_at_line]
             match = CHECKED_AT_LINE.match(line)
@@ -367,28 +396,37 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     token = github_token()
+    token_notice = None if token else "未配置令牌，可能被限流（设置 GH_TOKEN 或 GITHUB_TOKEN 环境变量后重试）"
     results = [inspect(record, token) for record in manifest.records]
     counts = tally(results)
     code = exit_code_for(counts)
     today = date.today().isoformat()
 
     if args.update:
-        touched = rewrite_checked_at(manifest, today)
+        stampable = {item["repo"] for item in results if item["status"] != ERROR}
+        touched = rewrite_checked_at(manifest, stampable, today)
 
     if args.json:
         payload = {
             "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "manifest": str(manifest_path),
             "authenticated": bool(token),
+            "token_notice": token_notice,
             "exit_code": code,
             "totals": counts,
+            "checked_at_written": touched if args.update else None,
             "results": results,
         }
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     else:
+        if token_notice:
+            print(f"警告：{token_notice}")
+            print("")
         print(render_text(results))
         if args.update:
-            print(f"已回写 checked_at：{touched} 条（{today}），analyzed_commit 未改动")
+            skipped = len(manifest.records) - touched
+            note = f"，跳过 {skipped} 条 error 记录" if skipped else ""
+            print(f"已回写 checked_at：{touched} 条（{today}）{note}，analyzed_commit 未改动")
 
     return code
 

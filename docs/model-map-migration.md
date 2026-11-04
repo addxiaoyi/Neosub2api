@@ -152,7 +152,7 @@ pwsh -File scripts/check-model-aliases.ps1 -Strict
 
 | 动作 | 做法 |
 | --- | --- |
-| 快速回滚 | `UNIFIED_MODEL_ROUTING_SOURCE=legacy`，重启；旧 map 从未删除，立即恢复 |
+| 快速回滚 | `UNIFIED_MODEL_ROUTING_SOURCE=legacy`，重启；旧 map 从未删除，立即恢复（**该开关为提案、未实现，全仓无代码引用**） |
 | 配置回滚 | YAML 在 git 里，`git revert` 对应提交即可；不涉及数据迁移 |
 | 数据回滚 | 不写旧表、不做 DDL 变更，无需回滚 SQL；可选三张新表可整表删除 |
 | 部分回滚 | 只把某个别名标 `deprecated: true` 或清空 `fallbacks`，不影响其他别名 |

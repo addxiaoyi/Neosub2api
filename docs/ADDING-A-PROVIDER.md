@@ -12,9 +12,38 @@
 
 判断标准：需要把上游源码或二进制放进本仓的，一律走 sidecar。
 
+## 0.5 用脚手架起骨架（推荐先跑这一步）
+
+`scripts/new_provider.py` 生成适配器、测试与 i18n 占位，并把 `BUILDERS` 接线片段打印到 stdout。它**不改** `__init__.py`、`config.py`、前端和数据库。
+
+```powershell
+# 先看一眼要写什么，不落盘
+python scripts/new_provider.py --name foo --base-url https://api.foo.example --capabilities chat --dry-run
+# 确认后落盘（默认写到仓库内；CI/演示可用 --out 指临时目录）
+python scripts/new_provider.py --name foo --capabilities chat,messages
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--name` | 必填。provider `id`，小写字母/数字与 `. _ -`；同时决定文件名（`demo-echo` → `demo_echo.py`） |
+| `--base-url` | `default_base_url` 兜底值；留空表示地址必须由凭据/页面下发 |
+| `--capabilities` | 逗号分隔，取值与 `base.py` 的 `CAPABILITY_KEYS` 一致（脚本直接从源码读，不另存一份） |
+| `--out` | 输出根目录，默认仓库根；用于把生成物丢进临时目录做验证 |
+| `--dry-run` | 只打印三个文件的完整内容与接线片段 |
+
+生成物：
+
+- `apps/control/app/adapters/<module>.py`：`ProviderSpec` + `build()` + 已声明能力位的**真实转发**方法，`TODO(协议)` 标在需要按上游改写的位置（路径、鉴权头、SSE 帧翻译）
+- `apps/control/tests/test_<module>.py`：能力位守卫（声明为真必须有覆写）、假上游转发（普通 + 流式）、缺凭据 503
+- `i18n/<module>.json`：五个 locale 的界面文案占位；没有界面文案就删掉这个文件
+
+脚手架默认把 `license` 写成待核实、`risk_level` 写成 `warn`：核实到 MIT/Apache/BSD 后再改 `safe`，不要带着 `warn` 上线，也不要在没证据时直接写 `safe`。
+
+三条硬规则会写进生成文件头部：密钥放凭据库、地址用凭据覆盖、不要写进 env。它们对应 §3 的两条机制与 §2 的三处 env 接线。
+
 ## 1. 写适配器
 
-新建 `apps/control/app/adapters/<name>.py`，最小实现参考 [codar_sidecar.py](file:///d:/qwq/项目/unified-2api/apps/control/app/adapters/codar_sidecar.py)：
+新建 `apps/control/app/adapters/<name>.py`。可以从 §0.5 的脚手架起步，也可以照最小实现参考 [codar_sidecar.py](../apps/control/app/adapters/codar_sidecar.py)：
 
 ```python
 from ..config import Settings
@@ -47,7 +76,7 @@ def build(settings: Settings, base_url: str = "") -> FooAdapter:
     return FooAdapter(settings, base_url)
 ```
 
-`ProviderSpec` 字段（定义见 [base.py](file:///d:/qwq/项目/unified-2api/apps/control/app/adapters/base.py)）：
+`ProviderSpec` 字段（定义见 [base.py](../apps/control/app/adapters/base.py)）：
 
 | 字段 | 约束 |
 | --- | --- |
@@ -109,6 +138,7 @@ def build(settings: Settings, base_url: str = "") -> FooAdapter:
 
 - 新建 `docs/providers/<name>.md`：上游与许可证、协议（含非标路径）、必填配置、`options`、能力位、已知限制、风险与商用约束。
 - 同步 `docs/PROVIDERS.md`：总览表加一行（id / 名称 / 上游 / 协议 / 默认地址 / 能力位 / 状态 / 风险），再补一节逐家说明。
+- 同步 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md)：能力位、鉴权头、SSE 帧形态、错误码风格、许可证风险各一行；写不出证据的格子留「待核实」，不要猜。
 - 若涉及价格，把数据来源补进 `docs/pricing-sources.md`。
 
 ## 7. 价格（可选）
@@ -128,7 +158,7 @@ def build(settings: Settings, base_url: str = "") -> FooAdapter:
 
 ## 9. 自检清单
 
-1. `python -m pytest apps/control/tests`（`test_providers.py` 覆盖注册与鉴权，`test_billing.py` 覆盖结算）。当前基线：**250 passed, 1 skipped, 3 subtests passed**。
+1. `python -m pytest apps/control/tests`（`test_providers.py` 覆盖注册与鉴权，`test_billing.py` 覆盖结算，`test_adapters_real.py` 的能力守卫会拦住「声明为真却落回基类桩」）。脚手架生成的 `test_<name>.py` 也在这一条里跑。当前基线以 2026-11-04 全量实测为准（443 passed, 1 skipped, 0 failed, 0 xfailed，125.07 秒；收集 444 条，量级约 444）。
 2. 启动控制面，`GET /api/providers` 出现新 `id`，`enabled=false`、`has_api_key=false`。
 3. `PATCH /api/providers/{id}` 启用并填 `api_key`，再查 `enabled=true`、`has_api_key=true`。
 4. 带 `x-provider: <id>` 打一次 `/v1/chat/completions`；不可达时必须是 502/503，不能 500。

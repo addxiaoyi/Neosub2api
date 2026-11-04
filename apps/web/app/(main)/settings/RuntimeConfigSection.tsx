@@ -94,6 +94,22 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
   const dirty = items ? items.filter((item) => draft[item.key] !== baseline[item.key]) : [];
   const fmt = (value: RuntimeValue) => (typeof value === 'boolean' ? t(value ? 'settings.runtime.on' : 'settings.runtime.off') : String(value));
 
+  /**
+   * 状态徽章按「值 vs 默认值」表述，而不是按 source。
+   *
+   * source 的语义是「库里有没有存」（后端定义，正确），但存了不等于改过：
+   * 把值改回默认再保存，source 仍是 db。只按 source 写「已自定义」会让
+   * 用户以为配置被改了，而实际值就是默认值。所以 db + 等值默认 →「已保存
+   * （与默认相同）」，db + 不同 →「已自定义」。
+   */
+  const sourceBadgeKey = (item: RuntimeItem) => {
+    if (item.source === 'invalid') return 'settings.runtime.fromInvalid';
+    if (item.source === 'default') return 'settings.runtime.fromDefault';
+    return item.value === item.default
+      ? 'settings.runtime.fromDbDefault'
+      : 'settings.runtime.fromDb';
+  };
+
   async function save() {
     if (!items || !dirty.length) {
       notify.info(t('settings.noChanges'));
@@ -191,11 +207,7 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-xs font-medium">{t(`settings.runtime.${item.key}.label`)}</span>
                       <span className="rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                        {item.source === 'db'
-                          ? t('settings.runtime.fromDb')
-                          : item.source === 'invalid'
-                            ? t('settings.runtime.fromInvalid')
-                            : t('settings.runtime.fromDefault')}
+                        {t(sourceBadgeKey(item))}
                       </span>
                     </div>
                     <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">

@@ -499,14 +499,16 @@ export function ManagementBar() {
       title: t('nav.quickAdd'),
       icon: <PlusCircle {...IconOptions} />,
       customComponent: (
-        <div
+        <button
+          type="button"
+          aria-label={t('nav.quickAdd')}
           onClick={() => {
             if (isAdmin) setAddOpen(true);
           }}
           className="w-full h-full flex items-center justify-center cursor-pointer rounded transition-colors"
         >
           <PlusCircle className="h-4 w-4" />
-        </div>
+        </button>
       ),
     },
     {
@@ -516,16 +518,22 @@ export function ManagementBar() {
         <>
           <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
             <DialogTrigger asChild>
-              <div className="w-full h-full flex items-center justify-center cursor-pointer rounded transition-colors">
+              <button
+                type="button"
+                aria-label={t('nav.profile')}
+                className="w-full h-full flex items-center justify-center cursor-pointer rounded transition-colors"
+              >
                 <User className="h-4 w-4" />
-              </div>
+              </button>
             </DialogTrigger>
             <DialogContent
               showCloseButton
               className="max-w-[520px]"
               onOpenAutoFocus={(event) => {
-                // 阻止自动聚焦到「退出登录」，否则按钮会出现焦点圈，易被误触
+                // 不聚焦「退出登录」，但焦点必须进入弹窗（内容区本身可聚焦），
+                // 否则键盘用户仍停留在弹窗背后的触发按钮上
                 event.preventDefault();
+                (event.currentTarget as HTMLElement).focus();
               }}
             >
               <DialogHeader>
@@ -570,7 +578,7 @@ export function ManagementBar() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-red-600"
+                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-destructive-text"
                               >
                                 <LogOutIcon className="size-3.5" />
                                 {t('profile.logout')}
@@ -604,7 +612,7 @@ export function ManagementBar() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-amber-600"
+                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-warning-text"
                                 title={t('profile.revokeHint')}
                               >
                                 <ShieldAlertIcon className="size-3.5" />
@@ -781,6 +789,7 @@ export function ManagementBar() {
                   type="button"
                   variant="ghost"
                   size="sm"
+                  aria-label={t('dock.tipTitle')}
                   className="h-5 rounded-full px-1 text-[10px] text-muted-foreground md:h-6 md:px-1.5 md:text-[11px]"
                   onClick={handleNextDockTip}
                 >

@@ -5,6 +5,7 @@
 - `/api/*`：管理面，登录态鉴权（HttpOnly Cookie `u2a_session`），部分仅管理员。
 - `/v1/*`：模型网关，`Authorization: Bearer u2a_...` 或 `x-api-key: u2a_...` 密钥鉴权。
 - `GET /healthz`：无鉴权。
+- `GET /`：前端静态入口，不是 JSON——前端静态目录（默认 `apps/web/out`，`UNIFIED_WEB_DIR` 可改）存在时挂载 StaticFiles 返回 HTML（`npm run build:export` 产物）；不存在时返回 `{"service": "...", "hint": "未找到前端静态产物…"}` 提示（`main.py`）。
 
 通用约定：
 
@@ -15,17 +16,56 @@
 - 角色两种：`admin` / `viewer`。标注「管理员」的接口 viewer 调用返回 403。
 - 请求体均为 JSON；`Content-Type: application/json`。
 
-## 0. 健康检查
+## 0. 健康检查与探针
 
-### `GET /healthz`
-
-无鉴权。
+### `GET /healthz`（根路径，非 `/api` 前缀，免鉴权）
 
 ```json
-{"ok": true, "providers": 14, "db": "/data/unified.db"}
+{"ok": true, "providers": 14}
 ```
 
-`providers` 为注册表内 provider 数量（不是已启用数）。
+`providers` 为注册表内 provider 数量（不是已启用数）。**不回传库路径**（S-09；`tests/test_hardening.py::test_docs_disabled_and_healthz_hides_db` 断言 `db` 键不存在）。
+
+### `GET /api/health`（免鉴权，liveness）
+
+```json
+{"ok": true, "status": "ok", "probe": "liveness", "service": "unified-2api control plane", "version": "..."}
+```
+
+进程活着即 200，不查任何依赖（不碰库、不碰 provider 注册表）。
+
+### `GET /api/health/ready`（免鉴权，readiness，200 / 503）
+
+```json
+{
+  "ok": true, "status": "ok", "service": "...", "version": "...",
+  "checks": {
+    "database": {"ok": true, "latency_ms": 0.31},
+    "providers": {"ok": true, "enabled": 2, "available": 2, "needs_config": 0, "items": [{"id": "...", "enabled": true, "readiness": "ready", "available": true, "requires": []}]}
+  },
+  "unhealthy": [], "request_id": "..."
+}
+```
+
+- `database`：`SELECT 1` 耗时；失败只回 `detail: "数据库不可读"`，不回异常原文（sqlite 报错可能带库路径）。
+- `providers`：readiness 口径是「已启用且 `readiness=ready`」才算 `available`，`needs_config` 即使启用也不计入。
+- 任一子系统不健康 → **503**，`unhealthy` 里点名（`database` / `providers`）。
+- 两个探针都只给子系统状态，不回传 `base_url`、凭据、库路径等部署信息。
+
+### `GET /api/metrics?window_seconds=3600`（管理员）
+
+按 `request_logs` 聚合的运维指标，不新建累加器，口径与 `/api/logs`、`/api/stats` 一致。`window_seconds` 夹逼 60–2592000（30 天）。返回 JSON：
+
+```json
+{
+  "generated_at": 0, "window_seconds": 3600,
+  "requests": {"total": 0, "success": 0, "failed": 0},
+  "providers": [{"provider": "openai", "requests": 0, "success": 0, "failed": 0}],
+  "failure_rate_limited": 0
+}
+```
+
+`failure_rate_limited` 是窗口内 `status = 429` 且 `error` 含 `failure_rate_limited` 的条数。未登录 401，viewer 403（它暴露按 provider 的失败分布，与 `/api/stats` 同一权限面；免鉴权只留给两个探针）。
 
 ---
 
@@ -53,7 +93,7 @@ OpenAI Chat Completions 协议转发。
 
 模型解析顺序（`app/model_resolve.py`，三条 `/v1` 协议共用同一套）：
 
-1. `x-provider` 头 → 用该 provider，模型名不变；
+1. `x-provider` 头 → 用该 provider，跳过别名表；`model` 带**同源** `<provider>/` 前缀时按前缀剥离、只把裸模型名交给上游（不再整串透传），带**其他** provider 的前缀时 400 `conflicting_provider_hints`（不静默取头，`detail` 带 `header_provider`/`prefix_provider`，`error.provider` 取头值），头指向本地注册表没有的 provider 时 404 `provider_not_found`。判定顺序固化：本地存在性(404) → 冲突(400) → 停用(503)；
 2. `model` 形如 `<provider_id>/<model>` 且前缀是已知 provider → 用该 provider，取后半段；显式指定优先级高于自动匹配；
 3. 「设置 → 模型别名」表命中 → 目标值再按规则 2 解析；目标不带前缀时继续走规则 4；
 4. 自动匹配：在**已启用** provider 的模型目录（与 `/v1/models` 同一份聚合数据）里找同名 `id`：
@@ -67,7 +107,7 @@ OpenAI Chat Completions 协议转发。
    - `1`：改用**首家启用的、支持当前端点能力位的 provider**，模型名原样透传。此时 `request_logs.provider` 写实际承接的 provider，`model` 写原模型名；另写一行 `unified.model_fallback` 日志（含请求 id、模型名、选中的 provider、候选 provider 数）；
    - 多家命中（400 `ambiguous_model`）不受开关影响；若没有任何启用的 provider 支持该能力位，仍返回原有 404 / 501，不会凭空造路由。
 
-**行为变化**：旧实现查不到模型名时会兜底到第一家 chat provider，现在默认**没有兜底**——名字不在聚合目录里就直接 404。依赖「随便写个模型名也能跑」的客户端必须改成 `<provider>/<model>`、带 `x-provider`，或临时设置 `UNIFIED_MODEL_FALLBACK_FIRST=1`。
+**行为变化**：旧实现查不到模型名时会兜底到第一家 chat provider，现在默认**没有兜底**——名字不在聚合目录里就直接 404。依赖「随便写个模型名也能跑」的客户端必须改成 `<provider>/<model>`、带 `x-provider`，或临时设置 `UNIFIED_MODEL_FALLBACK_FIRST=1`。显式指定（`x-provider` 或前缀）的 provider 必须先启用，停用时返回 503 `provider_disabled`，不会静默改走其它 provider。
 
 #### 错误契约
 
@@ -78,6 +118,8 @@ OpenAI Chat Completions 协议转发。
 | `/v1/chat/completions` | OpenAI：`{"error": {message, type, param, code, ...}}`，另带兼容字段 `detail` |
 | `/v1/responses` | 同 Chat Completions（OpenAI 形状） |
 | `/v1/messages` | Anthropic：`{"type": "error", "error": {type, message, ...}}`，**没有** `detail` |
+
+- 框架级错误（未匹配的 `/v1/*` 路径、方法不允许）不落 FastAPI 默认 `{"detail": "Not Found"}`，同样按所属协议出壳：chat/responses 用 OpenAI 壳（`error.code = route_not_found / method_not_allowed`），messages 用 Anthropic 壳；`405` 保留 `Allow` 头。`/api/*` 的 404/405 仍是 `{"detail": ...}`，不受影响。
 
 OpenAI 外壳示例：
 
@@ -105,6 +147,7 @@ Anthropic 外壳示例（`/v1/messages`）：
   "error": {
     "type": "authentication_error",
     "message": "上游返回 401：token expired",
+    "code": "upstream_auth_failed",
     "provider": "zcode",
     "upstream_status": 401,
     "upstream_code": "401",
@@ -113,14 +156,14 @@ Anthropic 外壳示例（`/v1/messages`）：
 }
 ```
 
-- Anthropic 的错误对象只认 `type` + `message`，`provider / upstream_status / upstream_code / upstream_message` 作为 `error` 的**附加键**保留；这是「按协议出形状」与「保留排查信息」之间的取舍。
+- Anthropic 的错误对象只认 `type` + `message` 两个标准键，`code`、`provider / upstream_status / upstream_code / upstream_message` 作为 `error` 的**附加键**保留；这是「按协议出形状」与「保留排查信息」之间的取舍。
 - `provider`、`upstream_status`、`upstream_code`、`upstream_message` 是排查用的子字段：
   - `upstream_status` 是上游原始 HTTP 状态（含被合并的 403）；
   - `upstream_code` / `upstream_message` 由适配器从厂商错误体解析（兼容 OpenAI `error.code/message`、Anthropic `error.type/message`、`code` / `message` / `detail` 等常见键），拿不到时留空（键可能不出现），不会编造；
   - `upstream_message` 已掩码并截断到 200 字符。
 - 上游状态码映射（`public_status`）：
 
-| 上游状态 | 对外状态 | `error.type`（OpenAI / Anthropic） | `error.code`（仅 OpenAI 外壳） |
+| 上游状态 | 对外状态 | `error.type`（OpenAI / Anthropic） | `error.code`（两壳同值） |
 | --- | --- | --- | --- |
 | 400 / 409 / 413 / 415 / 422，其余未列出的 4xx | 400 | `invalid_request_error` / `invalid_request_error` | `upstream_bad_request` |
 | 401、403（合并） | 401 | `authentication_error` / `authentication_error` | `upstream_auth_failed` |
@@ -133,7 +176,9 @@ Anthropic 外壳示例（`/v1/messages`）：
 | 504 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
 | 501（能力位未实现） | 501 | `invalid_request_error` / `invalid_request_error` | `capability_unsupported` |
 
-网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；`Authorization` 与 `x-api-key` 同时带上且值不同 `401 conflicting_auth_headers`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）。
+网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；`Authorization` 与 `x-api-key` 同时带上且值不同 `401 conflicting_auth_headers`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；**`x-provider` 与前缀异源** `400 conflicting_provider_hints`、**`x-provider` 指向本地没有的 provider** `404 provider_not_found`（判定顺序：本地存在性 → 冲突 → 停用）；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）；**显式指定已停用的 provider**（`x-provider` 或 `provider/model` 前缀）`503 provider_disabled`，message 直接点明该 provider 已停用——停用状态不能靠显式指定绕过（详见「模型解析失败」表）。
+
+> 上表 `503` 行只描述**上游**返回 503（`code=provider_unavailable`）的映射；网关本地的 `provider_disabled` 503 在 Anthropic 壳下是 `type=api_error` 而非 `overloaded_error`，两种 503 的区分见「模型解析失败」表下方的说明。
 
 模型解析失败（发生在转发之前，不写 `request_logs`、不产生流水）：
 
@@ -142,8 +187,16 @@ Anthropic 外壳示例（`/v1/messages`）：
 | 同名模型命中多家 | 400 | `ambiguous_model` / `ambiguous_model` | `invalid_request_error` / `ambiguous_model` | OpenAI 在 `detail.candidates`、Anthropic 在 `error.candidates` 给 `[{provider, readiness}]` |
 | 没有已启用 provider 提供 | 404 | `model_not_found` / `model_not_found` | `not_found_error` / `model_not_found` | `detail.model` 回显，`candidates` 为空 |
 | 只存在于未启用 provider | 404 | `model_unavailable` / `model_unavailable` | `not_found_error` / `model_unavailable` | `candidates` 含 `provider/readiness/enabled/requires/reason`，不含凭据与 `base_url` |
+| 显式指定已停用的 provider | 503 | `api_error` / `provider_disabled` | `api_error` / `provider_disabled` | `detail.provider` 回显 provider id；message 说明「已停用，请先在服务商页启用」 |
 
-`code` 与 `candidates` 是 Anthropic 错误对象的附加键，只在解析类错误上出现；其余 Anthropic 错误仍是 `type` + `message` + `provider/upstream_*`。
+`code` 是 Anthropic 错误对象的固定附加键——**所有** `GatewayError` 都带（与 OpenAI 壳同值，两协议字段对称）；`candidates` 只在模型解析失败时由 `ModelResolutionError` 附加；其余 Anthropic 错误还有 `provider/upstream_*` 等排查键。
+
+**503 要按 `code` 分两种处理**（`gateway_errors.py:184-190` 的 `anthropic_payload()`）：
+
+- **`code=provider_disabled`**（管理员停用了 provider）：Anthropic 壳 `error.type=api_error`。这是配置问题，重试无用，客户端应提示用户/管理员换模型或启用 provider；
+- **上游真过载 / `provider_unavailable`**：Anthropic 壳 `error.type=overloaded_error`，保留可重试语义。
+
+同一状态码（503）下两种 `type` 并存，**客户端判断是否重试要看 `error.code`（`provider_disabled` 不重试、`provider_unavailable` 可重试），不要按 `error.type` 判断**。OpenAI 壳（`/v1/chat/completions`、`/v1/responses`）不受影响，两者 `type` 均为 `api_error`，靠 `code` 区分。
 
 #### 失败请求限流（429 `failure_rate_limited`）
 
@@ -221,6 +274,23 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 吊销当前用户的全部会话。返回 `{"ok": true, "relogin_required": true}`。
 
+### `POST /api/auth/start`（管理员）
+
+发起扫码登录：走第一个「已启用且 `capabilities.oauth` 为真」的适配器（当前是 CodeBuddy 管理端），路由只做参数与错误翻译，不直连上游。
+
+| 请求体 | 类型 | 说明 |
+| --- | --- | --- |
+| `realm` | string? | `global` 或其他值；只有精确的 `global`（忽略大小写/首尾空格）走全球区，其余归一为 `cn` |
+
+- 成功：`{"state": "...", "authUrl": "...", "realm": "cn|global"}`。`state` 留给 `/api/auth/poll`，`authUrl` 用来生成二维码。
+- 没有已启用的扫码服务商 → **503** `扫码登录不可用：没有已启用的扫码服务商，请先在「服务商」页启用 CodeBuddy 并配置上游地址`。
+- 上游没回 `state` 或 `authUrl` → **502** `上游未返回二维码链接，请确认 CodeBuddy 管理端（7864）已就绪`。
+- viewer 调用 403（`admin_user`）。
+
+### `GET /api/auth/poll?state=&realm=&region=`（管理员）
+
+轮询扫码结果。`state` 缺省空串：直接返回 `{"status": "invalid"}`（与上游口径一致，不算错误）。给了 `state` 则把 `state`/`realm`/`region` 透传给适配器，原样返回其轮询 JSON（`status` 取值由上游定义，如待扫/已扫/成功/过期）。`realm` 归一规则同上，`region` 原样透传。同样：无扫码服务商 503、viewer 403。
+
 ---
 
 ## 3. 服务商（`/api/providers`）
@@ -244,7 +314,8 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 | `protocols` | 支持的协议（`openai.chat.completions` / `anthropic.messages` / `openai.responses`） |
 | `readiness` / `requires` | `ready` / `needs_config`，以及缺什么（给人看的短句；`ready` 时为空数组） |
 | `allows_local_base_url` | 是否允许把 `base_url` / 凭据 `base_url` 填成本地 loopback 地址；由 `default_base_url` 是否指向 loopback 推导（四家 sidecar 与 `codebuddy` 管理端为 `true`） |
-| `risk_level` / `risk_note` | `safe` / `warn` / `danger` 及说明 |
+| `risk_level` / `risk_note` | `safe` / `warn` / `danger` 及说明。分级按**具体接入路径**标注，不是整家禁用：`opencode`（GPL-3.0）、`sub2api`（LGPL-3.0）为 `warn`；`qoder` 直连为 `safe`（`risk_note` 明说 PolyForm-NC 的非商用限制针对的是 `qoder_sidecar` 而非直连路径），`qoder_sidecar` 为 `danger`（PolyForm-NC 禁商用，作者书面授权前不得商用） |
+| `limitations` | `dict<能力位, 说明>`：能力受限声明，同一句与网关对应场景的 501 报错文案同源（共用常量）。现仅 `deepseek_sidecar` 有值：`messages_stream` → 「Deepseek2Go sidecar 只支持非流式 messages」 |
 | `has_api_key` | 是否已配置上游密钥（不回显明文） |
 | `credential_count` / `credentials` | 凭据条数 / 掩码列表（`id`、`label`、`base_url`、`secret_masked`、`sort_order`） |
 | `options` | 已保存的高级配置 dict |
@@ -262,6 +333,19 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 全部字段可省，但至少传一个，否则 400 `没有需要更新的字段`。未知 provider 返回 404。保存立即生效（不等重启）。
 
 各 provider 支持的 `options` 键见 [PROVIDERS.md](PROVIDERS.md)。
+
+### 凭据库（`/api/provider-credentials`，读登录 / 写管理员）
+
+同一 provider 可存多行凭据（多账号 / 多 base_url）。密钥只落库、只在服务端流转：响应一律 `secret_masked`（掩码）+ `has_secret`（布尔），审计行只记改动过的**字段名**，绝不记值。
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `GET /api/provider-credentials?provider=` | 登录 | 掩码列表，可按 provider 过滤；每项 `{id, provider, label, base_url, secret_masked, has_secret, enabled, sort_order, note, created_at, updated_at}` |
+| `POST /api/provider-credentials` | 管理员 | 新建；body `{provider, label?, base_url?, secret?, enabled?, sort_order?, note?}`；`secret` 空串 = 暂不填（如无需鉴权的 sidecar）。`base_url` 走与 `PATCH /api/providers/{provider_id}` 同一守卫（非 http(s)、私网/链路本地/云元数据 → 400，文案含「这家是否允许本地地址」） |
+| `PATCH /api/provider-credentials/{credential_id}` | 管理员 | 部分更新。`secret`：`"***"` = 保持不变，空串 = 清除，其他 = 覆盖；`base_url` 同守卫 |
+| `DELETE /api/provider-credentials/{credential_id}` | 管理员 | 返回 `{"ok": true, "id": N}`；不存在 404 |
+
+写操作成功写审计（`provider_credentials.create/update/delete`，`target` 形如 `codebuddy#3`）；上游拒绝（ProviderError）按其状态码与中文文案透传，例如 400「…元数据…」。不存在的 `credential_id` → 404。
 
 ---
 
@@ -307,6 +391,15 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 ```
 
 `checkin_today` / `cooling` / `cooldown_remaining` / `status` 仅上游返回时出现（meta 平铺）。同步失败不报错，记进 `sync_note`。
+
+### `GET /api/accounts/capabilities`（登录）
+
+每家 provider 的账号管理能力清单，前端据此决定画哪些按钮、哪些家只给「账号在哪里管理」的说明。能力以**适配器实际覆写**为准而不是 spec 声明位（`trae_sidecar` 声明了 oauth/credits 但方法未覆写，按声明画按钮点下去就是 501）。
+
+返回 `{"providers": [{id, label, enabled, status, readiness, requires, managed, ops}]}`：
+
+- `ops`：`{list, oauth, checkin, credits, test, refresh, clear_cooling, disabled, delete, note, restart}` 十一个布尔位；`note` 恒为 `true`（备注只落本端库，不依赖上游）。
+- `managed`：`unified`（本页管理）/ `sidecar`（在自身控制台管理）/ `quota`（sub2api，配额域）/ `external`（未接入）。
 
 ### `POST /api/accounts/sync?provider=`（管理员）
 
@@ -397,7 +490,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 | --- | --- |
 | `provider` / `providers` | 主归属 provider（首个返回该 id 的家）与全部归属列表 |
 | `source` | 主归属的来源：`upstream` / `declared` / `declared_fallback` |
-| `provider_states` | 每个归属 provider 的 `{source, readiness, requires, enabled, available, unavailable_reason, fallback_reason}` |
+| `provider_states` | 每个归属 provider 的 `{source, readiness, requires, limitations, enabled, available, unavailable_reason, fallback_reason}`；`limitations` 同第 3 节（`dict<能力位, 说明>`，现仅 `deepseek_sidecar` 的 `messages_stream`） |
 | `readiness` / `requires` | 沿用 provider 清单的语义；`needs_config` 的模型不会被隐藏 |
 | `available` | 任一归属 provider 既已启用又 `ready` 时为 `true` |
 | `unavailable_reason` | 不可用原因；`available=true` 时为 `null` |
@@ -439,6 +532,23 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 返回 `{"ok": true}`；不存在 404。
 
+### 访问令牌（`/api/tokens`）：同一张 `api_keys` 表的面板视图
+
+前端 TokensPanel 要的是 `ApiToken` 结构，这里对 `api_keys` 行做字段映射，**不另建存储**：创建/改名/启停/删除都与 `/api/keys` 作用于同一批密钥，两边改动互见。
+
+| 方法与路径 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `GET /api/tokens` | 登录 | 列表；admin 全量（`created_at` 倒序），非 admin 只看 `owner_user_id = 自己` 的行，NULL 归属不可见 |
+| `POST /api/tokens` | 管理员 | 创建，明文只返回一次 |
+| `PATCH /api/tokens/{token_id}` | 管理员 | 改名 / 启停；不存在 404 |
+| `DELETE /api/tokens/{token_id}` | 管理员 | 物理删除即吊销（哈希没了，该 `u2a_` 立刻过不了 `/v1` 鉴权）；不存在 404 |
+
+行结构（缺失字段如实置空，不编造）：`{id, name, prefix, scope: "readonly", enabled, expires_at: null, created_at, created_by: "", last_used_at, last_used_ip: null}`。
+
+- `scope` 恒为 `readonly`：`u2a_` 是下游调模型的网关凭据，不具备管理接口权限，不能标成 `admin`。
+- `POST` body：`{name, scope?, expires_at?}`；`name` 1–64 字符否则 400；传了非 `readonly` 的 `scope` → 400 `网关密钥不支持 admin 作用域，这里只提供只读令牌`；传非空 `expires_at` → 400 `网关密钥不支持到期时间，创建后长期有效，需停用请直接禁用或删除`（不静默降级成「永不过期」）。响应 = 行结构 + `"token"`（明文，仅此一次）。
+- `PATCH` body：`{name?, enabled?, scope?, expires_at?}`，`name`/`enabled` 都缺 → 400 `没有需要更新的字段`；`scope`/`expires_at` 同样按上面两条 400 拒绝。
+
 密钥的额度策略与告警见第 11 节（`/api/quota`）；密钥表本身仍不限制模型白名单。
 
 ---
@@ -475,7 +585,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 ## 8. 设置（`/api/settings/*`、用户管理、系统）
 
-### `GET /api/settings/upstream`（登录）
+### `GET /api/settings/upstream`（管理员）
 
 返回上游配置（存于 SQLite `settings` 表的 `upstream_config`），保证包含十组空兜底：`schedule / prompt / cooldown / pool / features / session_sticky / server / upstream / global / admin`，另有 `upstash: {url, has_token, token_masked}`（Upstash 未接入，仅占位）。
 
@@ -483,7 +593,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 请求体为任意 dict，与存量深合并保存（`available / config_path / reload_hint / push` 四个只读键会被剔除）。若 codebuddy 已启用，会把十组配置真实 POST 到其管理端 `/api/settings/upstream`，结果回显在响应的 `push.codebuddy` 字段（`ok` + `reload_scheduled`/`reload_hint` 或 `message`）；未启用则 `push.codebuddy.ok = false` 且配置仅存本地。
 
-### `GET /api/settings/gateway`（登录）
+### `GET /api/settings/gateway`（管理员）
 
 `{"allow_anonymous": false, "configured": false}`。`allow_anonymous` 显示实际生效值（DB 配置优先，否则环境变量）；`configured` 表示 DB 里是否配过。
 
@@ -491,13 +601,101 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 请求体 `{"allow_anonymous": true|false}`，写入 DB（从此优先于环境变量）。返回 `{"allow_anonymous": ..., "configured": true}`。
 
-### `GET /api/settings/model-map`（登录） / `POST /api/settings/model-map`（管理员）
+### `GET /api/settings/model-map`（管理员） / `POST /api/settings/model-map`（管理员）
 
 模型别名表（dict：`别名 → 目标模型`，目标可带 `provider/` 前缀）。POST 会剔除键值为空的项并返回规范化后的表。
 
 ### `POST /api/settings/upstash/test`（管理员）
 
-恒返回 `{"ok": false, "message": "M1 未接入 Upstash：持久化由控制面 SQLite 负责"}`。
+真实连通性探测（只读）：向 `{url}/pipeline` 下发 `[["PING"]]`，带 `Authorization: Bearer {token}`；不写数据、不落库、不改配置。出站 `httpx` `trust_env=False`、超时 10s；输入校验在网络请求之前完成，非法输入零出站。请求体 `{url, token}` 与前端保持兼容，`token` 留空回退已保存的值。
+
+SSRF 加固：建连前先做主机名/字面量红线（内网、环回、链路本地、保留地址、云元数据）校验，域名还会先 DNS 解析、任一解析结果落入红线即整体拒绝——两条路径都**不产生任何出站连接**，报 `upstash_target_forbidden`；公网不可达（含 DNS 解析失败）报 `upstash_unreachable`。上游 3xx 明确不跟随（`follow_redirects=False`），响应体按解码后字节计数、超 64KB 中止读取（防 gzip 放大）。
+
+| 结果 | HTTP | `error.type` | `error.code` |
+| --- | --- | --- | --- |
+| 成功 | 200 | —（`{ok, verified, latency_ms, detail, message}`） | — |
+| 凭据被拒（上游 401/403） | 400 | `authentication_error` | `upstash_auth_rejected` |
+| 超时（10s） | 504 | `upstream_error` | `upstash_timeout` |
+| 连不上（连接失败或 DNS 解析失败） | 502 | `upstream_error` | `upstash_unreachable` |
+| 地址非法 | 400 | `invalid_config` | `invalid_upstash_url` |
+| token 缺失 | 400 | `invalid_config` | `upstash_token_missing` |
+| 目标是内网/环回/链路本地/保留地址/云元数据（字面量，或 DNS 解析后任一结果命中） | 400 | `invalid_config` | `upstash_target_forbidden` |
+| 上游 3xx 重定向（不跟随） | 502 | `upstream_error` | `upstash_redirect_blocked` |
+| 响应体超 64KB（解码后字节） | 502 | `upstream_error` | `upstash_response_too_large` |
+| 其余上游 4xx | 400 | `invalid_config` | `upstash_rejected` |
+| 上游 5xx | 502 | `upstream_error` | `upstash_unavailable` |
+
+错误体是控制面风格 `{ok:false, detail, error:{type, code, message}}`，**不是** `/v1` 协议壳。表内共 10 个业务错误码（上表 = 1 行成功 + 10 行错误码）；403 `insufficient_role` 是 `admin_user` 守卫在进入探测逻辑前由统一 403 处理器（`main.py`）产生的权限错误，**不是** upstash 业务错误码，不列入本表。
+
+### 运行参数（runtime-config，四个端点均管理员）
+
+四个端点全部 `admin_user`（`apps/control/app/routers/settings.py:376-431`，viewer 返回 403 `insufficient_role`）。可写项以代码里的 `RUNTIME_ITEMS` 白名单为准：`models_cache_ttl_sec`、`failure_window_sec`、`failure_window_max`（整数，0–86400 / 0–86400 / 0–100000）、`model_fallback_first`（布尔）、`sse_max_seconds`（1–86400）、`session_ttl_sec`（60–2592000）、`allow_anonymous_gateway`（布尔，存网关鉴权键）。
+
+#### `GET /api/settings/runtime-config`（管理员）
+
+```json
+{
+  "ok": true,
+  "items": [
+    {"key": "models_cache_ttl_sec", "type": "int", "value": 300, "default": 300,
+     "source": "default", "min": 0, "max": 86400, "ui": true}
+  ],
+  "excluded_secrets": [
+    "provider_credentials.secret",
+    "providers 表与 provider_config 中的 api_key / token / secret / password",
+    "upstream_config 中的密钥字段",
+    "环境变量里的密钥（CODEBUDDY_API_KEY 等）"
+  ]
+}
+```
+
+`source` 取值 `default`（未落库）/ `db`（已落库且合法）/ `invalid`（库里值不合法，回退默认值）。`excluded_secrets` 是 `SECRET_EXCLUSIONS`（`settings.py:138-143`）——刻意不允许从本接口读写的密钥类配置说明。
+
+#### `POST /api/settings/runtime-config`（管理员）
+
+请求体为 `{"items": {key: value, ...}}`（也接受直接传扁平 `{key: value, ...}`）。行为（`_write_runtime`，`settings.py:287-373`）：
+
+- **先全量校验**：任一项不合法即整体拒绝，返回 400 `{"ok": false, "error": {"type": "invalid_config", "message", "errors": [{key, value, reason, message, min?, max?}]}}`，`reason` 可能是 `empty_payload`（空 body）、`unknown_key`（白名单外）、`secret_not_allowed`（密钥类，提示改走凭据体系）、`invalid_boolean` / `not_an_integer` / `out_of_range`。
+- 校验全过后**单事务写入**（`put_settings` + `commit`），写库异常 `rollback` 并返回 500 `{"ok": false, "error": {"type": "write_failed", "message": "写入数据库失败，本次改动已整体回滚", "errors": []}}`——不会留下半套配置。
+- 落库成功后才更新内存 settings（下一次请求即生效，无需重启），并写 `audit_logs`（action `settings.runtime_config`）。
+- 成功响应 = `GET` 的完整 payload + `"saved": ["已写入的键"]`。
+
+#### `GET /api/settings/runtime-config/export`（管理员）
+
+```json
+{
+  "kind": "unified-2api-runtime-config",
+  "version": 1,
+  "exported_at": 1793700000,
+  "items": {"models_cache_ttl_sec": 300},
+  "excluded_secrets": ["..."],
+  "note": "只含非密钥运行参数；凭据请在「服务商」页按 provider 管理。"
+}
+```
+
+只导出非密钥运行参数；`kind` / `version` 为导出文件的机器标识（字符串原样，勿改）。
+
+#### `POST /api/settings/runtime-config/import`（管理员）
+
+请求体接受两种形态：完整导出文件（含 `kind`/`version`/`items`），或扁平 `{key: value, ...}`。校验顺序：
+
+1. body 必须是 JSON 对象，否则 400 `invalid_shape`；
+2. `kind` 存在且 ≠ `unified-2api-runtime-config` → 400 `kind_mismatch`；
+3. `version` 存在且 ≠ 1 → 400 `unsupported_version`；
+4. 其余字段剥离元数据键（`kind/version/exported_at/excluded_secrets/note`）后按 POST 同一套 `_write_runtime` **先全量校验、再单事务写入、异常 rollback**（400 `invalid_config` / 500 `write_failed` 语义同上）。
+
+成功响应 = 完整 payload + `"saved"` + `"imported": ["参与本次导入的键"]`。导入同样写 `audit_logs`（action `settings.runtime_config.import`）。
+
+> 注：导出/导入路径是 `/api/settings/runtime-config/export|import`（挂在 runtime-config 子路径下），不是 `/api/settings/export|import`。
+
+### 明文密钥查看：`POST /api/settings/secret/reveal`（管理员）
+
+唯一会回明文 secret 的控制面端点，刻意不给前端入口（明文不下发浏览器，安全取向，见 `unification-audit` 附录）。请求体 `{"path": "..."}`，点号分隔的配置路径。
+
+- 根段必须是 `provider_config` 或 `upstream` 组内的密钥，否则 400 `只能查看 provider_config / upstream 组内的密钥`；路径不存在 404；目标字段不是非空字符串 400 `目标字段不是密钥字符串`。
+- 成功：`{"path": "...", "value": "明文"}`。
+- 成功与失败都写 `audit_logs`（action `settings.reveal_secret` / `settings.reveal_secret.{bad_root|path_not_found|not_a_secret}`，`target` 记配置路径），审计行不含明文值。
+- viewer 调用 403。
 
 ### 用户管理
 
@@ -514,6 +712,8 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 
 - `GET /api/system/check-update`：恒返回「自更新通道未启用」的固定结构。
 - `GET /api/system/versions`：`{"manager": "unified-2api M2", "upstream_connected": false, ...}` 固定结构。
+- `GET /api/system/changelog`：解析根目录 `CHANGELOG.md`，返回 `{available: true, path: "CHANGELOG.md", total, versions: [...], truncated, current}`；`versions` 每项 `{version, date, unreleased, sections: [{title, items: [{level, text}]}]}`（`## 版本` / `### 分类` / `- 条目`）。文件缺失或不可读返回 `available: false` + `error` + 空 `versions`，不 500。
+- `GET /api/system/update-status`：与 `check-update` 同源的固定「无更新」结构 + 面板所需字段：`{available: false, current_version, reason: "本部署不提供在线更新", version, running: false, ok: null, step: "", logs: [], updater_found: false, upstream_dir: "", can_update_upstream: false, in_container, upstream_ref: ""}`。
 
 ---
 
@@ -793,6 +993,13 @@ cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
 - 不传分页参数时响应仍是 `{"total": ..., "items": [...]}`，形状与改动前一致；`total` 语义修正为真实总数。
 - 选择 `limit` + `offset` 而不是 `page` / `size`：既有接口已经暴露 `limit`，新增 `offset` 是最小兼容增量，也不会出现两套互相重叠的页大小参数。
 
+### 已知边界：告警评估逐阈值隔离，失败阈值下一轮重试
+
+`evaluate_alerts()` 内部**逐阈值（并逐策略）隔离**：某条阈值评估抛异常时只记一条 ERROR 日志（带 `policy_id` / `threshold` / `key_id` / `provider` / `model` / `window`），跳过**本轮该阈值**，同一请求中的后续阈值与后续策略照常评估；`settle()` 外层另有一道整体 try/except 兜底策略匹配这类整段失败。评估失败只记日志，不影响已写入的流水与用量。
+
+- **失败阈值的语义是「跳过、下一轮重试」**：不写失败状态（`quota_alerts` 无状态列，也不新增），下一次请求评估时该阈值若仍跨线就直接补发；同一周期内若再无请求则不补，与改动前一致。
+- **不产生重复行**靠 `quota_alerts` 的 `UNIQUE(policy_id, threshold_percent, period_start)` 库层约束（不是 upsert）：先查后插，重试时查到已有行即跳过；并发下后到者的 INSERT 撞 UNIQUE，被该条阈值的隔离吞掉并记日志，库里仍只有一行。
+
 ---
 
 ## 12. Grok 注册任务（`/api/grok/register`）
@@ -830,12 +1037,101 @@ cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
 | 状态码 | 典型场景 |
 | --- | --- |
 | 400 | 请求体非法、缺 `model`、参数越界（用户名/密钥名长度等）、`base_url` 不是 http(s)、无可更新字段；配额 `key_id` 形态非法、`window`/阈值越界 |
+| 400 | `x-provider` 头与 `provider/model` 前缀指向不同 provider（`conflicting_provider_hints`：message 点名两个 provider id，`detail` 带 `header_provider`/`prefix_provider`，`error.provider` 取头值） |
 | 401 | 未登录/会话过期（`/api/*`）；网关密钥缺失或无效（`/v1/*`）；登录密码错误 |
 | 403 | viewer 调管理员接口或读取非自有密钥的配额数据（响应带 `error.type=permission_denied`、`required_role`）；sub2api 分组已停用；CodeBuddy 管理端拒绝 `wbt_` token |
-| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在；配额 `key_id` 引用的密钥或策略不存在；模型解析失败（`model_not_found` / `model_unavailable`） |
+| 404 | provider / 密钥 / 账号 / 分组 / 任务不存在；配额 `key_id` 引用的密钥或策略不存在；模型解析失败（`model_not_found` / `model_unavailable`，含**没有任何已启用 provider** 能服务该模型的情况）；`/v1/*` 路径不存在（`route_not_found`） |
+| 404 | `x-provider` 指向本地注册表没有的 provider（`provider_not_found`，message「未知的 provider：xxx」）；与真正上游 404 的 `upstream_not_found` 区分 |
 | 409 | 用户名已存在；任务状态不允许取消/重试 |
 | 429 | sub2api 分组或账号池额度耗尽；网关密钥触发配额上限；同一密钥失败请求达到窗口上限（`failure_rate_limited`）；上游 429（保留 `Retry-After`） |
 | 501 | 请求的 provider 不支持该能力（如 trae_sidecar 无 `/v1/messages`；deepseek sidecar 无流式 messages） |
 | 502 | 上游不可达（连接失败、DNS 失败等）；上游 5xx 归并到 502（原始状态码见 `error.upstream_status`） |
-| 503 | 无已启用的 chat provider；sub2api 分组未配置；sub2api 账号缺 upstream_base |
+| 503 | 显式指定已停用的 provider（`x-provider` 或 `provider/model` 前缀，`provider_disabled`）；sub2api 分组未配置；sub2api 账号缺 upstream_base |
 | 504 | 上游超时（408/504 归并）；流式响应超过时长上限 |
+| 405 | `/v1/*` 路径存在但方法不允许（`method_not_allowed`，保留 `Allow` 头，按协议出壳） |
+
+---
+
+## 14. 请求日志（`/api/logs`）
+
+`request_logs` 表只有 `ts / provider / model / status / tokens / latency / stream / error / key_id / key_name`，没有 IP、UA、首字延迟、缓存三段、扣费这些列。响应按 `apps/web/lib/types.ts::RequestLog` 的字段名输出，除 `credit` / `credit_status`（按 `log_id` 关联 `billing_ledger` 算出，见下）外，缺的列一律给 `null`（该类型的 `null` = 未采集），不编造数值；`key_prefix` 只回显掩码（`u2a_` + 后 4 位 + `****`）。未登录 401。
+
+### `GET /api/logs`（登录）
+
+| 查询参数 | 说明 |
+| --- | --- |
+| `page` / `size` | 前端分页：`size` 夹逼 1–200（默认 20），`page` 从 1 起 |
+| `limit` / `offset` | 与上一组二选一；**同时传时 `limit` 优先**，`limit` 同样夹逼 1–200 |
+| `key_id` | 按密钥过滤。非 admin 显式传他人 / 不存在 / NULL 归属的 `key_id` → 403 `无权查看他人密钥的请求日志`（不退化成空集合） |
+| `provider` | 精确匹配 |
+| `model` | `LIKE %…%` 模糊匹配 |
+| `status` | `ok` / `error` / 纯数字状态码 / `all`（或不传 = 不过滤）；其他值 400 `status 需为 ok / error 或数字状态码`。`ok`/`error` 口径与第 7 节 stats 一致：2xx 但带 `error` 的断流请求算失败 |
+| `days` | 最近 N 天，夹逼 1–365 |
+| `start` / `end` | Unix 秒时间窗，可与 `days` 叠加（AND） |
+
+归属：admin 读全量；非 admin 只读 `owner_user_id = 自己` 名下 key 的日志（NULL 归属的老 key、`key_id` 为空的匿名日志一律不可见）。
+
+返回 `{"total": 过滤后真实 COUNT, "items": [...]}`，按 `ts, id` 倒序。item 字段：`id, ts, key_id, key_name, key_prefix, provider, ip: "", model, mapped_model: null, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms: null, cache_hit_tokens: null, cache_miss_tokens: null, cache_write_tokens: null, ua: null, error, stream, credit, credit_status, account: null`。
+
+`credit` 为整数 micro-USD（关联到流水时），关联不到为 `null`，配合 `credit_status` 五档区分口径：
+
+| `credit_status` | 含义 |
+| --- | --- |
+| `billed` | 已计费且金额确定，`credit` 给 micro-USD 整数（上游回了 usage 但用量为 0 时也落此档，金额为 0） |
+| `unpriced` | 流水 `note` 为 `unpriced:{类别,…}`：部分类别缺价，流水金额只是估值，不冒充确定金额，`credit` 为 `null` |
+| `usage_missing` | 上游没回 usage，无法计价，`credit` 为 `null` |
+| `not_billed` | 失败/断流请求本就不写流水（`status >= 400` 或带 `error` 且无关联流水） |
+| `unlinked` | 成功但查不到关联流水：存量日志 `log_id` 未回填，或写流水异常 |
+
+流水的 `note` 字段**不下发**到本接口；缺价时想拿确定金额，用 `GET /api/pricing/resolve` 对该行现查（见第 10 节）。
+
+### `POST /api/logs/clear`（管理员）
+
+清空 `request_logs`，返回 `{"ok": true, "deleted": N}` 并写审计 `logs.clear`（detail `deleted=N`）。viewer 403。只清日志表：`billing_ledger` 流水与 `billing_*` 设置不动（金额只来自流水，见第 10 节）；清空后 stats 的请求计数也随之归零（它读的就是这张表）。
+
+---
+
+## 15. 审计与安全（`/api/audit-logs`、`/api/security/*`）
+
+安全面**只读**，四个端点全部 `Depends(current_user)`（登录即可，未登录 401），viewer 能读但被强制收敛到自己的数据。**不存在** `/api/security/rules` 与 `/api/security/logs`：库里没有对应存储，也没有执行逻辑（`net_guard.py` 只在写入上游地址时做环回/私网/链路本地/云元数据校验）。
+
+### `GET /api/audit-logs`（= `GET /api/security/audit`，登录）
+
+同一 handler 挂两个路径，行为完全一致；前端只用前者，后者是兼容别名（`unification-audit` 建议标 `deprecated` 或删除）。
+
+| 查询参数 | 说明 |
+| --- | --- |
+| `limit` | 默认 **200**，夹逼 1–500（`MAX_AUDIT_LIMIT`） |
+| `offset` | 默认 0，负数归 0 |
+| `action` | 精确匹配，如 `login_failed`、`logs.clear`、`settings.reveal_secret` |
+| `actor` | 用户名；非 admin 传他人 → 403 `无权查看他人审计日志`，否则强制 `actor = 自己` |
+
+返回 `{"items": [{id, ts, actor, action, target, detail, ip}], "total": 过滤后 COUNT}`，按 `ts, id` 倒序。`actor` 存执行者用户名（登录失败那类记录存的是「被尝试的用户名」）。
+
+### `GET /api/security/guard`（登录）
+
+地址守卫的**静态策略**，不是真实封禁名单，也不是访问日志：
+
+```json
+{
+  "allow_private_upstreams": false,
+  "blocked_hostnames": ["localhost", "localhost.localdomain", "metadata.google.internal"],
+  "blocked_addresses": ["169.254.169.254", "fd00:ec2::254"],
+  "blocked_categories": ["loopback", "private", "link_local", "multicast", "reserved", "unspecified"],
+  "allowed_schemes": ["http", "https"]
+}
+```
+
+### `GET /api/security/login-failures?limit=50`（登录）
+
+登录失败节流视图（窗口 900s / 阈值 5 次，与 `POST /api/login` 同一套计数）。`limit` 夹逼 1–200，只作用于 admin 的 `recent`。按角色分两个 scope：
+
+| 字段 | admin（`scope: "all"`） | 非 admin（`scope: "self"`） |
+| --- | --- | --- |
+| `window_sec` / `max_failures` | 900 / 5 | 900 / 5 |
+| `active` | 窗口内仍在计数的 `{ip, username, failures, first_ts, last_ts, locked, retry_after}`（`locked` = 达到阈值） | 恒 `[]` |
+| `stats` | 全站 `login_failed` 审计的 `{total, today}` | 针对**自己账号**的 `{total, today}` |
+| `recent` | 最近 `limit` 条审计行 | 恒 `[]` |
+| `window_failures` / `last_failed_ts` | 无 | 自己账号的窗口内失败数 / 最后一次失败时间 |
+
+非 admin 不返回 IP、不返回他人用户名，也不做撞库推测；内存桶只保留窗口内的记录，`active` 同样按窗口过滤。

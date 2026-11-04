@@ -66,7 +66,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="bg-background relative flex min-h-svh flex-col items-center justify-center gap-6 p-6 md:p-10">
+    <main className="bg-background relative flex min-h-svh flex-col items-center justify-center gap-6 p-6 md:p-10">
       {/* 未登录也要能换语言：看不懂当前语言的人得先能切过去 */}
       <div className="absolute right-4 top-4">
         <LanguageToggle />
@@ -121,7 +121,7 @@ export default function LoginPage() {
               />
             </div>
 
-            {error && <p className="text-xs text-red-500">{error}</p>}
+            {error && <p role="alert" className="text-xs text-destructive-text">{error}</p>}
 
             <Button type="submit" disabled={busy} className="w-full rounded-full">
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
@@ -134,6 +134,6 @@ export default function LoginPage() {
           {t('login.legal')}
         </p>
       </motion.div>
-    </div>
+    </main>
   );
 }

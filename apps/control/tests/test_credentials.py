@@ -36,6 +36,29 @@ def _drop(admin: httpx.Client, cid: int) -> None:
     admin.delete(f"/api/provider-credentials/{cid}")
 
 
+@pytest.fixture
+def codebuddy_env_fallback(admin: httpx.Client):
+    """env 回落的前提是库内没有 base_url 覆盖；显式清空前值并在收尾还原，不依赖上游用例留下的状态。"""
+
+    def _current() -> str:
+        row = next(item for item in admin.get("/api/providers").json() if item["id"] == "codebuddy")
+        return row.get("base_url") or ""
+
+    def _set(value: str) -> str:
+        response = admin.patch("/api/providers/codebuddy", json={"base_url": value})
+        assert response.status_code == 200, response.text
+        return response.json()["base_url"]
+
+    before = _current()
+    if before:
+        _set("")
+    try:
+        yield
+    finally:
+        if _current() != before:
+            _set(before)
+
+
 def test_crud_masks_secret_everywhere(admin: httpx.Client, db_path: str) -> None:
     created = admin.post(
         "/api/provider-credentials",
@@ -101,7 +124,9 @@ def test_unknown_provider_and_bad_url_rejected(admin: httpx.Client) -> None:
     assert missing.status_code == 404, missing.text
 
 
-def test_db_credential_overrides_env_base(admin: httpx.Client, fake_base: str) -> None:
+def test_db_credential_overrides_env_base(
+    admin: httpx.Client, fake_base: str, codebuddy_env_fallback: None
+) -> None:
     created = admin.post(
         "/api/provider-credentials",
         json={"provider": "codebuddy", "label": "临时", "base_url": "http://127.0.0.1:19090"},

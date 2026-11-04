@@ -1,0 +1,11 @@
+# 根 .dockerignore 管不到这里：web 的 build context 是 ./apps/web（compose: web.build.context）。
+# 只挡本地产物，源码与 public/ 必须留在 context 内，镜像里要跑 next build。
+node_modules
+.next
+out
+coverage
+.turbo
+*.tsbuildinfo
+.env
+.env.local
+.git

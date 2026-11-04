@@ -365,7 +365,7 @@ function AdminQuotaPolicies() {
           </div>
           <div className="w-full sm:w-56">
             <Select value={policyKey} onValueChange={setPolicyKey}>
-              <SelectTrigger className="h-9">
+              <SelectTrigger aria-label={t('quotaPolicy.listTitle')} className="h-9">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -405,14 +405,18 @@ function AdminQuotaPolicies() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
-                  <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('quotaPolicy.colKey')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colScope')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colWindow')}</TableHead>
-                  <TableHead className="text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colAmount')}</TableHead>
-                  <TableHead className="text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colRequests')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colThresholds')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colStatus')}</TableHead>
-                  {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground" />}
+                  <TableHead scope="col" className="pl-4 text-[11px] text-muted-foreground">{t('quotaPolicy.colKey')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colScope')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colWindow')}</TableHead>
+                  <TableHead scope="col" className="text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colAmount')}</TableHead>
+                  <TableHead scope="col" className="hidden text-right text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colRequests')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colThresholds')}</TableHead>
+                  <TableHead scope="col" className="text-[11px] text-muted-foreground">{t('quotaPolicy.colStatus')}</TableHead>
+                  {isAdmin && (
+                    <TableHead scope="col" className="pr-4 text-right text-[11px] text-muted-foreground">
+                      <span className="sr-only">{t('quotaPolicy.colActions')}</span>
+                    </TableHead>
+                  )}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -422,19 +426,19 @@ function AdminQuotaPolicies() {
                       <div className="font-medium">{p.key_name || keyName(p.key_id)}</div>
                       <div className="text-[11px] text-muted-foreground">#{p.key_id}</div>
                     </TableCell>
-                    <TableCell className="max-w-[220px] truncate text-xs" title={scopeText(p)}>
+                    <TableCell className="hidden max-w-[220px] truncate text-xs md:table-cell" title={scopeText(p)}>
                       {scopeText(p)}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <Badge variant="secondary" className="rounded-full">{windowText(p.window)}</Badge>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {p.limit_micro ? fmtUsd(p.limit_usd) : t('quotaPolicy.notSet')}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="hidden text-right tabular-nums md:table-cell">
                       {p.limit_requests ? fmtNumber(p.limit_requests) : t('quotaPolicy.notSet')}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       {p.thresholds.length === 0 ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
@@ -449,7 +453,7 @@ function AdminQuotaPolicies() {
                     </TableCell>
                     <TableCell>
                       {p.enabled ? (
-                        <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                        <Badge variant="secondary" className="rounded-full text-emerald-700 dark:text-emerald-400">
                           {t('quota.enabled')}
                         </Badge>
                       ) : (
@@ -466,6 +470,7 @@ function AdminQuotaPolicies() {
                             size="icon"
                             className="h-8 w-8 rounded-md"
                             title={t('quotaPolicy.edit')}
+                            aria-label={t('quotaPolicy.edit')}
                             onClick={() => openEdit(p)}
                           >
                             <Pencil className="h-4 w-4" />
@@ -482,6 +487,7 @@ function AdminQuotaPolicies() {
                                 size="icon"
                                 className="h-8 w-8 rounded-md text-destructive"
                                 title={t('quotaPolicy.delete')}
+                                aria-label={t('quotaPolicy.delete')}
                               >
                                 <Trash2 className="h-4 w-4" />
                               </Button>
@@ -509,9 +515,9 @@ function AdminQuotaPolicies() {
             <p className="text-xs text-muted-foreground">{t('quotaPolicy.usageDesc')}</p>
           </div>
           <div className="w-full sm:w-56">
-            <Label className="mb-1.5 block text-[11px] text-muted-foreground">{t('quotaPolicy.usageKey')}</Label>
+            <Label htmlFor="usage-key" className="mb-1.5 block text-[11px] text-muted-foreground">{t('quotaPolicy.usageKey')}</Label>
             <Select value={usageKey} onValueChange={setUsageKey} disabled={!keys.length}>
-              <SelectTrigger className="h-9">
+              <SelectTrigger id="usage-key" className="h-9">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -577,7 +583,7 @@ function AdminQuotaPolicies() {
         <section className="rounded-[20px] bg-muted p-4">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
             <div className="space-y-1.5">
-              <Label className="text-[11px] text-muted-foreground">{t('quotaPolicy.filterKey')}</Label>
+              <Label htmlFor="alert-key" className="text-[11px] text-muted-foreground">{t('quotaPolicy.filterKey')}</Label>
               <Select
                 value={alertKey}
                 onValueChange={(value) => {
@@ -585,7 +591,7 @@ function AdminQuotaPolicies() {
                   setAlertPolicy('all');
                 }}
               >
-                <SelectTrigger>
+                <SelectTrigger id="alert-key">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -599,9 +605,9 @@ function AdminQuotaPolicies() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-[11px] text-muted-foreground">{t('quotaPolicy.policyFilter')}</Label>
+              <Label htmlFor="alert-policy" className="text-[11px] text-muted-foreground">{t('quotaPolicy.policyFilter')}</Label>
               <Select value={alertPolicy} onValueChange={setAlertPolicy}>
-                <SelectTrigger>
+                <SelectTrigger id="alert-policy">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -615,9 +621,9 @@ function AdminQuotaPolicies() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-[11px] text-muted-foreground">{t('quotaPolicy.alertsLimit')}</Label>
+              <Label htmlFor="alert-limit" className="text-[11px] text-muted-foreground">{t('quotaPolicy.alertsLimit')}</Label>
               <Select value={String(alertLimit)} onValueChange={(v) => setAlertLimit(Number(v))}>
-                <SelectTrigger>
+                <SelectTrigger id="alert-limit">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -651,13 +657,13 @@ function AdminQuotaPolicies() {
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
-                  <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('quotaPolicy.colTriggeredAt')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colKey')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colScope')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colThreshold')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('quotaPolicy.colMetric')}</TableHead>
-                  <TableHead className="text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colUsed')}</TableHead>
-                  <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('quotaPolicy.colPeriod')}</TableHead>
+                  <TableHead scope="col" className="min-w-[160px] pl-4 text-xs text-muted-foreground">{t('quotaPolicy.colTriggeredAt')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colKey')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colScope')}</TableHead>
+                  <TableHead scope="col" className="min-w-[88px] text-[11px] text-muted-foreground">{t('quotaPolicy.colThreshold')}</TableHead>
+                  <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colMetric')}</TableHead>
+                  <TableHead scope="col" className="min-w-[128px] text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colUsed')}</TableHead>
+                  <TableHead scope="col" className="hidden pr-4 text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colPeriod')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -665,25 +671,25 @@ function AdminQuotaPolicies() {
                   const isAmount = alert.metric === 'micro';
                   return (
                     <TableRow key={alert.id} className="border-b border-border/40">
-                      <TableCell className="pl-4 text-xs text-muted-foreground">{fmtDateTime(alert.triggered_at)}</TableCell>
-                      <TableCell className="text-xs">{keyName(alert.key_id)}</TableCell>
-                      <TableCell className="max-w-[200px] truncate text-xs" title={`${alert.provider} / ${alert.model}`}>
+                      <TableCell className="min-w-[160px] pl-4 text-xs text-muted-foreground">{fmtDateTime(alert.triggered_at)}</TableCell>
+                      <TableCell className="hidden text-xs md:table-cell">{keyName(alert.key_id)}</TableCell>
+                      <TableCell className="hidden max-w-[200px] truncate text-xs md:table-cell" title={`${alert.provider} / ${alert.model}`}>
                         {alert.provider || alert.model
                           ? `${alert.provider || '*'} / ${alert.model || '*'}`
                           : t('quota.unlimited')}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="min-w-[88px]">
                         <Badge variant="secondary" className="rounded-full">{alert.threshold_percent}%</Badge>
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="hidden text-xs md:table-cell">
                         {isAmount ? t('quotaPolicy.metricMicro') : t('quotaPolicy.metricRequests')}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">
+                      <TableCell className="min-w-[128px] text-right tabular-nums text-xs">
                         {isAmount
                           ? `${fmtUsd(alert.used_usd)} / ${fmtMicroUsd(alert.limit_micro)}`
                           : `${fmtNumber(alert.used_requests)} / ${fmtNumber(alert.limit_requests)}`}
                       </TableCell>
-                      <TableCell className="pr-4 text-xs text-muted-foreground">
+                      <TableCell className="hidden pr-4 text-xs text-muted-foreground md:table-cell">
                         {windowText(alert.window)} · {fmtDateTime(alert.period_start)}
                       </TableCell>
                     </TableRow>
@@ -705,13 +711,13 @@ function AdminQuotaPolicies() {
           <DialogBody>
             <div className="space-y-4 px-5 pb-4">
               <div className="space-y-1.5">
-                <Label>{t('quotaPolicy.fieldKey')}</Label>
+                <Label htmlFor="policy-key">{t('quotaPolicy.fieldKey')}</Label>
                 <Select
                   value={form.keyId}
                   onValueChange={(value) => setForm({...form, keyId: value})}
                   disabled={!!editing}
                 >
-                  <SelectTrigger className={editing ? 'opacity-60' : undefined}>
+                  <SelectTrigger id="policy-key" className={editing ? 'opacity-60' : undefined}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -726,8 +732,9 @@ function AdminQuotaPolicies() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>{t('quotaPolicy.fieldProvider')}</Label>
+                  <Label htmlFor="policy-provider">{t('quotaPolicy.fieldProvider')}</Label>
                   <Input
+                    id="policy-provider"
                     value={form.provider}
                     onChange={(e) => setForm({...form, provider: e.target.value})}
                     disabled={!!editing}
@@ -737,8 +744,9 @@ function AdminQuotaPolicies() {
                   <p className="text-[11px] text-muted-foreground">{t('quotaPolicy.providerHint')}</p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>{t('quotaPolicy.fieldModel')}</Label>
+                  <Label htmlFor="policy-model">{t('quotaPolicy.fieldModel')}</Label>
                   <Input
+                    id="policy-model"
                     value={form.model}
                     onChange={(e) => setForm({...form, model: e.target.value})}
                     disabled={!!editing}
@@ -750,13 +758,13 @@ function AdminQuotaPolicies() {
               </div>
 
               <div className="space-y-1.5">
-                <Label>{t('quotaPolicy.fieldWindow')}</Label>
+                <Label htmlFor="policy-window">{t('quotaPolicy.fieldWindow')}</Label>
                 <Select
                   value={form.window}
                   onValueChange={(value) => setForm({...form, window: value as 'day' | 'month'})}
                   disabled={!!editing}
                 >
-                  <SelectTrigger className={editing ? 'opacity-60' : undefined}>
+                  <SelectTrigger id="policy-window" className={editing ? 'opacity-60' : undefined}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -769,8 +777,9 @@ function AdminQuotaPolicies() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>{t('quotaPolicy.fieldAmount')}</Label>
+                  <Label htmlFor="policy-amount">{t('quotaPolicy.fieldAmount')}</Label>
                   <Input
+                    id="policy-amount"
                     type="number"
                     min="0"
                     step="any"
@@ -781,8 +790,9 @@ function AdminQuotaPolicies() {
                   <p className="text-[11px] text-muted-foreground">{t('quotaPolicy.amountHint')}</p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>{t('quotaPolicy.fieldRequests')}</Label>
+                  <Label htmlFor="policy-requests">{t('quotaPolicy.fieldRequests')}</Label>
                   <Input
+                    id="policy-requests"
                     type="number"
                     min="0"
                     step="1"
@@ -795,8 +805,9 @@ function AdminQuotaPolicies() {
               </div>
 
               <div className="space-y-1.5">
-                <Label>{t('quotaPolicy.fieldThresholds')}</Label>
+                <Label htmlFor="policy-thresholds">{t('quotaPolicy.fieldThresholds')}</Label>
                 <Input
+                  id="policy-thresholds"
                   value={form.thresholds}
                   onChange={(e) => setForm({...form, thresholds: e.target.value})}
                   placeholder={t('quotaPolicy.thresholdsPlaceholder')}
@@ -805,8 +816,10 @@ function AdminQuotaPolicies() {
               </div>
 
               <div className="flex items-center justify-between gap-3">
-                <Label>{t('quotaPolicy.fieldEnabled')}</Label>
+                <Label htmlFor="policy-enabled">{t('quotaPolicy.fieldEnabled')}</Label>
                 <Switch
+                  id="policy-enabled"
+                  aria-label={t('quotaPolicy.fieldEnabled')}
                   checked={form.enabled}
                   onCheckedChange={(checked) => setForm({...form, enabled: checked})}
                 />
@@ -854,7 +867,7 @@ function UsageCard({
           </div>
         </div>
         {item.exceeded && (
-          <Badge variant="secondary" className="rounded-full text-red-600 dark:text-red-400">
+          <Badge variant="secondary" className="rounded-full text-destructive-text">
             {t('quotaPolicy.exceeded')}
           </Badge>
         )}

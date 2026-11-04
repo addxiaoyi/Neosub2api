@@ -48,9 +48,9 @@ function Countdown({next, all}: {next: CreditExpiry; all: CreditExpiry[]}) {
   // 分档的意义在于「一眼看出哪笔该先花掉」；全列都染成暖色就等于没有优先级。
   const cls =
     left < 86400
-      ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+      ? 'bg-red-500/15 text-destructive-text'
       : left < 7 * 86400
-        ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+        ? 'bg-amber-500/15 text-warning-text'
         : 'bg-muted text-muted-foreground';
 
   // 明细：每条「额度 · 到期时刻（本地时区）」。时刻用绝对时间，

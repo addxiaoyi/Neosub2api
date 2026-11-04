@@ -77,16 +77,19 @@ def test_reveal_returns_plaintext_and_writes_audit(admin: httpx.Client, db_path:
         conn = sqlite3.connect(db_path)
         try:
             rows = conn.execute(
-                "SELECT actor, action, target, detail FROM audit_logs "
-                "WHERE action = 'settings.reveal_secret' ORDER BY id"
+                "SELECT ts, actor, action, target, COALESCE(detail, ''), COALESCE(ip, '') "
+                "FROM audit_logs WHERE action = 'settings.reveal_secret' ORDER BY id"
             ).fetchall()
         finally:
             conn.close()
         assert rows, "查看明文必须写审计日志"
-        actor, action, target, detail = rows[-1]
+        ts, actor, action, target, *_ = rows[-1]
+        assert ts
         assert actor == "admin"
+        assert action == "settings.reveal_secret"
         assert target == "provider_config.opencode.api_key"
-        assert SECRET not in (detail or "")
+        # 审计整行（谁/何时/哪条）都不得出现明文
+        assert SECRET not in "|".join(str(part) for part in rows[-1])
     finally:
         admin.patch("/api/providers/opencode", json={"api_key": ""})
 
@@ -96,8 +99,69 @@ def test_non_admin_cannot_reveal(admin: httpx.Client) -> None:
     try:
         got = viewer.post("/api/settings/secret/reveal", json={"path": "provider_config.opencode.api_key"})
         assert got.status_code == 403
+        error = got.json()["error"]
+        assert error["type"] == "permission_denied"
+        assert error["code"] == "insufficient_role"
+        assert error["required_role"] == "admin"
+        assert error["role"] == "viewer"
     finally:
         viewer.close()
+
+
+# 值里同时有路径同形片段与特殊字符：弱脱敏（按字段名替换）会漏出尾巴
+TRICKY_SECRET = "opencode-api_key'\";\n-- u2a_lookalike_9F3K"
+
+
+def _audit_rows(db_path: str) -> list[tuple]:
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT ts, actor, action, target, COALESCE(detail, ''), COALESCE(ip, '') "
+            "FROM audit_logs ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_reveal_audit_row_never_carries_plaintext(admin: httpx.Client, db_path: str) -> None:
+    """审计边界：明文只回给当次响应，审计行 target/detail 在任何情况下都不带值。"""
+    path = "provider_config.opencode.api_key"
+    saved = admin.patch("/api/providers/opencode", json={"api_key": TRICKY_SECRET})
+    assert saved.status_code == 200, saved.text
+    try:
+        got = admin.post("/api/settings/secret/reveal", json={"path": path})
+        assert got.status_code == 200, got.text
+        assert got.json()["value"] == TRICKY_SECRET
+
+        # 失败路径也不能把明文顺带吐出来
+        missing = admin.post(
+            "/api/settings/secret/reveal", json={"path": "provider_config.opencode.no_such_key"}
+        )
+        assert missing.status_code == 404, missing.text
+        assert TRICKY_SECRET not in missing.text
+        bad_root = admin.post("/api/settings/secret/reveal", json={"path": "gateway.allow_anonymous"})
+        assert bad_root.status_code == 400, bad_root.text
+        assert TRICKY_SECRET not in bad_root.text
+
+        rows = _audit_rows(db_path)
+        assert rows, "查看明文必须写审计日志"
+        for row in rows:
+            line = "|".join(str(part) for part in row)
+            assert TRICKY_SECRET not in line, f"审计行出现明文：{line}"
+            assert "u2a_lookalike_9F3K" not in line, f"审计行出现明文片段：{line}"
+
+        # 成功、404、400 三种结果各留一行，动作后缀直接读出结局
+        actions = [row[2] for row in rows]
+        assert "settings.reveal_secret" in actions, "成功调用要有审计行"
+        assert "settings.reveal_secret.path_not_found" in actions, "404 失败也要有审计行"
+        assert "settings.reveal_secret.bad_root" in actions, "400 失败也要有审计行"
+
+        last = rows[-1]
+        assert last[2] == "settings.reveal_secret.bad_root"
+        assert last[3] == "gateway.allow_anonymous", "失败行 target 放被拒的配置路径"
+        assert last[4] == "", f"detail 必须为空，实际 {last[4]!r}"
+    finally:
+        admin.patch("/api/providers/opencode", json={"api_key": ""})
 
 
 def test_string_false_is_rejected_and_gateway_stays_closed(admin: httpx.Client, anon: httpx.Client) -> None:

@@ -114,28 +114,26 @@ def seeded(db_path: str) -> tuple[str, int, list[dict]]:
     return provider, base, rows
 
 
-def test_viewer_can_read_logs(admin: httpx.Client, seeded) -> None:
+def test_log_rows_expose_contract_fields(admin: httpx.Client, seeded) -> None:
+    """字段契约用 admin 校验；viewer 的归属收窄见 test_logs_stats_scope.py。"""
     provider, _, _ = seeded
-    viewer = _login_viewer(admin)
-    try:
-        got = viewer.get("/api/logs", params={"provider": provider, "limit": 2})
-        assert got.status_code == 200, got.text
-        body = got.json()
-        assert body["total"] == 5
-        assert len(body["items"]) == 2
-        item = body["items"][0]
-        # 字段名与 apps/web/lib/types.ts 的 RequestLog 对齐（表里没有的列给 null）
-        for key in (
-            "id", "ts", "key_id", "key_name", "model", "status", "prompt_tokens",
-            "completion_tokens", "latency_ms", "stream", "error", "first_token_ms",
-            "cache_hit_tokens", "cache_miss_tokens", "cache_write_tokens", "credit", "account",
-        ):
-            assert key in item, key
-        assert item["first_token_ms"] is None
-        assert item["cache_hit_tokens"] is None
-        assert item["provider"] == provider
-    finally:
-        viewer.close()
+    got = admin.get("/api/logs", params={"provider": provider, "limit": 2})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["total"] == 5
+    assert len(body["items"]) == 2
+    item = body["items"][0]
+    # 字段名与 apps/web/lib/types.ts 的 RequestLog 对齐（表里没有的列给 null）
+    for key in (
+        "id", "ts", "key_id", "key_name", "key_prefix", "model", "status",
+        "prompt_tokens", "completion_tokens", "latency_ms", "stream", "error",
+        "first_token_ms", "cache_hit_tokens", "cache_miss_tokens",
+        "cache_write_tokens", "credit", "account",
+    ):
+        assert key in item, key
+    assert item["first_token_ms"] is None
+    assert item["cache_hit_tokens"] is None
+    assert item["provider"] == provider
 
 
 def test_pagination_is_descending_and_stable(admin: httpx.Client, seeded) -> None:

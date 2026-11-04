@@ -16,6 +16,11 @@
 >
 > **2026-11-02 更新**：协议层已改为仓内直连实现（`codar.py`），不再依赖 sidecar
 > 的模型转发；扫码/短信登录、新 IP 验证、签到仍必须留在 sidecar。第 10 节给出逐项分界。
+>
+> **2026-11-04 更新**：已读码复核上游 `d7f5024 → ba05367`（v0.1.4）。协议面（端点、
+> 鉴权、请求/响应结构、SSE、错误语义）未变，但身份提示词改写的语义与默认值变了
+> （见第 3.1 节），升级处置步骤见第 11 节；完整复核记录见
+> `docs/upstream-drift-2026-11-04.md`。
 
 ## 0. 项目事实
 
@@ -84,9 +89,24 @@
   （`internal/gateway/useragent.go:3-13`）。
 - **Anthropic 版本头**：请求 `/v1/messages` 且调用方未带 `anthropic-version` 时，
   网关补 `2023-06-01`（`relay.go:292-294`）。
-- **身份提示词改写**：可选地把系统/开发者提示词开头的固定文本替换为中性文本，
-  或在首行前加 `.` + 零宽空格（`internal/gateway/compat.go:5-9`、`compat.go:124-152`）。
-  这是 codar2api 的独有行为，不属于 OpenAI/Anthropic 标准。
+- **身份提示词改写（v0.1.4 语义已变）**：作用于 `/v1/chat|messages|responses|count_tokens`
+  请求里的 system / developer / instructions 提示词（`compat.go:106` 的
+  `transformIdentityPrompts`），由两个开关控制，键名 `dsh_identity_rewrite` 与
+  `identity_first_line_fill`。**2026-11-04 读码确认的两版差异**：
+  - 旧版（`d7f5024` 及以前，v0.1.3）：`dsh_identity_rewrite` 旧默认 `true`
+    （旧 `store.go:164`），但**仅当提示词以 DeepSeek Harness 固定文案
+    （`You are an AI agent powered by DeepSeek Harness.`，旧 `compat.go:6`）开头才替换**
+    （旧 `compat.go:72`），普通提示词原样不动；`identity_first_line_fill` 旧默认
+    `false`（旧 `store.go:165`）。
+  - 新版（`ba05367`，v0.1.4）：`dsh_identity_rewrite` 默认仍 `true`
+    （`store.go:171`），但语义改成**不以 `You are an AI agent running on the Codar
+    runtime.`（`compat.go:6`）开头就无条件插入该身份串**（`compat.go:82-83`）；
+    `identity_first_line_fill` 默认**翻成 `true`**（`store.go:172`），先在最前加
+    `.` + 零宽空格（`.​X`）再拼身份串。
+  - 该行为是 codar2api 独有，不属于 OpenAI/Anthropic 标准。
+  - **我方影响**：`codar_sidecar.py` 纯 HTTP 透传，sidecar 升到 v0.1.4 后，
+    我方用户请求的出站 system/developer 提示词字节会变；仓内直连的 `codar.py`
+    不经过 sidecar，不受影响。保持旧行为的处置见第 11 节。
 
 ### 3.2 Models
 
@@ -279,4 +299,83 @@ token 来源（任选其一）：
 2. 本机安装了 Codar 客户端时，读 `~/.codar/config.json` 中的账号 token。
 3. token 形如 `eyJ...` 的三段 JWT；只填进服务商页 `api_key`（或 `options.tokens`），
    不会进入请求体，也不会回显到前端。
+
+## 11. 同步方式与升级步骤：v0.1.4 身份改写处置（2026-11-04）
+
+本节针对 sidecar 升级 `d7f5024`（v0.1.3）→ `ba05367`（v0.1.4）的身份提示词行为变化，
+是我方读码复核（`docs/upstream-drift-2026-11-04.md`）标记的唯一「需修复」项。
+协议面不变，`codar.py` / `codar_sidecar.py` 适配器无需改；要处置的只有 sidecar 配置。
+
+### 11.1 两个键与新旧默认值对照
+
+| 键名（schema） | 旧默认（`d7f5024`） | 新默认（`ba05367`） | 新版语义 |
+| --- | --- | --- | --- |
+| `dsh_identity_rewrite` | `true`（旧 `store.go:164`） | `true`（`store.go:171`） | 默认值没变，**语义变了**：从「仅当提示词以 DeepSeek Harness 固定文案开头才替换」变成「不以 Codar 身份串开头就无条件插入」（`compat.go:82-83`） |
+| `identity_first_line_fill` | `false`（旧 `store.go:165`） | `true`（`store.go:172`） | 默认值**翻转**：默认会在 system/developer 首行前加 `.` + 零宽空格（`.​X`） |
+
+关键提醒：把 `dsh_identity_rewrite` 钉回旧默认值 `true` **不能**保住旧行为——旧版的
+`true` 只替换固定文案，新版的 `true` 会插入身份串。要字节级保持旧出站行为，必须把
+**两键都设为 `false`**。
+
+### 11.2 配置写在哪
+
+- 键名定义在上游 `internal/gateway/store.go` 的 settings schema（新版 `:171`/`:172`，
+  旧版 `:164`/`:165`），持久化在**数据目录下的 `settings.json`**（顶层 JSON 对象的两个键）。
+- 数据目录：启动参数 `-data-dir` 或环境变量 `CODAR_DATA_DIR`，默认 `data`
+  （上游 `cmd/codar/main.go:44`；README 默认端口 `0.0.0.0:8801`，compose 部署时
+  即 compose 数据卷对应的容器内 data 目录）。
+- `settings.json` 里**缺键时走新版默认（两键都 `true`）**，所以保旧值必须显式写入两个键，
+  不能只写一个。
+
+### 11.3 可执行步骤（升级到 v0.1.4 前执行，保持旧行为）
+
+1. 定位数据目录：二进制部署是启动目录下的 `data/`；容器部署是 compose 数据卷对应的
+   容器内 `data/`（非默认时看 `CODAR_DATA_DIR` / `-data-dir`）。
+2. 停 sidecar：容器 `docker compose stop <服务名>`（或 `docker stop <容器>`）；
+   二进制直接停掉进程。（手改文件必须先停，避免运行中保存把旧值覆盖回去。）
+3. 编辑 `<数据目录>/settings.json`，在顶层对象显式写入（**唯一推荐写法：两键必须
+   同时为 `false`**，且是 JSON 布尔值而非字符串——上游 `yes()` 只认 bool，
+   `store.go:47`）：
+
+   ```json
+   "dsh_identity_rewrite": false,
+   "identity_first_line_fill": false
+   ```
+
+   为什么必须两键都 `false`（`ba05367` `compat.go`）：
+
+   - 身份串插入只受 `rewrite` 门控（`:82-85`），首行填充只受 `fill` 门控（`:86-95`），
+     两分支互不依赖——任一键为 `true` 都还有实际改写动作（`rewrite=false` 时
+     `fill` 照样插 `.​X` 或给旧 `.​` 前缀补 `X`；`fill=false` 时 `rewrite`
+     照样插身份串）；
+   - 全部改写的唯一短路是 `transformIdentityPrompts` 开头的
+     `if !rewrite && !fill { return false }`（`:107-109`），恰需两键同时为 `false`。
+     此时新网关对请求体零改动，与升级前字节一致——旧版对不含 DeepSeek Harness
+     固定文案的提示词同样零改动；唯一例外是提示词以
+     `You are an AI agent powered by DeepSeek Harness.` 开头时旧版会替换为
+     `You are an AI coding agent.`（旧 `compat.go:72,85`），两键皆 `false` 的新版
+     原样透传，我方流量无此类固定前缀。
+
+   > **不要**写成 `dsh_identity_rewrite: true` + `identity_first_line_fill: false`
+   > （钉回 d7f5024 的两个默认值）——那**不是旧行为，仍会插入**：旧版 `true` 只把
+   > DeepSeek Harness 固定文案**替换**为中性串（旧 `compat.go:72-88`），普通提示词
+   > 原样通过；新版 `true` 会对一切非 Codar 身份开头的 system/developer 提示词
+   > **插入** `You are an AI agent running on the Codar runtime.` 首行
+   > （`compat.go:82-83`），出站字节照样被改。
+4. 启动 sidecar，进管理面板「设置」页核对两个开关（文案「DSH身份提示词替换」
+   「身份提示词首行填充」）与写入值一致。用面板开关直接关掉也等价：`relay.go` 每个
+   请求实时读 `Settings()`（`ba05367` `relay.go:110-115`），面板保存即对后续请求生效，
+   手改文件则需重启。
+5. 验证：走一次我方 `codar_sidecar` provider 的 `/v1/messages`（或
+   `/v1/chat/completions`），确认正常返回；抓 sidecar 出站可见 system/developer 首行
+   无 `.​X` 与 `You are an AI agent running on the Codar runtime.` 前缀即为旧行为。
+
+### 11.4 不钉的后果
+
+- 升级后默认两键皆开：我方用户每个含 system/developer/instructions 的请求，出站
+  首行都会被加成 `.​XYou are an AI agent running on the Codar runtime.` + 原提示词，
+  `codar_sidecar.py` 透传无法拦截。
+- 若升级后上游 **403 `account_restricted` 频发**，优先回查这两个键
+  （身份串变化是否触发平台内容风控无法从公开代码证实，见
+  `docs/upstream-drift-2026-11-04.md` 待观察第 1 条）。
 

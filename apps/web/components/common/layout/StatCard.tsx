@@ -13,9 +13,9 @@ export type StatTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info' | '
 
 const TONE_VALUE: Record<StatTone, string> = {
   neutral: 'text-gray-900 dark:text-gray-100',
-  success: 'text-emerald-600 dark:text-emerald-400',
-  warning: 'text-amber-600 dark:text-amber-400',
-  danger: 'text-red-600 dark:text-red-400',
+  success: 'text-emerald-700 dark:text-emerald-400',
+  warning: 'text-warning-text',
+  danger: 'text-destructive-text',
   info: 'text-blue-600 dark:text-blue-400',
   accent: 'text-violet-600 dark:text-violet-400',
 };
@@ -24,8 +24,8 @@ const TONE_VALUE: Record<StatTone, string> = {
 const TONE_ICON: Record<StatTone, string> = {
   neutral: 'text-gray-500',
   success: 'text-emerald-600 dark:text-emerald-400',
-  warning: 'text-amber-600 dark:text-amber-400',
-  danger: 'text-red-600 dark:text-red-400',
+  warning: 'text-warning-text',
+  danger: 'text-destructive-text',
   info: 'text-blue-600 dark:text-blue-400',
   accent: 'text-violet-600 dark:text-violet-400',
 };
@@ -61,7 +61,7 @@ export function StatCard({
       className="min-h-[88px] sm:min-h-[96px] rounded-[20px] bg-muted px-3.5 py-3 sm:px-4"
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-[11px] font-medium text-gray-500 dark:text-gray-400 truncate">
+        <div className="text-[11px] font-medium text-gray-600 dark:text-gray-400 truncate">
           {label}
         </div>
         {Icon && (
@@ -87,7 +87,7 @@ export function StatCard({
         <div
           className={cn(
             'mt-2 text-[11px]',
-            hintTone ? TONE_VALUE[hintTone] : 'text-gray-500 dark:text-gray-400',
+            hintTone ? TONE_VALUE[hintTone] : 'text-gray-600 dark:text-gray-400',
           )}
         >
           {hint}

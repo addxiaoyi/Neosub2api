@@ -42,3 +42,12 @@ build/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 本地临时验证产物（e2e/压测/可访问性演练的脚本、快照与报告）
+tmp/
+
+# 代码图谱索引（本地生成的分析缓存）
+.codegraph/
+
+# e2e 验收运行时截图产物
+scripts/e2e/artifacts/

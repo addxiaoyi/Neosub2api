@@ -32,6 +32,9 @@ class OpenCodeAdapter(ProviderAdapter):
         default_base_url="https://opencode.ai/zen",
         capabilities=stub_capabilities(chat=True, messages=True, models=True),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        risk_level="warn",
+        risk_note="上游 opencode2api 为 GPL-3.0，只能进程隔离；"
+        "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:

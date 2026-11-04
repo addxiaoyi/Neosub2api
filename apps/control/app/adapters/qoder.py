@@ -387,6 +387,9 @@ class QoderAdapter(ProviderAdapter):
         default_base_url=REGIONS["cn"]["gateway"],
         capabilities=stub_capabilities(chat=True, messages=True, models=True, responses=True),
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
+        risk_level="safe",
+        risk_note="本直连路径为 clean-room 重写（本仓自研 MIT），不复制上游源码，不受上游许可约束；"
+        "PolyForm Noncommercial 1.0.0 的非商用限制针对的是 qoder_sidecar，而非本直连路径。",
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:

@@ -409,10 +409,15 @@ export function ProvidersSection() {
                     {CAPABILITY_LABELS.filter(([key]) => p.capabilities[key])
                       .map(([, label]) => t(label))
                       .join(' / ') || '—'}
+                    {Object.entries(p.limitations).map(([key, text]) => (
+                      <div key={key} className="mt-0.5">
+                        {key}: {text}
+                      </div>
+                    ))}
                   </TableCell>
                   <TableCell className="max-w-[220px] whitespace-normal text-[11px] text-muted-foreground">
                     <div className="font-mono">{p.license}</div>
-                    {p.risk_level !== 'safe' && p.risk_note && <div className="mt-0.5">{p.risk_note}</div>}
+                    {p.risk_note && <div className="mt-0.5">{p.risk_note}</div>}
                   </TableCell>
                   <TableCell className="pr-4 text-right">
                     <ConfirmDialog

@@ -148,7 +148,7 @@ export function UpdatePanel() {
               )}
               {status?.signature?.status === 'skipped' && (
                 <span
-                  className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                  className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-text"
                   title={t('updatePanel.unsignedTitle')}
                 >
                   <ShieldOff className="h-3 w-3" />
@@ -173,7 +173,7 @@ export function UpdatePanel() {
                   )}
                 </>
               ) : (
-                <span className="text-red-600 dark:text-red-400">{t('updatePanel.connDown')}</span>
+                <span className="text-destructive-text">{t('updatePanel.connDown')}</span>
               )}
             </div>
           </div>
@@ -230,7 +230,7 @@ export function UpdatePanel() {
           {status?.ok ? (
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
           ) : (
-            <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" />
           )}
           <div className="min-w-0 flex-1 space-y-1">
             <div className="text-xs font-medium">
@@ -244,7 +244,7 @@ export function UpdatePanel() {
                 : t('updatePanel.failedDetail')}
             </div>
             {status?.ok && status?.signature?.status === 'skipped' && (
-              <div className="flex items-start gap-1.5 pt-1 text-[11px] text-amber-600 dark:text-amber-400">
+              <div className="flex items-start gap-1.5 pt-1 text-[11px] text-warning-text">
                 <ShieldOff className="mt-0.5 h-3 w-3 shrink-0" />
                 <span>
                   <RichText text={t('updatePanel.skippedWarn')} />
@@ -268,7 +268,7 @@ export function UpdatePanel() {
           没有 update / upstream-ref 接口，所以这里不摆任何会 404 的按钮 */}
       {(check?.available === false || status?.updater_found === false) && (
         <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
           <div className="space-y-1">
             <div className="text-xs font-medium">{t('updatePanel.updateNotAvailable')}</div>
             <div className="text-[11px] text-muted-foreground">

@@ -116,6 +116,7 @@ const FloatingDockMobile = memo(
                       <a
                         href={withBasePath(item.href)}
                         key={item.title}
+                        aria-label={item.tooltip || item.title}
                         className={cn(
                             'flex h-8 w-8 items-center justify-center rounded-full bg-gray-50 dark:bg-neutral-900',
                             buttonClassName,
@@ -132,6 +133,7 @@ const FloatingDockMobile = memo(
                       <button
                         onClick={item.onClick}
                         key={item.title}
+                        aria-label={item.tooltip || item.title}
                         className={cn(
                             'flex h-8 w-8 items-center justify-center rounded-full bg-gray-50 dark:bg-neutral-900',
                             buttonClassName,
@@ -150,6 +152,8 @@ const FloatingDockMobile = memo(
           </AnimatePresence>
           <button
             onClick={toggleOpen}
+            aria-label={open ? 'Close navigation' : 'Open navigation'}
+            aria-expanded={open}
             className={cn(
                 'flex h-8 w-8 items-center justify-center rounded-full bg-gray-50 dark:bg-neutral-800',
                 buttonClassName,
@@ -321,15 +325,17 @@ const IconContainer = memo(
       }, []);
 
       const Element = customComponent ? 'div' : href ? 'a' : 'button';
+      // 图标按钮的可访问名：hover 气泡只在鼠标悬停时出现，读屏器需要显式标签
       const elementProps = customComponent ? {} : href ?
       {
         // 原生 <a> 不经过 next/link，basePath 不会自动生效
         href: withBasePath(href),
+        'aria-label': tooltip || title,
         ...((external || href.startsWith('https://')) ?
             {target: '_blank', rel: 'noopener noreferrer'} :
             {}),
       } :
-      {onClick};
+      {onClick, 'aria-label': tooltip || title};
 
       return (
         <Element {...elementProps}>

@@ -1,17 +1,20 @@
-# trae2api sidecar 说明
+# trae2api —— 上游参考来源（双路径）
 
 **上游仓库**：`https://github.com/JeffHu0912/trae2api`
-**许可证**：MIT ✅（可自由合入）
+**许可证**：MIT ✅（许可证分层：可入主仓，可自由合入）
 
 ## 形态
 
-**独立 sidecar 进程**（Go 编译成单个二进制），与 unified-2api 通过 HTTP 通信。
-本仓只包含：
+本仓注册了两个 provider，**上游源码均不入本仓**：
 
-- 控制面适配器：`apps/control/app/adapters/trae_sidecar.py`（纯 HTTP 代理）
-- 本 README
+1. **仓内直连 `trae`（一等 provider）**：`apps/control/app/adapters/trae.py`，
+   自研 MIT 直连 Solo / Work（默认 `https://trae-api-cn.mchost.guru`），
+   能力位 chat/models，协议 `openai.chat.completions`，status implemented、readiness ready。
+2. **sidecar `trae_sidecar`（可选替代）**：`apps/control/app/adapters/trae_sidecar.py`
+   纯 HTTP 代理，默认 `http://127.0.0.1:7871`，readiness needs_config（缺 sidecar 进程不通）。
 
-**源码不入本仓**——trae2api 自行管理账号池、OAuth 登录、Work 积分探测、SOLO→Work 自动降级。
+上游 sidecar 自行管理账号池、OAuth 登录、Work 积分探测、SOLO→Work 自动降级；
+控制面不提供 OAuth / 积分操作（`oauth`、`credits` 能力位为 False）。
 
 ## 支持的协议
 
@@ -21,9 +24,9 @@
 | `GET /v1/models` | trae2api 内置 32 个 config_name 静态模型表 |
 | `/status` / `/healthz` | sidecar 自身健康检查 |
 
-**不支持**：`/v1/messages`（无 Anthropic 协议）。
+**不支持**：`/v1/messages`（两条路径均无 Anthropic 协议，`messages` 能力位为 False）。
 
-## 快速启动（本地）
+## sidecar 快速启动（本地）
 
 ```bash
 # 1. clone（不在本仓目录）

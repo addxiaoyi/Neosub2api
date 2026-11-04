@@ -2,12 +2,14 @@
 
 > 主仓**不再依赖**该进程。这里只保留上游参考信息与可选的对照编排。
 > 我们的实现：`apps/control/app/adapters/sub2api.py` + `sub2api_store.py`，
+> 管理路由：`apps/control/app/routers/sub2api.py`，
 > 协议与落库设计：`docs/providers/sub2api.md`。
 
 ## 上游信息
 
 - 仓库：<https://github.com/Wei-Shaw/sub2api>
-- 许可：**LGPL-3.0**（本仓不包含其源码，也不链接/修改它）
+- 许可：**LGPL-3.0（许可证分层：只能进程隔离）**——不得链接上游库，
+  本仓不包含其源码、也不链接/修改它；主仓实现为 clean-room 自研 MIT
 - 能力：订阅配额分发的 AI API 网关（分组、账号池、复合路由）
 
 ## 主仓如何实现同等能力

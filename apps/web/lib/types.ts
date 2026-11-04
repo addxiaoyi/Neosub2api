@@ -162,8 +162,26 @@ export interface UpstreamStatus {
   error?: string;
 }
 
+/** 单条模型在某个 provider 上的真实来源 */
+export type ModelEntrySource = 'upstream' | 'declared' | 'declared_fallback';
+
+/** provider 的就绪状态（与 /api/providers 同一套语义） */
+export type ModelReadiness = 'ready' | 'needs_config';
+
+/** 同一模型在某一家的来源与就绪状态（后端 /api/models 的 provider_states） */
+export interface ModelProviderState {
+  source: ModelEntrySource;
+  readiness: ModelReadiness;
+  requires: string[];
+  enabled: boolean;
+  available: boolean;
+  unavailable_reason: string | null;
+  fallback_reason: string | null;
+}
+
 export interface ModelInfo {
   id: string;
+  /** 上游原始归属字段，等于主归属 provider */
   owned_by?: string;
   /** 上下文窗口（上游动态拉取给出；静态回退表为固定值） */
   context_length?: number;
@@ -173,6 +191,25 @@ export interface ModelInfo {
    * 前端据此判断列表来源（见 ModelListResponse.source）。
    */
   max_output_tokens?: number | null;
+  /** 主归属 provider（首个返回该 id 的一家） */
+  provider?: string;
+  /** 全部归属 provider；多于一家即多家共享 */
+  providers?: string[];
+  /** 主归属的来源 */
+  source?: ModelEntrySource;
+  /** 逐家的来源与就绪状态，键为 provider id */
+  provider_states?: Record<string, ModelProviderState>;
+  /** 聚合后的就绪状态：任一归属家可用即 ready */
+  readiness?: ModelReadiness;
+  /** 聚合后的缺失配置项（各家 requires 去重） */
+  requires?: string[];
+  /** 任一归属家既启用又就绪 */
+  enabled?: boolean;
+  available?: boolean;
+  /** 不可用原因；available 为 true 时为 null */
+  unavailable_reason?: string | null;
+  /** 主归属处于 declared_fallback 时的上游失败原因 */
+  fallback_reason?: string | null;
 }
 
 /** 模型列表来源：dynamic = 上游实时动态拉取；static = 上游内置静态回退表 */
@@ -251,11 +288,17 @@ export interface RequestLog {
   ua: string | null;
   error: string | null;
   stream: boolean;
-  /** 本次调用的真实扣费。后端未采集，恒为 null */
+  /** 本次调用真实扣的费（micro-USD 整数）。没记账时为 null，属于哪一类没记账看 credit_status */
   credit: number | null;
+  /** 记账口径：billed=已扣费；unpriced=模型未定价；usage_missing=上游没回 usage；
+   *  not_billed=失败/断流/被拒不写流水；unlinked=历史存量未关联流水 */
+  credit_status: CreditStatus;
   /** 本次实际用的上游账号。后端未采集，恒为 null */
   account: string | null;
 }
+
+/** GET /api/logs 每行的记账口径，取值来自 apps/control/app/routers/logs.py 的 _classify_credit */
+export type CreditStatus = 'billed' | 'unpriced' | 'usage_missing' | 'not_billed' | 'unlinked';
 
 export interface UsagePoint {
   day: string;

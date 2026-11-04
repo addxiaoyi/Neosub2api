@@ -1,7 +1,7 @@
 # Deepseek2Go sidecar 说明 ⚠️ 许可证风险
 
 **上游仓库**：`https://github.com/ColudAI/Deepseek2Go`
-**许可证**：**无 LICENSE 文件**（All Rights Reserved）🔴
+**许可证**：**无 LICENSE 文件**（许可证分层：All Rights Reserved，商用禁用）🔴
 
 ## 重要声明
 

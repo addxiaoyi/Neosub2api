@@ -220,7 +220,7 @@ export function availabilityClass(tier: AvailabilityTier): string {
   switch (tier) {
     case 'disabled':
     case 'expired':
-      return 'text-red-600 dark:text-red-400';
+      return 'text-destructive-text';
     // 主动停用是**用户自己的选择**，用中性灰而不是告警红——
     // 它不是故障，标红会让人以为出了问题。
     case 'disabledByPanel':
@@ -229,7 +229,7 @@ export function availabilityClass(tier: AvailabilityTier): string {
     case 'unknown':
       return 'text-muted-foreground';
     case 'cooling':
-      return 'text-amber-600 dark:text-amber-400';
+      return 'text-warning-text';
     case 'neverSucceeded':
     case 'notLoaded':
       return 'text-rose-600 dark:text-rose-400';

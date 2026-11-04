@@ -5,8 +5,35 @@ import * as React from 'react';
 import {cn} from '@/lib/utils';
 
 function Table({className, ...props}: React.ComponentProps<'table'>) {
+  const boxRef = React.useRef<HTMLDivElement>(null);
+
+  // 记录还有多少没露出来，供 globals.css 画边缘渐隐；只写 dataset，不触发重渲染
+  React.useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+
+    const sync = () => {
+      const rest = box.scrollWidth - box.clientWidth;
+      const atStart = box.scrollLeft <= 1;
+      const atEnd = box.scrollLeft >= rest - 1;
+      box.dataset.overflow =
+        rest <= 1 || (atStart && atEnd) ? 'none' : atStart ? 'end' : atEnd ? 'start' : 'both';
+    };
+    sync();
+
+    const observer = new ResizeObserver(sync);
+    observer.observe(box);
+    if (box.firstElementChild) observer.observe(box.firstElementChild);
+    box.addEventListener('scroll', sync, {passive: true});
+    return () => {
+      box.removeEventListener('scroll', sync);
+      observer.disconnect();
+    };
+  }, []);
+
   return (
     <div
+      ref={boxRef}
       data-slot="table-container"
       className="scroll-slim relative w-full overflow-x-auto"
     >

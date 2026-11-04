@@ -43,7 +43,7 @@ def _wait_up(url: str, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            r = httpx.get(url, timeout=1.0)
+            r = httpx.get(url, timeout=1.0, trust_env=False)
             if r.status_code < 500:
                 return True
         except Exception:
@@ -52,13 +52,30 @@ def _wait_up(url: str, timeout: float = 15.0) -> bool:
     return False
 
 
+def _port_busy_hint(port: int) -> str:
+    """只给识别命令，不解析 PID（避免引入 psutil 这类平台相关依赖）。"""
+    probe = (
+        "Get-NetTCPConnection -LocalPort {p} -State Listen"
+        if os.name == "nt"
+        else "ss -ltnp 'sport = :{p}'"
+    ).format(p=port)
+    return (
+        f"测试端口 {port} 已被占用，无法起假上游/控制面。\n"
+        f"  查看占用者：{probe}\n"
+        "  换端口自救：设 UNIFIED_TEST_CTRL_PORT / UNIFIED_TEST_FAST_PORT 后重跑"
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
     """会话级：起假上游 + 控制面；退出时强杀。"""
-    if not _port_free(FAKE_PORT):
-        pytest.skip(f"端口 {FAKE_PORT} 已被占用")
-    if not _port_free(CTRL_PORT):
-        pytest.skip(f"端口 {CTRL_PORT} 已被占用")
+    # 端口被占时本地直接失败：整会话 skip 会伪装成全绿
+    for port in (FAKE_PORT, CTRL_PORT):
+        if not _port_free(port):
+            hint = _port_busy_hint(port)
+            if os.environ.get("CI"):
+                pytest.skip(hint)
+            pytest.fail(hint)
 
     tmp = tmp_path_factory.mktemp("unified-test")
     data_dir = tmp / "data"

@@ -65,6 +65,34 @@ class ProviderRegistry:
         adapter = self._adapters.get(pid)
         return bool(adapter) and is_loopback_url(adapter.spec.default_base_url)
 
+    def register_provider(self, adapter: ProviderAdapter, *, enabled: bool = True, label: str = "") -> None:
+        """运行期注册额外 provider（仅演示模式使用）：写/更新 providers 行并接入适配器表。
+
+        与 _seed 的差别：_seed 只处理进程启动时就存在的静态适配器，演示 provider 的地址
+        要到假上游端口确定后才能算出来，所以单独走这个入口，幂等（重启只更新地址）。
+        """
+        pid = adapter.spec.id
+        conn = self.db.connect()
+        try:
+            exists = conn.execute("SELECT id FROM providers WHERE id = ?", (pid,)).fetchone()
+            ts = int(time.time())
+            name = label or adapter.spec.name
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO providers(id, enabled, base_url, label, updated_at) VALUES(?,?,?,?,?)",
+                    (pid, 1 if enabled else 0, adapter.base_url, name, ts),
+                )
+            else:
+                conn.execute(
+                    "UPDATE providers SET enabled = ?, base_url = ?, label = ?, updated_at = ? WHERE id = ?",
+                    (1 if enabled else 0, adapter.base_url, name, ts, pid),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        self._adapters[pid] = adapter
+        self.get(pid)
+
     @staticmethod
     def _is_legacy_base(pid: str, base_url: str) -> bool:
         if not base_url or pid not in LEGACY_PROVIDER_BASES:
@@ -144,13 +172,19 @@ class ProviderRegistry:
 
     def _snapshot(
         self,
+        conn=None,
     ) -> tuple[
         dict[str, dict[str, Any]],
         dict[str, dict[str, Any]],
         dict[str, list[dict[str, Any]]],
     ]:
-        """一次连接读齐 providers / provider_config / 已启用凭据，避免每 provider 反复开库。"""
-        conn = self.db.connect()
+        """一次连接读齐 providers / provider_config / 已启用凭据，避免每 provider 反复开库。
+
+        conn：借调用方的连接（网关准入段共用连接），不传则自开自关，其它调用方行为不变。
+        """
+        own = conn is None
+        if own:
+            conn = self.db.connect()
         try:
             rows = {row["id"]: dict(row) for row in conn.execute("SELECT * FROM providers").fetchall()}
             raw = get_json_setting(conn, "provider_config", {})
@@ -161,27 +195,34 @@ class ProviderRegistry:
                 ).fetchall()
             ]
         finally:
-            conn.close()
+            if own:
+                conn.close()
         configs = {str(k): v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in creds:
             grouped.setdefault(row["provider"], []).append(row)
         return rows, configs, grouped
 
-    def _rows(self) -> dict[str, dict[str, Any]]:
-        conn = self.db.connect()
+    def _rows(self, conn=None) -> dict[str, dict[str, Any]]:
+        own = conn is None
+        if own:
+            conn = self.db.connect()
         try:
             rows = conn.execute("SELECT * FROM providers").fetchall()
             return {row["id"]: dict(row) for row in rows}
         finally:
-            conn.close()
+            if own:
+                conn.close()
 
-    def _provider_configs(self) -> dict[str, dict[str, Any]]:
-        conn = self.db.connect()
+    def _provider_configs(self, conn=None) -> dict[str, dict[str, Any]]:
+        own = conn is None
+        if own:
+            conn = self.db.connect()
         try:
             raw = get_json_setting(conn, "provider_config", {})
         finally:
-            conn.close()
+            if own:
+                conn.close()
         if not isinstance(raw, dict):
             return {}
         return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
@@ -201,10 +242,10 @@ class ProviderRegistry:
                 keys.append(key)
         return tuple(keys)
 
-    def resolved(self, pid: str, *, snapshot=None) -> ResolvedProvider:
+    def resolved(self, pid: str, *, snapshot=None, conn=None) -> ResolvedProvider:
         if pid not in self._adapters:
             raise ProviderError(404, f"未知的 provider：{pid}")
-        rows, configs, grouped = snapshot or self._snapshot()
+        rows, configs, grouped = snapshot or self._snapshot(conn)
         credentials = tuple(grouped.get(pid, ()))
         row = rows.get(pid, {})
         cfg = configs.get(pid, {})
@@ -326,12 +367,12 @@ class ProviderRegistry:
         self.get(pid)
         return next(item for item in self.list_public() if item["id"] == pid)
 
-    def get(self, pid: str) -> ProviderAdapter:
+    def get(self, pid: str, *, conn=None) -> ProviderAdapter:
         adapter = self._adapters.get(pid)
         if adapter is None:
             raise ProviderError(404, f"未知的 provider：{pid}")
-        view = self.resolved(pid)
-        cfg = self._provider_configs().get(pid, {})
+        view = self.resolved(pid, conn=conn)
+        cfg = self._provider_configs(conn).get(pid, {})
         adapter.base_url = view.base_url
         adapter.configure(
             api_key=view.api_keys[0] if view.api_keys else "",
@@ -340,9 +381,9 @@ class ProviderRegistry:
         )
         return adapter
 
-    def enabled(self) -> list[ProviderAdapter]:
-        rows = self._rows()
-        return [self.get(pid) for pid, row in rows.items() if row.get("enabled") and pid in self._adapters]
+    def enabled(self, conn=None) -> list[ProviderAdapter]:
+        rows = self._rows(conn)
+        return [self.get(pid, conn=conn) for pid, row in rows.items() if row.get("enabled") and pid in self._adapters]
 
     def resolve(self, model: str, explicit: str | None = None) -> tuple[ProviderAdapter, str]:
         """把请求里的 model 解析成 (适配器, 去掉 provider 前缀后的模型名)。"""

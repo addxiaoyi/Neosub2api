@@ -70,7 +70,7 @@ def test_upstream_error_does_not_leak_base_url_or_body() -> None:
 
     class MockClient(UnifiedApiClient):
         def _client(self) -> httpx.AsyncClient:
-            return httpx.AsyncClient(base_url=self.base_url, transport=httpx.MockTransport(handler))
+            return httpx.AsyncClient(base_url=self.base_url, transport=httpx.MockTransport(handler), trust_env=False)
 
     client = MockClient("http://127.0.0.1:8061")
     with pytest.raises(ProviderError) as caught:

@@ -236,7 +236,7 @@ export function TokensPanel() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-7 w-7 rounded-md text-red-500 hover:text-red-600"
+                          className="h-7 w-7 rounded-md text-destructive-text hover:text-destructive-text"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>

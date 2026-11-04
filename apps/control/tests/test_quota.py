@@ -23,6 +23,7 @@ from app.billing import (
     check_quota,
     evaluate_alerts,
     period_bounds,
+    settle,
     window_usage,
 )
 from app.db import Database
@@ -228,6 +229,170 @@ class AlertTests(_DbCase, unittest.TestCase):
         self.assertEqual(len(set(starts)), 2, "周期翻转后应重新告警，period_start 不同")
 
 
+class _EmptyCursor:
+    """查重被绕过时的空结果：fetchone 返回 None 等价于「本周期还没告警过」。"""
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _FlakyAlertsConn:
+    """把 quota_alerts 的查重查询替换成指定故障，注入单条阈值的评估失败。
+
+    mode='miss'：查重永远查无，随后的 INSERT 会真实撞 UNIQUE 约束；
+    mode='raise'：这条查询本身抛错。percent=None 表示对全部阈值生效。
+    """
+
+    def __init__(self, real: sqlite3.Connection, *, percent: int | None, mode: str) -> None:
+        self._real = real
+        self._percent = percent
+        self._mode = mode
+
+    def execute(self, sql: str, params: tuple = ()):
+        if "SELECT id FROM quota_alerts" in sql and (
+            self._percent is None or int(params[1]) == self._percent
+        ):
+            if self._mode == "raise":
+                raise sqlite3.OperationalError("database is locked")
+            return _EmptyCursor()
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+class AlertIsolationTests(_DbCase, unittest.TestCase):
+    """逐阈值隔离：单条阈值评估抛异常，不得带走同策略的其它阈值。"""
+
+    def setUp(self):
+        super().setUp()
+        conn = self.conn()
+        try:
+            # _DbCase 只建了 80，补 50 / 100，凑齐一次跨三档
+            for percent in (50, 100):
+                conn.execute(
+                    "INSERT INTO quota_alert_thresholds(policy_id, percent, created_at) VALUES(?, ?, 0)",
+                    (self.policy_id, percent),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _alert_percents(self) -> list[int]:
+        conn = self.conn()
+        try:
+            return [
+                int(row["threshold_percent"])
+                for row in conn.execute(
+                    "SELECT threshold_percent FROM quota_alerts ORDER BY threshold_percent"
+                )
+            ]
+        finally:
+            conn.close()
+
+    def _seed_alert(self, percent: int, period_start: int) -> None:
+        """预置一条告警，模拟并发赢家已抢先写入这一档。"""
+        conn = self.conn()
+        try:
+            conn.execute(
+                "INSERT INTO quota_alerts(policy_id, threshold_percent, window, period_start, "
+                "triggered_at, metric, used_micro, limit_micro, used_requests, limit_requests) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (self.policy_id, percent, "day", period_start, 1_000_000, "micro", 100, 100, 0, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_integrity_error_on_first_threshold_blocks_no_others(self):
+        day = _tz(2026, 11, 2, 9, 0)
+        self.add_bill(day, 100)  # 上限 100、已用 100 → 50 / 80 / 100 三档全跨
+        self._seed_alert(50, period_bounds("day", day)[0])
+        conn = self.conn()
+        try:
+            flaky = _FlakyAlertsConn(conn, percent=50, mode="miss")
+            with self.assertLogs("unified.billing", level="ERROR") as logs:
+                created = evaluate_alerts(
+                    flaky, key_id=self.key_id, provider="codebuddy", model=MODEL, at=day
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(
+            [item["threshold_percent"] for item in created],
+            [80, 100],
+            "50 档撞 UNIQUE 后，80 / 100 必须继续评估并写入",
+        )
+        self.assertEqual(self._alert_percents(), [50, 80, 100], "50 只留赢家那一行，不许重复")
+        failures = [r for r in logs.records if "配额告警阈值评估失败" in r.getMessage()]
+        self.assertEqual(len(failures), 1, "失败阈值要留一条 ERROR 日志")
+        for field in (
+            f"policy_id={self.policy_id}",
+            "threshold=50",
+            "provider=codebuddy",
+            f"model={MODEL}",
+            "window=day",
+        ):
+            self.assertIn(field, failures[0].getMessage())
+        self.assertIsInstance(failures[0].exc_info[1], sqlite3.IntegrityError)
+        self.assertIn("quota_alerts", str(failures[0].exc_info[1]))
+
+    def test_failed_threshold_retried_on_next_evaluation(self):
+        day = _tz(2026, 11, 2, 9, 0)
+        self.add_bill(day, 100)
+        conn = self.conn()
+        try:
+            flaky = _FlakyAlertsConn(conn, percent=50, mode="raise")
+            with self.assertLogs("unified.billing", level="ERROR"):
+                first = evaluate_alerts(
+                    flaky, key_id=self.key_id, provider="codebuddy", model=MODEL, at=day
+                )
+            conn.commit()
+            second = evaluate_alerts(
+                conn, key_id=self.key_id, provider="codebuddy", model=MODEL, at=day
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual([item["threshold_percent"] for item in first], [80, 100])
+        self.assertEqual(
+            [item["threshold_percent"] for item in second],
+            [50],
+            "失败阈值本轮跳过，下一轮重评补发，不记失败状态",
+        )
+        self.assertEqual(self._alert_percents(), [50, 80, 100], "重试不产生重复行")
+
+    def test_every_threshold_failing_still_settles(self):
+        day = _tz(2026, 11, 2, 9, 0)
+        self.add_bill(day, 100)
+        conn = self.conn()
+        try:
+            flaky = _FlakyAlertsConn(conn, percent=None, mode="raise")
+            with self.assertLogs("unified.billing", level="ERROR") as logs:
+                result = settle(
+                    flaky, ts=day, key_id=self.key_id, key_name="k", provider="codebuddy",
+                    model=MODEL, status=200, usage={"prompt_tokens": 11, "completion_tokens": 7},
+                )
+            conn.commit()
+            ledger = conn.execute(
+                "SELECT COUNT(*) AS n FROM billing_ledger WHERE key_id = ?", (self.key_id,)
+            ).fetchone()["n"]
+            alerts = conn.execute("SELECT COUNT(*) AS n FROM quota_alerts").fetchone()["n"]
+        finally:
+            conn.close()
+        self.assertTrue(result["written"], "告警全失败不能带走已写入的流水")
+        self.assertEqual(
+            len([r for r in logs.records if "配额告警阈值评估失败" in r.getMessage()]),
+            3,
+            "三档各自记录失败，一条都不能吞掉不报",
+        )
+        self.assertEqual(alerts, 0, "全部失败时不写告警")
+        self.assertEqual(ledger, 2, "种子 1 条 + 本次 settle 1 条")
+
+
 class LegacyApiKeysMigrationTests(unittest.TestCase):
     def test_legacy_table_gets_owner_column(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -323,8 +488,11 @@ class FailureRateTests(_DbCase, unittest.TestCase):
 # ===== 集成用例：真实网关进程 =====
 
 
+_CREATED_KEYS: list[int] = []
+
+
 @pytest.fixture(scope="module", autouse=True)
-def seed_quota_prices(admin: httpx.Client) -> None:
+def seed_quota_prices(admin: httpx.Client):
     for token_class, micro in (("input", 2_000_000), ("output", 8_000_000)):
         r = admin.post(
             "/api/pricing/books",
@@ -337,6 +505,11 @@ def seed_quota_prices(admin: httpx.Client) -> None:
             },
         )
         assert r.status_code in (200, 409), f"{r.status_code} {r.text}"
+    yield
+    # 模块结束回收本文件建的密钥；否则它们的策略会留给后面的用例（admin 策略列表是全局的）
+    for key_id in _CREATED_KEYS:
+        admin.delete(f"/api/keys/{key_id}")
+    _CREATED_KEYS.clear()
 
 
 def _new_key(admin: httpx.Client, owner: str | None = None) -> tuple[int, str]:
@@ -346,6 +519,7 @@ def _new_key(admin: httpx.Client, owner: str | None = None) -> tuple[int, str]:
     r = admin.post("/api/keys", json=payload)
     assert r.status_code == 200, f"{r.status_code} {r.text}"
     body = r.json()
+    _CREATED_KEYS.append(int(body["id"]))
     return int(body["id"]), body["key"]
 
 

@@ -1,17 +1,24 @@
+import asyncio
+import ipaddress
 import json
 import logging
 import re
+import socket
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..adapters.base import ProviderError
-from ..api_utils import mask_secret, now, parse_bool
+from ..api_utils import mask_secret, mask_text, now, parse_bool
 from ..db import get_json_setting, put_settings, set_json_setting
+from ..net_guard import BLOCKED_ADDRESSES, BLOCKED_HOSTNAMES
 from ..security import admin_user, audit_event, current_user, hash_password, revoke_user_sessions, verify_password
 
 logger = logging.getLogger("unified.settings")
@@ -476,31 +483,40 @@ class RevealBody(BaseModel):
     path: str
 
 
-@router.post("/settings/secret/reveal")
-def reveal_secret(body: RevealBody, request: Request, actor: dict = Depends(admin_user)):
-    """显式查看明文：仅管理员，且每次调用都写审计。"""
-    parts = [part for part in body.path.split(".") if part]
-    if not parts or parts[0] not in REVEALABLE_ROOTS:
-        raise HTTPException(400, "只能查看 provider_config / upstream 组内的密钥")
-    node: Any = _read_config(request, reveal=True)
-    for part in parts:
-        if not isinstance(node, dict) or part not in node:
-            raise HTTPException(404, f"配置路径不存在：{body.path}")
-        node = node[part]
-    if not isinstance(node, str) or not node.strip():
-        raise HTTPException(400, "目标字段不是密钥字符串")
+def _audit_reveal(request: Request, actor: dict, path: str, *, ok: bool, reason: str = "") -> None:
+    """成功与失败都留痕；行内只写配置路径与原因码，绝不写密钥值。"""
+    action = "settings.reveal_secret" if ok else f"settings.reveal_secret.{reason}"
     conn = request.app.state.db.connect()
     try:
         audit_event(
             conn,
             actor["username"],
-            "settings.reveal_secret",
-            body.path,
+            action,
+            path,
             "",
             request.client.host if request.client else "",
         )
     finally:
         conn.close()
+
+
+@router.post("/settings/secret/reveal")
+def reveal_secret(body: RevealBody, request: Request, actor: dict = Depends(admin_user)):
+    """显式查看明文：仅管理员，成功与失败都写审计，审计行不含明文值。"""
+    parts = [part for part in body.path.split(".") if part]
+    if not parts or parts[0] not in REVEALABLE_ROOTS:
+        _audit_reveal(request, actor, body.path, ok=False, reason="bad_root")
+        raise HTTPException(400, "只能查看 provider_config / upstream 组内的密钥")
+    node: Any = _read_config(request, reveal=True)
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            _audit_reveal(request, actor, body.path, ok=False, reason="path_not_found")
+            raise HTTPException(404, f"配置路径不存在：{body.path}")
+        node = node[part]
+    if not isinstance(node, str) or not node.strip():
+        _audit_reveal(request, actor, body.path, ok=False, reason="not_a_secret")
+        raise HTTPException(400, "目标字段不是密钥字符串")
+    _audit_reveal(request, actor, body.path, ok=True)
     return {"path": body.path, "value": node}
 
 
@@ -614,9 +630,310 @@ def save_model_map(
     return mapping
 
 
+# ===== Upstash 连通性测试：只读 PING 探测，不写任何数据 =====
+
+_UPSTASH_TIMEOUT_SEC = 10.0
+_UPSTASH_PIPELINE_PATH = "/pipeline"
+_UPSTASH_DETAIL_MAX = 200
+# PING 响应只有几十字节；超限立刻断，防恶意上游用超大响应体打爆内存
+_UPSTASH_MAX_BODY = 64 * 1024
+# 显式声明不跟随：跟随重定向等于把外网 302 变成通往内网的跳板
+_UPSTASH_FOLLOW_REDIRECTS = False
+_UPSTASH_HOST_RE = re.compile(r"[A-Za-z0-9.\-:_\[\]]+")
+# 响应里可能顺带给出的元信息键；各家部署不统一，取到就带，取不到不编
+_UPSTASH_INFO_KEYS = ("version", "redis_version", "region", "node")
+
+
+class _UpstashProbeError(Exception):
+    """探测失败的结构化错误：由路由统一翻译成 {ok:false, detail, error{type,code}} 外壳。"""
+
+    def __init__(self, status_code: int, code: str, type_: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.type = type_
+        self.message = message
+
+
+def _upstash_addr(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """字面量 IP 解析；IPv4-mapped IPv6（::ffff:10.0.0.5）折回 IPv4，避免换壳绕过。"""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _upstash_forbidden(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Upstash 是纯公网服务：环回 / 私网 / 链路本地 / 保留 / 元数据一律拒，不套 provider 那套内网白名单。"""
+    if addr in BLOCKED_ADDRESSES:
+        return "云元数据地址"
+    if addr.is_loopback:
+        return "环回地址"
+    if addr.is_link_local:
+        return "链路本地地址"
+    if addr.is_private:  # 含 10./172.16-31./192.168. 与 IPv6 ULA fc00::/7
+        return "内网地址"
+    if addr.is_reserved or addr.is_unspecified or addr.is_multicast:
+        return "保留地址"
+    return ""
+
+
+def _upstash_host_forbidden(host: str) -> str:
+    """主机名红线先于 DNS 拦（localhost / 元数据域名），字面量 IP 当场判，解析结果在 guard 里判。"""
+    name = host.lower().rstrip(".")
+    if name in BLOCKED_HOSTNAMES:
+        return f"受限主机名 {name}"
+    addr = _upstash_addr(host)
+    if addr is not None:
+        reason = _upstash_forbidden(addr)
+        if reason:
+            return f"{reason} {addr}"
+    return ""
+
+
+async def _read_json_object(request: Request) -> dict[str, Any]:
+    """空体 / 非对象体按 {} 处理：交给业务校验出 400 + code，不落到框架 422 文案。"""
+    try:
+        raw = await request.json()
+    except Exception:  # noqa: BLE001 - 空 body 与坏 JSON 统一按缺失处理
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _upstash_base(raw: Any) -> str:
+    """校验并归一 Upstash 地址：https + 合法主机 + 不指向内网/保留目标，其余交给 guard 做解析后校验。"""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "缺少 Upstash 地址")
+    if any(ch.isspace() for ch in text):
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址不能包含空白字符")
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
+        port = parts.port  # 非法端口（超界 / 非数字）在这里抛 ValueError
+    except ValueError:
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址格式非法") from None
+    if parts.scheme != "https":
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址必须是 https")
+    if parts.username or parts.password:
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址不能携带用户名或密码")
+    if parts.query or parts.fragment:
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址不能带 query 或 fragment")
+    if not host or not _UPSTASH_HOST_RE.fullmatch(host):
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 主机名不合法")
+    reason = _upstash_host_forbidden(host)
+    if reason:
+        raise _UpstashProbeError(
+            400,
+            "upstash_target_forbidden",
+            "invalid_config",
+            f"Upstash 地址指向{reason}：控制面只探测公网 Upstash 服务，不接受内网 / 保留地址",
+        )
+    if port is not None:
+        authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    else:
+        authority = host
+    return f"https://{authority}{parts.path.rstrip('/')}"
+
+
+def _stored_upstash_token(request: Request) -> str:
+    conn = request.app.state.db.connect()
+    try:
+        stored = get_json_setting(conn, "upstream_config", {})
+    finally:
+        conn.close()
+    node = stored.get("upstash") if isinstance(stored, dict) else None
+    token = node.get("token") if isinstance(node, dict) else None
+    return token.strip() if isinstance(token, str) else ""
+
+
+def _upstash_token(raw: Any, stored: str) -> str:
+    """本次传值优先；留空或传来的是掩码就回退已保存值（前端约定「留空=用已保存」）。"""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if text and not _is_mask(text):
+        return text
+    if stored:
+        return stored
+    raise _UpstashProbeError(400, "upstash_token_missing", "invalid_config", "缺少 Upstash token：先填写或先保存 token")
+
+
+def _resolve_upstash(host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """连接前先解析：域名指到内网（DNS rebinding）必须在发起请求前拦下，而不是只看字面量。"""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise _UpstashProbeError(
+            502, "upstash_unreachable", "upstream_error",
+            f"无法解析 Upstash 主机 {host}：{mask_text(str(exc))[:_UPSTASH_DETAIL_MAX]}",
+        ) from exc
+    addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        addr = _upstash_addr(info[4][0])
+        if addr is not None:
+            addrs.append(addr)
+    return addrs
+
+
+async def _guard_upstash_target(base: str) -> None:
+    """字面量 IP 已在 _upstash_base 拦过；域名走解析后校验，任一解析结果指向禁网段即整体拒绝。"""
+    parts = urlsplit(base)
+    host = parts.hostname or ""
+    if _upstash_addr(host) is not None:
+        return
+    port = parts.port or 443
+    addrs = await asyncio.to_thread(_resolve_upstash, host, port)
+    if not addrs:
+        raise _UpstashProbeError(502, "upstash_unreachable", "upstream_error", f"无法解析 Upstash 主机 {host}")
+    for addr in addrs:
+        reason = _upstash_forbidden(addr)
+        if reason:
+            raise _UpstashProbeError(
+                400,
+                "upstash_target_forbidden",
+                "invalid_config",
+                f"Upstash 主机 {host} 解析到{reason} {addr}：控制面不向内网 / 保留地址发起请求",
+            )
+
+
+def _upstash_client() -> httpx.AsyncClient:
+    # trust_env=False：本机 HTTP_PROXY 之类的环境变量不该劫持管理面的主动探测
+    return httpx.AsyncClient(
+        trust_env=False,
+        timeout=_UPSTASH_TIMEOUT_SEC,
+        follow_redirects=_UPSTASH_FOLLOW_REDIRECTS,
+    )
+
+
+def _upstash_json(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001 - 非 JSON 响应交给调用方按形状判断
+        return None
+
+
+def _upstash_snippet(resp: httpx.Response) -> str:
+    """上游错误体只抽一小段人读信息：掩码 + 截断，别把整页响应吐给前端。"""
+    data = _upstash_json(resp)
+    if isinstance(data, dict):
+        for key in ("error", "message", "detail"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"：{mask_text(value.strip())[:_UPSTASH_DETAIL_MAX]}"
+    text = " ".join((resp.text or "").split())
+    return f"：{mask_text(text)[:_UPSTASH_DETAIL_MAX]}" if text else ""
+
+
+def _upstash_outcome(resp: httpx.Response, latency_ms: int) -> dict[str, Any]:
+    """按上游状态与响应形状分类：3xx → 不跟随，凭据 401/403 → 400，其余 4xx → 400，5xx 或形状不对 → 502。"""
+    status = resp.status_code
+    snippet = _upstash_snippet(resp)
+    if 300 <= status < 400:
+        raise _UpstashProbeError(
+            502,
+            "upstash_redirect_blocked",
+            "upstream_error",
+            f"上游返回重定向（{status}），探测不跟随跳转，请直接填写 Upstash 的目标地址{snippet}",
+        )
+    if status in (401, 403):
+        raise _UpstashProbeError(
+            400, "upstash_auth_rejected", "authentication_error", f"凭据被 Upstash 拒绝（上游 {status}）{snippet}"
+        )
+    if 400 <= status < 500:
+        raise _UpstashProbeError(
+            400, "upstash_rejected", "invalid_config", f"Upstash 拒绝了探测请求（上游 {status}）{snippet}"
+        )
+    if not 200 <= status < 300:
+        raise _UpstashProbeError(
+            502, "upstash_unavailable", "upstream_error", f"Upstash 返回异常状态（上游 {status}）{snippet}"
+        )
+    data = _upstash_json(resp)
+    if isinstance(data, list):
+        entry = data[0] if data else None
+    elif isinstance(data, dict):
+        entry = data
+    else:
+        raise _UpstashProbeError(502, "upstash_unavailable", "upstream_error", "Upstash 响应不是 REST JSON，无法确认连通性")
+    if isinstance(entry, dict) and "error" in entry and "result" not in entry:
+        reason = mask_text(str(entry.get("error")))[:_UPSTASH_DETAIL_MAX]
+        raise _UpstashProbeError(400, "upstash_rejected", "invalid_config", f"Upstash 返回错误：{reason}")
+    detail = "Upstash REST 连通正常，PING 探测通过"
+    if isinstance(entry, dict) and isinstance(entry.get("result"), str):
+        detail += f"（PING 返回 {entry['result'][:64]}）"
+    payload: dict[str, Any] = {
+        "ok": True,
+        "verified": True,
+        "latency_ms": latency_ms,
+        "detail": detail,
+        "message": detail,
+    }
+    if isinstance(data, dict):
+        info = {key: data[key] for key in _UPSTASH_INFO_KEYS if isinstance(data.get(key), (str, int))}
+        if info:
+            payload["info"] = info
+    return payload
+
+
+async def _probe_upstash(base: str, token: str) -> dict[str, Any]:
+    """Upstash REST 只读探测：pipeline 只跑一条 PING，流式读且限长，全程不写数据。"""
+    started = time.perf_counter()
+    status = 0
+    headers: httpx.Headers | dict[str, str] = {}
+    body = bytearray()
+    try:
+        async with _upstash_client() as client:
+            async with client.stream(
+                "POST",
+                f"{base}{_UPSTASH_PIPELINE_PATH}",
+                json=[["PING"]],
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                status = resp.status_code
+                headers = {k: v for k, v in resp.headers.items() if k.lower() not in {"content-length", "content-encoding"}}
+                async for chunk in resp.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > _UPSTASH_MAX_BODY:
+                        raise _UpstashProbeError(
+                            502,
+                            "upstash_response_too_large",
+                            "upstream_error",
+                            f"Upstash 响应超过 {_UPSTASH_MAX_BODY} 字节上限，已中止读取",
+                        )
+    except httpx.TimeoutException as exc:
+        raise _UpstashProbeError(
+            504, "upstash_timeout", "upstream_error", f"连接 Upstash 超时（{_UPSTASH_TIMEOUT_SEC:g} 秒）"
+        ) from exc
+    except httpx.InvalidURL as exc:
+        raise _UpstashProbeError(400, "invalid_upstash_url", "invalid_config", "Upstash 地址不合法，无法发起请求") from exc
+    except httpx.HTTPError as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        raise _UpstashProbeError(
+            502, "upstash_unreachable", "upstream_error", f"无法连接 Upstash：{mask_text(reason)[:_UPSTASH_DETAIL_MAX]}"
+        ) from exc
+    upstream = httpx.Response(status, headers=headers, content=bytes(body))
+    return _upstash_outcome(upstream, round((time.perf_counter() - started) * 1000))
+
+
 @router.post("/settings/upstash/test")
-def test_upstash(request: Request, user: dict = Depends(admin_user)):
-    return {"ok": False, "message": "M1 未接入 Upstash：持久化由控制面 SQLite 负责"}
+async def test_upstash(request: Request, user: dict = Depends(admin_user)):
+    """真实连通性探测：只读 PING，不写库、不改配置；失败走 {detail, error{type,code}} 统一外壳。"""
+    payload = await _read_json_object(request)
+    try:
+        base = _upstash_base(payload.get("url"))
+        token = _upstash_token(payload.get("token"), _stored_upstash_token(request))
+        await _guard_upstash_target(base)
+        return await _probe_upstash(base, token)
+    except _UpstashProbeError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "detail": exc.message,
+                "error": {"type": exc.type, "code": exc.code, "message": exc.message},
+            },
+            status_code=exc.status_code,
+        )
 
 
 class UserCreate(BaseModel):

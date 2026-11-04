@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -114,3 +117,40 @@ def test_anonymous_gate_effect(admin: httpx.Client, anon: httpx.Client) -> None:
     finally:
         # 无论如何都回写 false，不污染后续用例
         admin.post("/api/settings/gateway", json={"allow_anonymous": False})
+
+
+def test_key_prefix_single_source() -> None:
+    """前缀单源不变式：路由/掩码/脱敏正则都指向同一常量，代码里只允许一处字面量定义。"""
+    from app import key_prefix
+    from app.api_utils import _KEY_IN_TEXT
+    from app.routers import keys as keys_mod
+    from app.routers import logs as logs_mod
+    from app.routers import quota as quota_mod
+
+    assert keys_mod.KEY_PREFIX is key_prefix.KEY_PREFIX
+    assert quota_mod.KEY_PREFIX is key_prefix.KEY_PREFIX
+
+    # 掩码口径是同一个实现，logs / quota 只保留各自空值语义的薄包装
+    sample = key_prefix.KEY_PREFIX + "abcdef1234"
+    assert logs_mod._mask_prefix(sample) == quota_mod._mask_prefix(sample)
+    assert logs_mod._mask_prefix(sample) == key_prefix.mask_prefix(sample)
+    assert logs_mod._mask_prefix(None) is None
+    assert quota_mod._mask_prefix("") == ""
+
+    # 脱敏正则由同一常量拼出：完整密钥能被找到、太短的片段不算密钥
+    assert _KEY_IN_TEXT.pattern.startswith(re.escape(key_prefix.KEY_PREFIX))
+    assert _KEY_IN_TEXT.search(sample) is not None
+    assert _KEY_IN_TEXT.search(key_prefix.KEY_PREFIX + "abc") is None
+
+    # 存库前缀 = 前缀 + 6 位随机段，仍是 10 位（存量行靠它对齐）
+    assert key_prefix.STORED_PREFIX_LEN == len(key_prefix.KEY_PREFIX) + 6 == 10
+
+    # 源码扫描：app/ 下任何模块再写一份前缀字面量，本条就红
+    literal = re.compile(r"""=\s*["']""" + re.escape(key_prefix.KEY_PREFIX) + r"""["']""")
+    app_dir = Path(key_prefix.__file__).resolve().parent
+    offenders = [
+        p.relative_to(app_dir).as_posix()
+        for p in sorted(app_dir.rglob("*.py"))
+        if literal.search(p.read_text(encoding="utf-8"))
+    ]
+    assert offenders == ["key_prefix.py"], f"前缀字面量定义只允许一处：{offenders}"

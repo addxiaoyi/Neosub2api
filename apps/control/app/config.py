@@ -96,6 +96,8 @@ class Settings:
     models_cache_ttl_sec: int = 60
     # 未知模型名兜底：默认关（404 model_not_found）；打开后回到「用首家启用的、支持该能力位的 provider」
     model_fallback_first: bool = False
+    # 演示模式：进程内假上游 + 标注清楚的演示数据，只允许绑定回环地址（详见 docs/DEMO.md）
+    demo_mode: bool = False
 
 
 def load_settings() -> Settings:
@@ -139,6 +141,7 @@ def load_settings() -> Settings:
         models_cache_ttl_sec=int(os.getenv("UNIFIED_MODELS_CACHE_TTL_SEC", "60")),
         # 存量客户端逃生口：默认严格 404，不要默认打开
         model_fallback_first=_bool("UNIFIED_MODEL_FALLBACK_FIRST", False),
+        demo_mode=_bool("UNIFIED_DEMO_MODE", False),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

@@ -8,13 +8,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from .adapters.base import ProviderError
 from .api_utils import mask_access_args
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
-from .gateway_errors import GatewayError
+from .gateway_errors import PROTOCOL_ANTHROPIC, GatewayError, framework_payload, protocol_for_path
 from .observability import (
     REQUEST_ID_HEADER,
     bind_request,
@@ -46,6 +47,7 @@ from .routers import (
 )
 from .security import hash_password, verify_password
 from .services.grok_register import GrokRegisterService
+from . import demo
 
 logger = logging.getLogger("unified.security")
 
@@ -138,14 +140,20 @@ def create_app() -> FastAPI:
     _seed_admin(db, settings)
     registry = ProviderRegistry(db, settings)
     grok_service = GrokRegisterService(settings)
+    # 演示模式：默认关闭；开启时先校验回环地址，再起进程内假上游并注册 demo provider
+    demo_runtime = demo.install(settings, db, registry) if settings.demo_mode else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if demo_runtime is not None:
+            await demo_runtime.seed()
         grok_service.start()
         try:
             yield
         finally:
             await grok_service.stop()
+            if demo_runtime is not None:
+                demo_runtime.stop()
 
     app = FastAPI(
         title="unified-2api control plane",
@@ -160,6 +168,7 @@ def create_app() -> FastAPI:
     app.state.db = db
     app.state.registry = registry
     app.state.grok_service = grok_service
+    app.state.demo = demo_runtime
 
     app.add_middleware(
         CORSMiddleware,
@@ -210,6 +219,19 @@ def create_app() -> FastAPI:
             )
             reset_request(token)
 
+    if demo_runtime is not None:
+
+        @app.middleware("http")
+        async def demo_loopback_only(request: Request, call_next):
+            """兜底：即使有人用 CLI 把 host 改成 0.0.0.0，非本机来源也一律拒绝。"""
+            client_host = request.client.host if request.client else ""
+            if not demo.is_loopback_host(client_host):
+                return JSONResponse(
+                    {"detail": "UNIFIED_DEMO_MODE 只接受本机请求，演示数据禁止对外提供服务"},
+                    status_code=403,
+                )
+            return await call_next(request)
+
     @app.exception_handler(ProviderError)
     async def provider_error_handler(request: Request, exc: ProviderError):
         return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
@@ -219,10 +241,22 @@ def create_app() -> FastAPI:
         """/v1 错误按端点协议出形状：messages 走 Anthropic，其余走 OpenAI。"""
         payload = (
             exc.anthropic_payload()
-            if request.url.path.startswith("/v1/messages")
+            if protocol_for_path(request.url.path) == PROTOCOL_ANTHROPIC
             else exc.openai_payload()
         )
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def framework_error_handler(request: Request, exc: StarletteHTTPException):
+        """框架级错误：/v1/* 的未匹配路由与 405 按协议出壳，其余沿用 {detail}。"""
+        path = request.url.path
+        if path == "/v1" or path.startswith("/v1/"):
+            return JSONResponse(
+                framework_payload(path, exc.status_code, exc.detail),
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )
+        return await http_error_handler(request, exc)
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(request: Request, exc: HTTPException):

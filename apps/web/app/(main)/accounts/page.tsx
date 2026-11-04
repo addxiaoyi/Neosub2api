@@ -60,7 +60,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-/** CodeBuddy 是唯一实现了全部账号方法的 provider；能力接口未返回前按它兜底，避免首屏按钮闪烁 */
+/** CodeBuddy 是唯一实现了全部账号方法的 provider；能力接口未返回前按它兜底，避免首屏按钮闪烁。
+ *  接口**失败**时不再兜底：能力未知就不出按钮（见 capsFailed）。 */
 const CODEBUDDY_ACCOUNT_OPS: AccountOps = {
   list: true,
   oauth: true,
@@ -92,16 +93,46 @@ export default function AccountsPage() {
    * 按声明画按钮点下去必然 501。
    */
   const [opsMeta, setOpsMeta] = useState<Record<string, ProviderAccountOps>>({});
+  /** 能力接口失败：此时任何 provider 的能力都不确定，只能按「无能力」处理 */
+  const [capsFailed, setCapsFailed] = useState(false);
   const opsOf = useCallback(
     (pid?: string): AccountOps => {
       const id = pid || 'codebuddy';
-      return opsMeta[id]?.ops ?? (id === 'codebuddy' ? CODEBUDDY_ACCOUNT_OPS : NO_ACCOUNT_OPS);
+      const known = opsMeta[id]?.ops;
+      if (known) return known;
+      if (capsFailed) return NO_ACCOUNT_OPS;
+      return id === 'codebuddy' ? CODEBUDDY_ACCOUNT_OPS : NO_ACCOUNT_OPS;
     },
-    [opsMeta],
+    [opsMeta, capsFailed],
   );
-  /** 当前筛选服务商的账号能力；`all` 时按 CodeBuddy（唯一已接入统一账号页的一家）判断 */
-  const selectedId = providerFilter === 'all' ? 'codebuddy' : providerFilter;
-  const selectedOps = opsOf(selectedId);
+  /**
+   * 「全部」筛选下顶栏操作的可用性：只看**已启用** provider 的并集。
+   *
+   * 为什么不能沿用 CodeBuddy 的能力：能力接口是逐家返回的，演示模式只启用
+   * demo_local 时清单里根本没有可用的 CodeBuddy 操作，按它画出来的
+   * 「强制重启 / 刷新积分 / 今日已签」点了只会 400/404/503。
+   * 用并集是因为这几个都是聚合接口——不传 provider 时后端挑的正是
+   * 「第一家已启用且支持该操作」的适配器，只要有一家支持按钮就有落点。
+   */
+  const allOps = useMemo<AccountOps | null>(() => {
+    const rows = Object.values(opsMeta);
+    if (!rows.length) return null; // 能力接口还没回来：走下面的兜底，避免首屏按钮闪烁
+    const enabled = rows.filter((p) => p.enabled);
+    if (!enabled.length) return NO_ACCOUNT_OPS;
+    const union: AccountOps = {...NO_ACCOUNT_OPS};
+    for (const row of enabled) {
+      for (const key of Object.keys(union) as (keyof AccountOps)[]) {
+        union[key] = union[key] || row.ops[key];
+      }
+    }
+    return union;
+  }, [opsMeta]);
+  // 能力未知（接口失败）时不假设任何 provider 的能力：顶栏聚合按钮直接不画
+  const selectedOps = providerFilter === 'all'
+    ? (allOps ?? (capsFailed ? NO_ACCOUNT_OPS : CODEBUDDY_ACCOUNT_OPS))
+    : opsOf(providerFilter);
+  /** 聚合操作的目标服务商：`all` 时不指定，交给后端在已启用集合里挑（与上面的并集判据一致） */
+  const targetProvider = providerFilter === 'all' ? undefined : providerFilter;
   const selectedMeta = providerFilter === 'all' ? undefined : opsMeta[providerFilter];
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
@@ -125,17 +156,20 @@ export default function AccountsPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, upRes, capRes] = await Promise.allSettled([
-      accountApi.list(),
-      upstreamApi.status(),
-      accountOpsApi.capabilities(),
-    ]);
+    // 能力接口只读适配器覆写的方法，不碰上游。单独发起，避免账号列表在上游
+    // 不可达时挂很久，把「非 CodeBuddy 服务商账号在哪管理」的说明一起拖没。
+    const caps = accountOpsApi
+      .capabilities()
+      .then((list) => {
+        setOpsMeta(Object.fromEntries(list.map((p) => [p.id, p])));
+        setCapsFailed(false);
+      })
+      .catch(() => setCapsFailed(true));
+    const [accRes, upRes] = await Promise.allSettled([accountApi.list(), upstreamApi.status()]);
     if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
     else notify.err(errText(accRes.reason));
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
-    if (capRes.status === 'fulfilled') {
-      setOpsMeta(Object.fromEntries(capRes.value.map((p) => [p.id, p])));
-    }
+    await caps;
     setLoading(false);
   }, []);
 
@@ -153,7 +187,7 @@ export default function AccountsPage() {
       try {
         // force=false：60 秒内重复打开页面直接命中服务端缓存，
         // 不再每次都全量请求腾讯；命中时界面会明确标注「缓存」
-        const r = await accountOpsApi.refreshCredits(false, selectedId);
+        const r = await accountOpsApi.refreshCredits(false, targetProvider);
         if (!alive) return;
         setLiveCredits(
           Object.fromEntries(
@@ -168,7 +202,7 @@ export default function AccountsPage() {
     return () => {
       alive = false;
     };
-  }, [selectedOps.credits, selectedId, isAdmin]);
+  }, [selectedOps.credits, targetProvider, isAdmin]);
 
   // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
   // 否则会一直显示打开页面那一刻的旧数据。
@@ -179,7 +213,7 @@ export default function AccountsPage() {
   const refreshCredits = useCallback(async () => {
     setCreditsBusy(true);
     try {
-      const r = await accountOpsApi.refreshCredits(true, selectedId);
+      const r = await accountOpsApi.refreshCredits(true, targetProvider);
       setLiveCredits(
         Object.fromEntries(
           Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
@@ -196,13 +230,13 @@ export default function AccountsPage() {
     } finally {
       setCreditsBusy(false);
     }
-  }, [selectedId, t]);
+  }, [targetProvider, t]);
 
   /** 批量签到：逐账号记录结果 */
   const checkinAll = useCallback(async () => {
     setCheckinAllBusy(true);
     try {
-      const r = await accountOpsApi.checkinAll(selectedId);
+      const r = await accountOpsApi.checkinAll(targetProvider);
       const failed = r.total - r.succeeded;
       // 两类账号都不计入分母，各自补一句说明，否则用户会以为漏签了：
       //   skipped — 国际版没有签到体系，点多少次都是「已跳过」
@@ -241,7 +275,7 @@ export default function AccountsPage() {
     } finally {
       setCheckinAllBusy(false);
     }
-  }, [load, selectedId, t]);
+  }, [load, targetProvider, t]);
 
   /**
    * 将本地 auths 文件与上游账号池状态按 uid 合并。
@@ -344,7 +378,7 @@ export default function AccountsPage() {
   async function restartUpstream() {
     setRestarting(true);
     try {
-      const res = await accountOpsApi.restart(selectedId);
+      const res = await accountOpsApi.restart(targetProvider);
       (res.ok ? notify.ok : notify.err)(res.message || t('accounts.restarted'));
       await load();
     } catch (e) {
@@ -455,7 +489,7 @@ export default function AccountsPage() {
       return (
         <Badge
           variant="secondary"
-          className="rounded-full text-amber-600 dark:text-amber-400"
+          className="rounded-full text-warning-text"
           title={tip || undefined}
         >
           {label}{left ? ` · ${left}` : ''}
@@ -547,7 +581,7 @@ export default function AccountsPage() {
     return (
       <Badge
         variant="secondary"
-        className="rounded-full text-amber-600 dark:text-amber-400"
+        className="rounded-full text-warning-text"
         title={[t('accounts.modelLimitTitle'), ...lines].join(String.fromCharCode(10))}
       >
         {t('accounts.modelLimitBadge', {models: shown})}
@@ -593,9 +627,9 @@ export default function AccountsPage() {
     const tone = fromSnapshot
       ? 'text-muted-foreground'
       : value <= 0
-        ? 'text-red-600 dark:text-red-400'
+        ? 'text-destructive-text'
         : value < 200
-          ? 'text-amber-600 dark:text-amber-400'
+          ? 'text-warning-text'
           : 'text-foreground';
     return (
       <span className="inline-flex items-center gap-1.5">
@@ -613,7 +647,7 @@ export default function AccountsPage() {
           meta &&
           (meta.cached ? (
             <span
-              className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-amber-600 dark:text-amber-400"
+              className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-warning-text"
               title={t('accounts.cacheTitle')}
             >
               {meta.cache_age != null ? t('accounts.cacheAge', {n: meta.cache_age}) : t('accounts.cache')}
@@ -702,7 +736,7 @@ export default function AccountsPage() {
           disabled={busy}
           onClick={() => setNoteTarget(a)}
         >
-          <StickyNote className={'h-3.5 w-3.5 ' + (a.note ? 'text-amber-600 dark:text-amber-400' : '')} />
+          <StickyNote className={'h-3.5 w-3.5 ' + (a.note ? 'text-warning-text' : '')} />
         </Button>
         {/* 临时停用 / 启用（issue #21、#45）。放在最前：它是最轻的「止血」动作——
             某个号在拖后腿（一直失败、触发风控）时，先停用它比删掉更合适
@@ -775,7 +809,7 @@ export default function AccountsPage() {
             size="icon"
             className={
               'h-7 w-7 rounded-md ' +
-              (off ? 'text-emerald-600 hover:text-emerald-600' : 'text-amber-600 hover:text-amber-600')
+              (off ? 'text-emerald-600 hover:text-emerald-600' : 'text-warning-text hover:text-warning-text')
             }
             title={off ? t('accounts.enableTitle') : t('accounts.disableTitle')}
             disabled={busy}
@@ -798,7 +832,7 @@ export default function AccountsPage() {
             destructive
             onConfirm={() => run(a.file, () => accountApi.remove(a.file), t('accounts.deleted'))}
             trigger={
-              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('accounts.delete')}>
+              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-destructive-text hover:text-destructive-text" title={t('accounts.delete')}>
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
             }
@@ -821,7 +855,7 @@ export default function AccountsPage() {
     const reason = String(a.disabled_reason || a.invalid_reason || '');
     return (
       <div
-        className="text-[10px] text-muted-foreground/80"
+        className="text-[10px] text-muted-foreground"
         title={reason || undefined}
       >
         {t('accounts.lastUsedShort', {ago: used})}
@@ -867,6 +901,21 @@ export default function AccountsPage() {
         }
         actions={
           <>
+            {/* 能力接口失败：按钮按「无能力」隐藏，这里说明原因，否则操作区整片
+                消失看起来像页面坏了。 */}
+            {isAdmin && capsFailed && (
+              <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
+                {t('accounts.opsUnavailable')}
+              </span>
+            )}
+            {/* 非 CodeBuddy 服务商没有网页添加账号的入口。这里明说账号在哪管理，
+                否则操作区整片消失，看起来像按钮坏了。三档由后端 managed 给出：
+                sidecar / quota（sub2api）/ external（token 型，无账号概念）。 */}
+            {selectedMeta && selectedMeta.managed !== 'unified' && (
+              <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
+                {t(`accounts.managed_${selectedMeta.managed}`)}
+              </span>
+            )}
             {isAdmin && selectedOps.restart && (
               <ConfirmDialog
                 title={t('accounts.restartTitle')}
@@ -977,13 +1026,6 @@ export default function AccountsPage() {
               </Button>
             );
           })}
-          {/* 选中的这家如果账号不归本页管，直接说清楚账号在哪，
-              避免用户对着一个永远为空的列表反复刷新 */}
-          {selectedMeta && selectedMeta.managed !== 'unified' && (
-            <span className="px-1 text-[11px] text-muted-foreground">
-              {t(`accounts.managed_${selectedMeta.managed}`)}
-            </span>
-          )}
         </div>
       )}
 

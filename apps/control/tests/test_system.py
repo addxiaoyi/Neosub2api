@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -15,6 +17,57 @@ from app import __version__
 from app.routers import system
 
 pytestmark = pytest.mark.system
+
+# 日期与版本头的既有约定：`## 版本 [ - YYYY-MM-DD]`，未发布段允许写日期
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_VERSION_HEAD = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+# 断言基线锚定首个已发布版本，不锚定它排第几（顶部允许有未发布段）
+_BASE_VERSION = "0.1.0"
+_BASE_DATE = "2026-11-02"
+
+
+def _assert_changelog_invariants(body: dict) -> dict:
+    """仓库根 CHANGELOG 的结构+语义不变量，真实文件与 HEAD 快照两态共用。"""
+    assert body["available"] is True
+    assert body["current"] == __version__
+    versions = body["versions"]
+    assert versions, "仓库根 CHANGELOG.md 应该有内容"
+    assert body["total"] >= len(versions)
+
+    first = versions[0]
+    assert first["unreleased"] or _VERSION_HEAD.match(first["version"]), (
+        f"首段必须是未发布头或版本头，实得 {first['version']!r}"
+    )
+
+    for entry in versions:
+        name, date = entry["version"], entry["date"]
+        assert name, "段头不得解析出空版本名"
+        # 语义与格式互为兜底：长得像版本号就必须是已发布态，否则段头格式已坏
+        assert entry["unreleased"] == (not _VERSION_HEAD.match(name)), (
+            f"段头 {name!r} 既不合规版本号也不是未发布标记"
+        )
+        assert _ISO_DATE.match(date), f"{name} 的日期 {date!r} 不是 YYYY-MM-DD"
+        if not entry["unreleased"]:
+            assert date, f"已发布版本 {name} 必须带日期"
+        for section in entry["sections"]:
+            assert section["title"].strip(), f"{name} 存在空分类标题"
+
+    released = [e for e in versions if not e["unreleased"]]
+    names = [e["version"] for e in released]
+    assert len(names) == len(set(names)), f"已发布版本号重复：{names}"
+    nums = [tuple(int(p) for p in n.split("-")[0].split("+")[0].split(".")) for n in names]
+    assert all(len(n) == 3 for n in nums), f"版本号不是 X.Y.Z：{names}"
+    assert nums == sorted(nums, reverse=True), f"新版本应排在前面，实得 {names}"
+
+    base = next((e for e in released if e["version"] == _BASE_VERSION), None)
+    assert base is not None, f"缺少 {_BASE_VERSION} 段"
+    assert base["date"] == _BASE_DATE, f"{_BASE_VERSION} 日期应为 {_BASE_DATE}"
+    titles = [s["title"] for s in base["sections"]]
+    assert "安全" in titles and "新增" in titles, f"{_BASE_VERSION} 段缺分类：{titles}"
+    assert all(item["level"] == 0 for s in base["sections"] for item in s["items"]), (
+        f"{_BASE_VERSION} 段条目应是顶层缩进"
+    )
+    return body
 
 
 def _login_viewer(admin: httpx.Client) -> httpx.Client:
@@ -86,18 +139,24 @@ def test_token_rejects_admin_scope_and_expiry(admin: httpx.Client) -> None:
 
 
 def test_changelog_parses_repo_file(admin: httpx.Client) -> None:
+    """真实仓库文件走 HTTP 面，校验不变量而非固定首条。"""
     r = admin.get("/api/system/changelog")
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["available"] is True
-    assert body["current"] == __version__
-    assert body["versions"], "仓库根 CHANGELOG.md 应该有内容"
-    first = body["versions"][0]
-    assert first["version"] == "0.1.0"
-    assert first["date"] == "2026-11-02"
-    titles = [s["title"] for s in first["sections"]]
-    assert "安全" in titles and "新增" in titles
-    assert all(item["level"] == 0 for s in first["sections"] for item in s["items"])
+    _assert_changelog_invariants(r.json())
+
+
+def test_changelog_head_snapshot_still_parses(tmp_path: Path) -> None:
+    """HEAD 版（顶部没有未发布段）也过同一套不变量，防止断言写死成当前状态。"""
+    repo_root = system.CHANGELOG_PATH.parent
+    head = subprocess.run(
+        ["git", "show", "HEAD:CHANGELOG.md"],
+        cwd=str(repo_root),
+        capture_output=True,
+        check=True,
+    ).stdout.decode("utf-8")
+    snapshot = tmp_path / "CHANGELOG.md"
+    snapshot.write_text(head, encoding="utf-8", newline="")
+    _assert_changelog_invariants(system.read_changelog(snapshot))
 
 
 def test_changelog_missing_file_is_not_500(tmp_path: Path) -> None:

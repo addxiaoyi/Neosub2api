@@ -3,6 +3,7 @@
 > 复核基线：**2026-11-03**。11 家上游全部完成复核，无「未复核」项。
 > 复核方式：GitHub REST API `repos/{owner}/{repo}` 取 `license.spdx_id`，再取 `contents/LICENSE` 原文首屏人工比对（含 copyright 行）。证据逐家列在第 2 节。
 > 主仓许可证：根目录 [LICENSE](LICENSE) 为 MIT，署名为 `addxiaoyi2048`。
+> 依赖清单（第 8、9 节）复核基线：**2026-11-04**，取值来自 `apps/control/requirements.txt` + 本机 site-packages 的 `METADATA`，以及 `apps/web/package-lock.json` + `node_modules/<pkg>/package.json` 的 `license` 字段，全部为实读，未凭印象填写。
 > 可执行边界、自检命令与违规处置：见 [docs/compliance.md](docs/compliance.md)。
 
 ## 0. 三种接触方式
@@ -133,6 +134,8 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
   - muse2api / gptGrok2api / ZCode2api / trae2api / codar2api / grok-register (MIT)
 本产品不包含、也不分发 ColudAI/Deepseek2Go（无许可证）与 qoder-trae-workbuddy-switch
 的 sidecar 二进制；如需使用，由部署方自行获取并遵守其许可证。
+本产品运行时依赖（第 8 节）均为 MIT / BSD-3-Clause / Apache-2.0 / ISC / PSF-2.0 / MPL-2.0 等宽松许可；
+构建期依赖（sharp 的 libvips 二进制、caniuse-lite、eslint/tailwind/typescript 链，第 9 节）不随分发物提供。
 第三方组件完整清单见 THIRD-PARTY-NOTICES.md。
 ```
 
@@ -150,3 +153,111 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 3. 遇到 `NOASSERTION`（如 PolyForm 系列）以 LICENSE 正文为准，不能当「无限制」。
 4. 只要许可证是 GPL / LGPL / PolyForm-NC / 未声明，默认只允许 clean-room 或进程隔离，禁止拷贝源码、禁止加入依赖清单。
 5. 每次新增或升级上游后，跑 `docs/compliance.md` 第 5 节自检命令，结果留档。
+6. `apps/control/requirements.txt` 或 `apps/web/package-lock.json` 变动后，同步第 8 节的版本与许可证；许可证只从包自身元数据（`METADATA` / `package.json`）读取，读不到就标 `unknown` 并写明原因，不得推测。`sharp` / `caniuse-lite` / eslint / tailwind 链若有进出，同步第 9 节。
+
+## 8. 运行时第三方依赖清单（pip / npm 直接与传递依赖）
+
+第 1–7 节讲 11 家上游仓库；本节讲本仓自己 `pip install` / `npm ci` 装进来的包。复核基线 **2026-11-04**。
+
+**取值方式（实读，非记忆）：**
+
+- Python：读本机 site-packages 里 `<pkg>-<ver>.dist-info/METADATA` 的 `License-Expression` / `License` / `Classifier`；直接依赖版本对齐 `apps/control/requirements.txt`。依赖随运行镜像分发，证据是 `apps/control/Dockerfile:12-13`（`pip install -r requirements.txt` 于 `python:3.11-slim`）。
+- 前端：读 `apps/web/package-lock.json` 与 `node_modules/<pkg>/package.json` 的 `license` 字段。产物是静态导出（`next.config.ts` 的 `output: 'export'`），运行镜像只含 `out/` 静态文件，见第 9 节。
+
+### 8.1 Python（`apps/control`）
+
+| 包 | 版本 | 许可证 | 来源字段 |
+| --- | --- | --- | --- |
+| fastapi | 0.162.0 | MIT | `License-Expression: MIT`（0.115.6 → 0.162.0） |
+| starlette | 1.3.1 | BSD-3-Clause | `License-Expression: BSD-3-Clause`（本次显式钉版） |
+| uvicorn | 0.34.0 | BSD-3-Clause | `License: BSD-3-Clause` + `Classifier: License :: OSI Approved :: BSD License` |
+| httpx | 0.28.1 | BSD-3-Clause | `License` + `Classifier` 同上 |
+| PyYAML | 6.0.3 | MIT | `License: MIT` + `Classifier: License :: OSI Approved :: MIT License` |
+| pydantic | 2.14.2 | MIT | `License-Expression: MIT` |
+| pydantic-core | 2.50.2 | MIT | `License-Expression: MIT` |
+| annotated-types | 0.8.0 | MIT | `License-Expression: MIT` + `Classifier` |
+| typing-extensions | 4.16.0 | PSF-2.0 | `License-Expression: PSF-2.0` |
+| typing-inspection | 0.4.4 | MIT | `License-Expression: MIT` |
+| annotated-doc | 0.0.5 | MIT | `License-Expression: MIT`；**本次新增传递依赖**，来自 fastapi 0.162.0 的 `Requires-Dist: annotated-doc>=0.0.2` |
+| opentelemetry-api | 1.45.2 | Apache-2.0 | `License-Expression: Apache-2.0`；**本次新增传递依赖**，来自 fastapi 0.162.0 的 `Requires-Dist: opentelemetry-api>=1.44.0` |
+| anyio | 4.16.0 | MIT | `License-Expression: MIT`；starlette 1.3.1 的 `Requires-Dist: anyio<5,>=3.6.2` |
+| h11 | 0.16.0 | MIT | `License: MIT` + `Classifier` |
+| httpcore | 1.0.9 | BSD-3-Clause | `License-Expression` + `Classifier` |
+| certifi | 2026.10.23 | **MPL-2.0** | `License: MPL-2.0` + `Classifier: License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)` |
+| idna | 3.20 | BSD-3-Clause | `License-Expression: BSD-3-Clause` |
+| click | 8.5.0 | BSD-3-Clause | `License-Expression: BSD-3-Clause` |
+| python-dotenv | 1.2.4 | BSD-3-Clause | `License: BSD-3-Clause`（`uvicorn[standard]`） |
+| httptools | 0.9.0 | MIT | `License-Expression: MIT`（`uvicorn[standard]`） |
+| watchfiles | 1.3.0 | MIT | `License` + `Classifier`（`uvicorn[standard]`） |
+| websockets | 17.4 | BSD-3-Clause | `License-Expression: BSD-3-Clause`（`uvicorn[standard]`） |
+| uvloop | 未锁定；PyPI 最新 0.23.0 | MIT | 本机（Windows）未安装，读不到本地 `METADATA`，改用 PyPI JSON `info.license = "MIT License"`；该包 `Classifier` 同时列了 Apache 与 MIT 两条，按 `license` 字段取 MIT。仅 `sys_platform != 'win32'` 时由 `uvicorn[standard]` 装入，Linux 运行镜像内存在 |
+
+两点必须知道的边界：
+
+- **本仓没有 Python 锁文件**。`requirements.txt` 只钉 5 个直接依赖，上表传递依赖版本是本机 site-packages 实测值，容器构建时 `pip` 可能解析到同主版本的其他小版本（许可证字段基本不变，版本可能有差异）。
+- `colorama 0.4.6` 只在 Windows 安装（`uvicorn[standard]` 的 `sys_platform == 'win32'` 标记），Linux 运行镜像内没有；其元数据只有 `Classifier: License :: OSI Approved :: BSD License`，**没有**可判读的 SPDX 字段，故标 `BSD`（未细到 `-3-Clause`），不推测。
+
+### 8.2 前端（`apps/web`）
+
+| 包 | 版本 | 许可证 | 来源字段 |
+| --- | --- | --- | --- |
+| next | 15.5.29（钉版） | MIT | `node_modules/next/package.json` `license` + lock `node_modules/next.license` |
+| react | 19.3.0（声明 `^19.0.0`） | MIT | `license` 字段 |
+| react-dom | 19.3.0 | MIT | `license` 字段 |
+| scheduler | 0.28.0 | MIT | `license` 字段（react-dom 传递） |
+| axios | 1.20.0（声明 `^1.9.0`） | MIT | `license` 字段 |
+| follow-redirects | 1.16.2 | MIT | `license` 字段（axios 传递，本次升级到 1.16.2） |
+| sharp | 0.35.5 | Apache-2.0 | `license` 字段；next 的 `optional` 依赖，**不随分发物提供**，见第 9 节 |
+| postcss | 8.5.28（`overrides` 钉版） | MIT | `license` 字段 |
+| source-map-js | 1.2.2（`overrides` 钉版） | BSD-3-Clause | `license` 字段 |
+| brace-expansion | 1.1.21 / 5.0.12（`overrides` 钉版） | MIT | `license` 字段；两处均在 dev 链（eslint → `@typescript-eslint`） |
+
+其余生产条目（`@radix-ui/*`、`@tabler/icons-react`、`recharts`、`motion`、`date-fns`、`lucide-react` 等）全量以 `package-lock.json` 为准，分布见 8.3。
+
+### 8.3 全量统计与冲突结论
+
+对 `package-lock.json` 全部 **555** 条包条目统计，其中**非 devDependencies 的 228 条**许可证分布如下（`license` 字段缺失 0 条，即 **npm 侧无 `unknown`**；另有 327 条 `dev: true` 的开发/构建期条目，处置见第 9 节）：
+
+| 许可证 | 条数 | 说明 |
+| --- | --- | --- |
+| MIT | 177 | 宽松 |
+| Apache-2.0 | 16 | 宽松（含 sharp 0.35.5 本体与 `@img/sharp-darwin*` / `@img/sharp-linux*` 等平台壳包） |
+| ISC | 15 | 宽松 |
+| BSD-3-Clause | 3 | 宽松（含 source-map-js 1.2.2） |
+| 0BSD | 1 | 宽松 |
+| MIT AND ISC | 1 | 宽松 |
+| LGPL-3.0-or-later | 10 | **copyleft**：`@img/sharp-libvips-*` 各平台二进制，见第 9 节 |
+| Apache-2.0 AND LGPL-3.0-or-later | 3 | **copyleft**：`@img/sharp-win32-*` 平台包 |
+| Apache-2.0 AND LGPL-3.0-or-later AND MIT | 1 | **copyleft**：`@img/sharp-wasm32` |
+| CC-BY-4.0 | 1 | **署名类**：`caniuse-lite`，见第 9 节 |
+
+结论：
+
+1. **无许可证冲突**。生产依赖树里没有 GPL / AGPL / SSPL / BUSL / 商业限制许可，与主仓 MIT 分发不冲突；上游 11 家的 GPL / LGPL / PolyForm-NC / 无许可风险仍只在第 1、5 节，与依赖树无关。
+2. **唯一的两条非宽松项都不进分发物**：LGPL-3.0-or-later 的 `@img/sharp-libvips-*` / `@img/sharp-*` 平台包与 CC-BY-4.0 的 `caniuse-lite`，边界与触发条件写在第 9 节。
+3. Python 侧唯一的弱 copyleft 是 `certifi`（MPL-2.0）：**它随运行镜像分发**，因此镜像内保留其 `LICENSE` 全文即可；本仓未修改其任何文件，不触发源码公开义务，与 MIT 主仓兼容。
+
+## 9. 仅构建期、不随分发的依赖
+
+**边界证据**：`apps/web/Dockerfile` 是多阶段构建——`npm ci`（第 4 行）与 `npm run build:export`（第 8 行）只发生在 `node:22-alpine` 构建阶段，最终镜像只 `COPY --from=build /app/out`（第 10-12 行）。也就是说 **`node_modules` 不进入任何对外分发物**，运行镜像里只有 `out/` 静态文件与 nginx。
+
+| 依赖 | 版本 | 许可证 | 来源字段 | 为什么只在构建期 |
+| --- | --- | --- | --- | --- |
+| sharp | 0.35.5 | Apache-2.0 | `package.json` `license` | next 的 `optional` 依赖；且 `next.config.ts` 里 `images.unoptimized: true` + `output: 'export'`，构建与运行都不做服务端图片优化，只被装进构建阶段 |
+| `@img/sharp-libvips-*`（darwin/linux/linuxmusl/arm 等 10 个变体） | 1.3.4 | **LGPL-3.0-or-later** | `package-lock.json` 各条 `license`，均 `optional: true` | 各平台 libvips 预编译二进制，`npm ci` 按 `os/cpu` 选择性安装到构建阶段的 `node_modules`，不复制进 `out/` |
+| `@img/sharp-win32-*`（arm64/ia32/x64） | 0.35.5 | **Apache-2.0 AND LGPL-3.0-or-later** | `package-lock.json` `license`，`optional: true` | Windows 平台壳包（捆绑 libvips），同上不进 `out/` |
+| `@img/sharp-wasm32` | 0.35.5 | **Apache-2.0 AND LGPL-3.0-or-later AND MIT** | `package-lock.json` `license`，`optional: true` | WASM 变体，同上 |
+| `@img/sharp-darwin-*` / `@img/sharp-linux*` / `@img/sharp-freebsd-wasm32` / `@img/sharp-webcontainers-wasm32` / `@img/colour` | 0.35.5（colour 1.1.0） | Apache-2.0（colour 为 MIT） | `package-lock.json` `license`，`optional: true` | 其余平台壳包与配色辅助包，同样是构建阶段按平台安装 |
+| caniuse-lite | 1.0.30001810 | **CC-BY-4.0** | `package-lock.json` / `node_modules/caniuse-lite/package.json` `license` | 浏览器兼容性数据，只供构建期 browserslist 查询，数据本身不进 `out/` |
+| eslint 链：eslint 9.39.5、eslint-config-next 15.5.29、`@eslint/eslintrc`、`@typescript-eslint/*` 等（lock 中含 `eslint` 的 43 条 dev 条目） | 见 lock | MIT 30 / Apache-2.0 8 / ISC 3 / BSD-2-Clause 1 / BlueOak-1.0.0 1 | 各包 `package.json` `license`，lock 中均为 `dev: true` | `devDependencies` 及其传递链，只在 `npm ci` 默认安装时出现 |
+| tailwind 链：tailwindcss 4.3.3、`@tailwindcss/postcss` 4.3.3、`@tailwindcss/oxide-*`、tw-animate-css（含 `tailwind` 的 17 条 dev 条目） | 见 lock | MIT（17/17） | 各包 `package.json` `license`，`dev: true` | `devDependencies`；只参与把源码编译成 CSS，包本身不进最终镜像（产物里只有生成的 CSS，不含其源码） |
+| typescript | 5.9.3 | Apache-2.0 | `package.json` `license` | `devDependencies`，仅类型检查与编译 |
+| brace-expansion 1.1.21 / 5.0.12（`overrides` 钉版） | 见 8.2 | MIT | lock `license`，`dev: true` | 位于 eslint 传递链，仅构建期 |
+
+**声明是否齐全、以及触发条件：**
+
+- 当前分发物**不包含**任何 LGPL-3.0 的 libvips 二进制与 CC-BY-4.0 的 caniuse-lite 数据，因此不触发「附库源码获取方式」「署名」义务；上面的表就是对外可引用的「仅构建期、不随分发」声明（`docs/dependency-audit.md` 的 P3 项对应本节）。
+- **若将来**改成随镜像携带完整 `node_modules`、或重新打开服务端图片优化，义务立即触发：
+  - `@img/sharp-libvips-*`（LGPL-3.0-or-later）：镜像内需附许可证全文与对应库源码获取方式，并保留用户可替换该库的路径；
+  - `caniuse-lite`（CC-BY-4.0）：需附署名、许可证链接与来源说明。
+- `@img/*` 与 `sharp` 的许可证是**复合表达式**（`AND` 连接），对外声明必须整串写，不能只写 Apache-2.0 而漏掉 LGPL-3.0-or-later。

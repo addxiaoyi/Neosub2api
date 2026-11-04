@@ -104,6 +104,8 @@ class ProviderSpec:
     readiness: str = "ready"
     """连通前仍需补齐的项，给人看的短句（ready 时为空）。"""
     requires: tuple[str, ...] = ()
+    """能力限制：key 为受限能力（如 messages_stream），value 为限制说明；与 501 报错同一句话。"""
+    limitations: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.readiness not in READINESS_STATES:
@@ -128,6 +130,7 @@ class ProviderSpec:
             "protocols": list(self.protocols),
             "readiness": self.readiness,
             "requires": list(self.requires),
+            "limitations": dict(self.limitations),
             "risk_level": self.risk_level,
             "risk_note": self.risk_note,
         }

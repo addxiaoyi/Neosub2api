@@ -68,12 +68,25 @@ export interface ProviderInfo {
   options: Record<string, unknown>;
   risk_level: RiskLevel;
   risk_note: string;
+  /** 能力限制：key 为受限能力（如 messages_stream），value 为限制说明 */
+  limitations: Record<string, string>;
   readiness: ProviderReadiness;
   /** needs_config 时仍缺的项，给人看的短句 */
   requires: string[];
   base_url_source: string;
+  /** 上游默认地址是否 loopback，决定本地地址能不能保存 */
+  allows_local_base_url: boolean;
   /** 历史默认地址残留提示，空串表示无异常 */
   base_url_warning: string;
+  /** 命中历史默认值的凭据行提示，命中为空数组 */
+  credential_base_warnings: {
+    provider: string;
+    id: number;
+    label: string;
+    base_url: string;
+    suggested_base_url: string;
+    message: string;
+  }[];
   credential_count: number;
   credentials: {
     id: number;

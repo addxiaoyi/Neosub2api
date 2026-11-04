@@ -109,7 +109,7 @@ export default function StatsPage() {
         actions={
           <>
             <Select value={days} onValueChange={setDays}>
-              <SelectTrigger className="h-8 w-[130px] rounded-full"><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label={t('stats.tokenTrend')} className="h-8 w-[130px] rounded-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {/* 「今日」排在第一位并作为默认：与上方卡片的「今日」口径对齐 */}
                 <SelectItem value="1">{t('stats.today')}</SelectItem>
@@ -128,9 +128,9 @@ export default function StatsPage() {
           这种组合直接摆出来。 */}
       {summary?.usage_health && !summary.usage_health.ok && (
         <div className="flex items-start gap-2 rounded-[16px] border border-amber-500/30 bg-amber-500/[0.07] px-3.5 py-3">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
           <div className="text-[11px] leading-5">
-            <span className="font-medium text-amber-700 dark:text-amber-300">
+            <span className="font-medium text-warning-text">
               {t('stats.usageHealthTitle')}
             </span>
             <div className="text-muted-foreground">

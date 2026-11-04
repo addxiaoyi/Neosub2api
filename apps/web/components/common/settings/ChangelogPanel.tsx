@@ -17,7 +17,7 @@ const REPO_URL = 'https://github.com/ithtelab/workbuddy-manager/releases';
 const SECTION_STYLE: Record<string, string> = {
   安全: 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400',
   新增: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-  修复: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  修复: 'border-amber-500/30 bg-amber-500/10 text-warning-text',
   改进: 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400',
   说明: 'border-border bg-muted text-muted-foreground',
   计划中: 'border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-400',
@@ -155,7 +155,7 @@ function VersionBlock({
           {unreleased && (
             <Badge
               variant="outline"
-              className="h-5 border-amber-500/40 bg-amber-500/10 px-1.5 text-[10px] text-amber-600 dark:text-amber-400"
+              className="h-5 border-amber-500/40 bg-amber-500/10 px-1.5 text-[10px] text-warning-text"
             >
               {t('changelog.inProgress')}
             </Badge>
@@ -241,7 +241,7 @@ export function ChangelogPanel() {
   if (error || !data?.available) {
     return (
       <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
-        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
         <div className="space-y-1 text-xs">
           <div className="font-medium">{t('changelog.unavailable')}</div>
           <div className="text-muted-foreground">{error || data?.error}</div>

@@ -45,18 +45,27 @@ def _database_check(db) -> dict[str, Any]:
     return {"ok": True, "latency_ms": round((time.perf_counter() - started) * 1000, 2)}
 
 
-def _providers_check(registry) -> dict[str, Any]:
+def _providers_check(registry, demo=None) -> dict[str, Any]:
     """readiness 口径：至少一个「已启用且 spec 声明 ready」的 provider 才算可服务。
 
     needs_config 的 provider 即使启用也不计入 available：它还需要补齐外部进程/凭据，
     readiness 探针只在真的具备承接能力时放行。
+
+    demo 传入演示运行态时，demo_ 开头的 provider 以假上游实际存活为准，不按静态 spec 报 ready。
     """
     try:
         items: list[dict[str, Any]] = []
         enabled = available = 0
         for item in registry.list_public():
+            pid = str(item.get("id") or "")
             is_enabled = bool(item.get("enabled"))
             readiness = str(item.get("readiness") or "unknown")
+            requires = list(item.get("requires") or [])
+            if demo is not None and demo.covers(pid):
+                state = demo.status()
+                if not state["ok"]:
+                    readiness = "needs_config"
+                    requires = [state["detail"] or "演示上游不可用"]
             usable = is_enabled and readiness == "ready"
             if is_enabled:
                 enabled += 1
@@ -68,7 +77,7 @@ def _providers_check(registry) -> dict[str, Any]:
                     "enabled": is_enabled,
                     "readiness": readiness,
                     "available": usable,
-                    "requires": list(item.get("requires") or []),
+                    "requires": requires,
                 }
             )
     except Exception:
@@ -91,7 +100,9 @@ def liveness():
 def readiness(request: Request):
     checks = {
         "database": _database_check(request.app.state.db),
-        "providers": _providers_check(request.app.state.registry),
+        "providers": _providers_check(
+            request.app.state.registry, getattr(request.app.state, "demo", None)
+        ),
     }
     unhealthy = [name for name, check in checks.items() if not check["ok"]]
     body = {

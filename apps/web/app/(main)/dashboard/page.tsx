@@ -505,7 +505,7 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">{t('dashboard.connStatus')}</span>
                 {upstream.connected ? (
-                  <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                  <Badge variant="secondary" className="rounded-full text-emerald-700 dark:text-emerald-400">
                     {t('dashboard.connected')}
                   </Badge>
                 ) : (
@@ -534,7 +534,7 @@ export default function DashboardPage() {
                   {t('dashboard.globalTotalsNote')}
                 </p>
               )}
-              {upstream.error && <p className="text-[11px] text-red-500">{upstream.error}</p>}
+              {upstream.error && <p className="text-[11px] text-destructive-text">{upstream.error}</p>}
             </div>
           ) : (
             <div className="grid h-[160px] place-items-center text-xs text-muted-foreground">
@@ -616,9 +616,9 @@ export default function DashboardPage() {
                         (typeof credOf(a) !== 'number'
                           ? 'text-muted-foreground'
                           : (credOf(a) as number) <= 0
-                            ? 'text-red-600 dark:text-red-400'
+                            ? 'text-destructive-text'
                             : (credOf(a) as number) < 200
-                              ? 'text-amber-600 dark:text-amber-400'
+                              ? 'text-warning-text'
                               : 'text-foreground')
                       }
                       title={t('metric.credits')}

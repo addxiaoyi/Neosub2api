@@ -8,6 +8,17 @@
 
 清单本身不是许可证公告。许可证以各仓 `LICENSE` 文件为准，商业使用前请先看 `THIRD-PARTY-NOTICES.md`。
 
+## 许可证分层（每条记录都要按此执行）
+
+| 分层 | 上游 | 允许的接入方式 |
+| --- | --- | --- |
+| **MIT，可入主仓** | codebuddy2api、muse2api、grok-register、gptGrok2api、ZCode2api、trae2api、codar2api | 可直接合入主仓，sidecar 或仓内实现均可 |
+| **GPL-3.0 / LGPL-3.0，只能进程隔离** | opencode2api（GPL-3.0）、sub2api（LGPL-3.0） | 上游代码只允许独立进程（HTTP sidecar）隔离运行；主仓走 clean-room 自研 MIT，不复制、不链接上游代码 |
+| **PolyForm-NC，商用禁用** | qoder-switch（PolyForm Noncommercial 1.0.0） | sidecar 属禁止商用部分，仅限非商业自用；商用走自研 `qoder.py` 或移除 sidecar |
+| **无 LICENSE，商用禁用** | Deepseek2Go（All Rights Reserved） | 仅限本地自建评估，sidecar 不进主仓不分发；商用前必须移除或取得书面授权 |
+
+许可证结论的证据来源见各条记录的 `license_source`；`未声明` 一律记 `unknown`。
+
 ## 清单结构
 
 `upstreams.yaml` 顶层三个键：
@@ -28,7 +39,7 @@
 | `integration` | `in-repo-rewrite` / `sidecar` / `reference-only` / `not-integrated` | 我们和它的关系，见下一节。 |
 | `analyzed_commit` | 40 位 SHA 或 `unknown` | 分析时 `git rev-parse HEAD` 得到的真实值，不手填、不推测。 |
 | `analyzed_at` | `YYYY-MM-DD` | 首次把该 commit 读完的日期。`-Update` 时同步刷新。 |
-| `checked_at` | `YYYY-MM-DD` | 最近一次远端巡检日期。巡检脚本不写这个字段，人工确认后填写；只表示"查过 HEAD"，不表示"读过新 commit"。 |
+| `checked_at` | `YYYY-MM-DD` | 最近一次远端巡检日期。`python scripts/check_upstreams.py --update` 会把它写成运行当天，但只写**能连上远端**的仓（`status = error` 的跳过），且不碰 `analyzed_commit` / `analyzed_at`；只表示"查过 HEAD"，不表示"读过新 commit"。 |
 | `our_files` | 相对主仓根的文件列表 | 我们对应实现的适配器、服务、路由与契约文档。不存在的能力不要写。 |
 | `protocols` | 协议标识列表 | 如 `openai.chat.completions`、`anthropic.messages`、`openai.responses`。没有对外协议就写 `[]`。 |
 | `notes` | 字符串 | 语言栈、注意事项、许可证风险、未落地计划。写事实，不写猜测。 |

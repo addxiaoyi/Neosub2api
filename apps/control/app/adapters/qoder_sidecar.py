@@ -29,13 +29,14 @@ class QoderSidecarAdapter(OpenAICompatAdapter):
             "chat": True,
             "messages": True,
             "models": True,
+            "responses": True,
             "oauth": False,
             "checkin": False,
             "credits": False,
             "register": False,
             "sidecar": True,
         },
-        protocols=("openai.chat.completions", "anthropic.messages"),
+        protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
         risk_level="danger",
         risk_note="PolyForm Noncommercial 1.0.0 禁止任何商用（包括内部商业项目与托管服务）。作者书面授权前不得商用。",
         readiness="needs_config",
@@ -50,6 +51,10 @@ class QoderSidecarAdapter(OpenAICompatAdapter):
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         """标准 Anthropic 路径 /v1/messages，非流式与流式都支持。"""
         return await self._client().forward("/v1/messages", payload, stream=stream)
+
+    async def responses(self, payload: dict[str, Any], *, stream: bool):
+        """标准 OpenAI 路径 /v1/responses，非流式与流式都支持。"""
+        return await self._client().forward("/v1/responses", payload, stream=stream)
 
 
 def build(settings: Settings, base_url: str = "") -> QoderSidecarAdapter:

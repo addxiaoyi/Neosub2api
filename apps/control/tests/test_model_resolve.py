@@ -11,11 +11,14 @@ import httpx
 import pytest
 
 from app.adapters.base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
-from app.db import Database
+from app.db import Database, set_json_setting
 from app.model_resolve import (
+    CONFLICTING_HINTS,
     MODE_CATALOG,
     MODE_FALLBACK,
     MODEL_NOT_FOUND,
+    PROVIDER_DISABLED,
+    PROVIDER_NOT_FOUND,
     ModelResolutionError,
     resolve_model,
 )
@@ -214,10 +217,10 @@ class _StubRegistry:
         self._adapters = list(adapters)
         self._by_id = {adapter.spec.id: adapter for adapter in adapters}
 
-    def enabled(self) -> list[ProviderAdapter]:
+    def enabled(self, conn=None) -> list[ProviderAdapter]:
         return list(self._adapters)
 
-    def get(self, pid: str) -> ProviderAdapter:
+    def get(self, pid: str, conn=None) -> ProviderAdapter:
         adapter = self._by_id.get(pid)
         if adapter is None:
             raise ProviderError(404, f"未知的 provider：{pid}")
@@ -294,6 +297,106 @@ async def test_catalog_entry_without_capability_still_hits_501_gate(stub_db: Dat
     assert mode == MODE_CATALOG
     assert effective == "declared-model"
     assert adapter.spec.capabilities["chat"] is False
+
+
+# --- 别名链解析：循环报请求入口（不是链末端），非循环链走到尽头（model_map 写在临时库） ---
+
+
+def _set_aliases(db: Database, aliases: dict[str, str]) -> None:
+    conn = db.connect()
+    try:
+        set_json_setting(conn, "model_map", aliases)
+    finally:
+        conn.close()
+
+
+async def test_alias_cycle_two_hop_reports_entry(stub_db: Database) -> None:
+    _set_aliases(stub_db, {"alias-a": "alias-b", "alias-b": "alias-a"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha")])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "alias-a")
+    err = caught.value
+    assert err.status_code == 404
+    assert err.error["code"] == MODEL_NOT_FOUND
+    assert err.detail["model"] == "alias-a"  # 报请求入口，不是链末端 alias-b
+    assert err.detail["cycle"] == ["alias-a", "alias-b"]
+    assert "别名循环" in err.error["message"]
+    assert "alias-a" in err.error["message"]
+
+
+async def test_alias_cycle_three_hop_reports_entry(stub_db: Database) -> None:
+    _set_aliases(stub_db, {"alias-a": "alias-b", "alias-b": "alias-c", "alias-c": "alias-a"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha")])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "alias-a")
+    err = caught.value
+    assert err.status_code == 404
+    assert err.error["code"] == MODEL_NOT_FOUND
+    assert err.detail["model"] == "alias-a"
+    assert err.detail["cycle"] == ["alias-a", "alias-b", "alias-c"]
+    assert "别名循环" in err.error["message"]
+
+
+async def test_alias_self_reference_is_not_a_cycle(stub_db: Database) -> None:
+    # A→A 沿用旧口径当没有别名：终点就是 A 自己，报404 但不贴循环标签
+    _set_aliases(stub_db, {"alias-a": "alias-a"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha")])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "alias-a")
+    err = caught.value
+    assert err.status_code == 404
+    assert err.error["code"] == MODEL_NOT_FOUND
+    assert err.detail["model"] == "alias-a"
+    assert "cycle" not in err.detail
+    assert "别名循环" not in err.error["message"]
+
+
+async def test_alias_chain_to_missing_end_reports_chain_end(stub_db: Database) -> None:
+    # 非循环 A→B→C：走到尽头报 C，且不能被误判成循环
+    _set_aliases(stub_db, {"alias-a": "alias-b", "alias-b": "alias-c"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha")])
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "alias-a")
+    err = caught.value
+    assert err.status_code == 404
+    assert err.error["code"] == MODEL_NOT_FOUND
+    assert err.detail["model"] == "alias-c"
+    assert "cycle" not in err.detail
+    assert "别名循环" not in err.error["message"]
+
+
+async def test_alias_chain_resolves_through_catalog_end(stub_db: Database) -> None:
+    # 长链非循环 A→B→C→模型：沿链走到终点后照常进目录命中
+    _set_aliases(stub_db, {"alias-a": "alias-b", "alias-b": "alias-c", "alias-c": "deep-model"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha", declared=("deep-model",))])
+    adapter, effective, _mode = await resolve_model(registry, "alias-a")
+    assert adapter.spec.id == "alpha"
+    assert effective == "deep-model"
+
+
+async def test_alias_cycle_does_not_disturb_hint_order(stub_db: Database) -> None:
+    # 别名表里埋一个循环：404 存在性 → 400 冲突 → 503 停用的判定顺序不被别名改动带偏
+    _set_aliases(stub_db, {"shared-model": "shared-ring", "shared-ring": "shared-model"})
+    registry = _StubRegistry(stub_db, [_StubAdapter("alpha"), _StubAdapter("beta")])
+
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "beta/shared-model", explicit="ghost")
+    assert caught.value.status_code == 404
+    assert caught.value.error["code"] == PROVIDER_NOT_FOUND
+
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "beta/shared-model", explicit="alpha")
+    conflict = caught.value
+    assert conflict.status_code == 400
+    assert conflict.error["code"] == CONFLICTING_HINTS
+    # detail 仍是头/前缀语义，别名入口不会顶替 header_provider / prefix_provider
+    assert conflict.detail["header_provider"] == "alpha"
+    assert conflict.detail["prefix_provider"] == "beta"
+
+    with pytest.raises(ModelResolutionError) as caught:
+        await resolve_model(registry, "shared-model", explicit="alpha")
+    assert caught.value.status_code == 503
+    assert caught.value.error["code"] == PROVIDER_DISABLED
 
 
 # --- 兜底开关：独立控制面实例端到端验证（开关只能通过 env 在启动时生效） ---

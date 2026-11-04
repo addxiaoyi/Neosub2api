@@ -286,14 +286,22 @@ def settle(
     usage: dict[str, Any] | None,
     pricing: dict[str, Any] | None = None,
     billing_account_id: int | None = None,
+    failed: bool = False,
+    log_id: int | None = None,
 ) -> dict[str, Any]:
     """把一次请求的用量折成金额写流水；不 commit，由调用方与 request_logs 同一事务提交。
 
     pricing 是准入时 resolve_prices 的结果（{"at", "provider", "model", "lines"}）；
     缺失时按"未定价"处理（金额 0、estimated=1），不是错误。
+
+    failed 由调用方按「request_logs.error 是否非空」传入：断流时状态码仍是 200，
+    只看 status 分不出来，必须以错误标记为准。上游正常结束但没有 usage 不算失败。
+
+    log_id 是本次请求在 request_logs 的行 id：写进 log_id 列，
+    /api/logs 靠它精确回填逐条金额（不做 key+model+时间窗弱关联，防串账）。
     """
     zeros = {name: 0 for name in TOKEN_CLASSES}
-    if not usage and status >= 400:
+    if failed or (not usage and status >= 400):
         # 失败请求没有可计量用量，留痕交给 request_logs，不在这里造零金额行
         return {"written": False, "billed_micro": 0, "estimated": 0, "note": "", "tokens": zeros}
 
@@ -324,8 +332,8 @@ def settle(
     conn.execute(
         "INSERT INTO billing_ledger(ts, key_id, key_name, billing_account_id, provider, model, status, "
         "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
-        "billed_micro, price_snapshot_id, estimated, note) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "billed_micro, price_snapshot_id, estimated, note, log_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             ts,
             key_id,
@@ -343,6 +351,7 @@ def settle(
             snapshot_id,
             estimated,
             note,
+            int(log_id) if log_id is not None else None,
         ),
     )
     # 用量刚发生变化，顺带评估阈值；告警失败不能带走已写的流水
@@ -508,81 +517,113 @@ def check_quota(
     return None
 
 
+def _alert_for_threshold(
+    conn: sqlite3.Connection,
+    *,
+    policy: sqlite3.Row,
+    usage: dict[str, Any],
+    percent: int,
+    at: int,
+) -> dict[str, Any] | None:
+    """单条阈值：本周期首次跨线才落一行，已告警或未命中返回 None。"""
+    micro_hit = policy["limit_micro"] > 0 and (
+        usage["used_micro"] * 100 >= int(policy["limit_micro"]) * percent
+    )
+    requests_hit = policy["limit_requests"] > 0 and (
+        usage["used_requests"] * 100 >= int(policy["limit_requests"]) * percent
+    )
+    if not (micro_hit or requests_hit):
+        return None
+    if micro_hit and requests_hit:
+        # 两类都跨了只报更接近上限的那一类，避免同一阈值刷两条
+        metric = (
+            "micro"
+            if usage["used_micro"] * int(policy["limit_requests"])
+            >= usage["used_requests"] * int(policy["limit_micro"])
+            else "requests"
+        )
+    else:
+        metric = "micro" if micro_hit else "requests"
+    existing = conn.execute(
+        "SELECT id FROM quota_alerts WHERE policy_id = ? AND threshold_percent = ? "
+        "AND period_start = ?",
+        (policy["id"], percent, usage["period_start"]),
+    ).fetchone()
+    if existing is not None:
+        return None
+    conn.execute(
+        "INSERT INTO quota_alerts(policy_id, threshold_percent, window, period_start, "
+        "triggered_at, metric, used_micro, limit_micro, used_requests, limit_requests) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            policy["id"],
+            percent,
+            policy["window"],
+            usage["period_start"],
+            int(at),
+            metric,
+            usage["used_micro"],
+            int(policy["limit_micro"]),
+            usage["used_requests"],
+            int(policy["limit_requests"]),
+        ),
+    )
+    return {
+        "policy_id": policy["id"],
+        "key_id": policy["key_id"],
+        "threshold_percent": percent,
+        "window": policy["window"],
+        "period_start": usage["period_start"],
+        "triggered_at": int(at),
+        "metric": metric,
+        "used_micro": usage["used_micro"],
+        "limit_micro": int(policy["limit_micro"]),
+        "used_requests": usage["used_requests"],
+        "limit_requests": int(policy["limit_requests"]),
+    }
+
+
 def evaluate_alerts(
     conn: sqlite3.Connection, *, key_id: int | None, provider: str, model: str, at: int
 ) -> list[dict[str, Any]]:
     """跨阈值记一条告警；同策略、同阈值、同周期只记一次，周期翻转后重新允许。
 
     在 settle 写完整流水后调用，所以聚合结果天然包含本次请求的金额与次数。
+
+    逐条隔离：单条阈值（或单条策略的周期聚合）抛异常只记日志并跳过本轮，
+    同请求内的后续阈值与后续策略照常评估，失败的那条交给下一次请求重评。
     """
     if key_id is None:
         return []
     created: list[dict[str, Any]] = []
     for policy in matching_policies(conn, key_id=key_id, provider=provider, model=model):
-        usage = window_usage(conn, policy, at)
-        thresholds = conn.execute(
-            "SELECT percent FROM quota_alert_thresholds WHERE policy_id = ? ORDER BY percent",
-            (policy["id"],),
-        ).fetchall()
+        try:
+            usage = window_usage(conn, policy, at)
+            thresholds = conn.execute(
+                "SELECT percent FROM quota_alert_thresholds WHERE policy_id = ? ORDER BY percent",
+                (policy["id"],),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - 单条策略聚合失败不能带走其余策略
+            logger.exception(
+                "配额告警周期聚合失败 policy_id=%s key_id=%s provider=%s model=%s",
+                policy["id"], key_id, provider, model,
+            )
+            continue
         for threshold in thresholds:
             percent = int(threshold["percent"])
-            micro_hit = policy["limit_micro"] > 0 and (
-                usage["used_micro"] * 100 >= int(policy["limit_micro"]) * percent
-            )
-            requests_hit = policy["limit_requests"] > 0 and (
-                usage["used_requests"] * 100 >= int(policy["limit_requests"]) * percent
-            )
-            if not (micro_hit or requests_hit):
-                continue
-            if micro_hit and requests_hit:
-                # 两类都跨了只报更接近上限的那一类，避免同一阈值刷两条
-                metric = (
-                    "micro"
-                    if usage["used_micro"] * int(policy["limit_requests"])
-                    >= usage["used_requests"] * int(policy["limit_micro"])
-                    else "requests"
+            try:
+                alert = _alert_for_threshold(
+                    conn, policy=policy, usage=usage, percent=percent, at=at
                 )
-            else:
-                metric = "micro" if micro_hit else "requests"
-            existing = conn.execute(
-                "SELECT id FROM quota_alerts WHERE policy_id = ? AND threshold_percent = ? "
-                "AND period_start = ?",
-                (policy["id"], percent, usage["period_start"]),
-            ).fetchone()
-            if existing is not None:
+            except Exception:  # noqa: BLE001 - 单条阈值失败不能带走同策略后续阈值
+                logger.exception(
+                    "配额告警阈值评估失败 policy_id=%s threshold=%s key_id=%s provider=%s "
+                    "model=%s window=%s",
+                    policy["id"], percent, policy["key_id"], provider, model, policy["window"],
+                )
                 continue
-            conn.execute(
-                "INSERT INTO quota_alerts(policy_id, threshold_percent, window, period_start, "
-                "triggered_at, metric, used_micro, limit_micro, used_requests, limit_requests) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    policy["id"],
-                    percent,
-                    policy["window"],
-                    usage["period_start"],
-                    int(at),
-                    metric,
-                    usage["used_micro"],
-                    int(policy["limit_micro"]),
-                    usage["used_requests"],
-                    int(policy["limit_requests"]),
-                ),
-            )
-            created.append(
-                {
-                    "policy_id": policy["id"],
-                    "key_id": policy["key_id"],
-                    "threshold_percent": percent,
-                    "window": policy["window"],
-                    "period_start": usage["period_start"],
-                    "triggered_at": int(at),
-                    "metric": metric,
-                    "used_micro": usage["used_micro"],
-                    "limit_micro": int(policy["limit_micro"]),
-                    "used_requests": usage["used_requests"],
-                    "limit_requests": int(policy["limit_requests"]),
-                }
-            )
+            if alert is not None:
+                created.append(alert)
     return created
 
 

@@ -1,0 +1,16 @@
+# 只有 control 镜像用仓库根做 build context（dockerfile: apps/control/Dockerfile）。
+# 镜像只需要 apps/control、config、CHANGELOG.md，其余（node_modules / .git / 运行时数据 / 文档）
+# 挡在 context 外，避免把整仓上 GB 的文件传给 docker daemon。
+.git
+.github
+.runtime
+data
+docs
+deploy
+scripts
+upstreams
+providers
+apps/web
+**/node_modules
+.env
+.env.*

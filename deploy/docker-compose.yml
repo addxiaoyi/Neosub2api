@@ -7,7 +7,9 @@ name: unified-2api-local
 services:
   control:
     build:
-      context: ../apps/control
+      # context 是仓库根：Dockerfile 要按仓库布局放 app/，还要拷 config/ 与 CHANGELOG.md
+      context: ..
+      dockerfile: apps/control/Dockerfile
     env_file:
       - path: ./.env
         required: false          # 缺文件也能构建；管理员口令留空时容器首次启动随机生成
@@ -30,6 +32,8 @@ services:
       UNIFIED_FAILURE_WINDOW_MAX: ${UNIFIED_FAILURE_WINDOW_MAX:-20}
       UNIFIED_MODELS_CACHE_TTL_SEC: ${UNIFIED_MODELS_CACHE_TTL_SEC:-60}
       UNIFIED_MODEL_FALLBACK_FIRST: ${UNIFIED_MODEL_FALLBACK_FIRST:-0}
+      # 演示模式只在本机用 scripts/demo.*；容器编排强制关闭，避免反代把来源地址变成 127.0.0.1 后绕过请求级 403
+      UNIFIED_DEMO_MODE: "0"
       # sidecar 跑在宿主机上；容器内必须用 host.docker.internal 而不是 .env 里的 127.0.0.1
       CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
       CODEBUDDY_API_KEY: ${CODEBUDDY_API_KEY:-}
@@ -42,7 +46,8 @@ services:
       QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
       CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
     volumes:
-      - ../data:/data              # 仓库根 data/：SQLite 与 admin-password.txt 都落这里
+      # 只挂数据目录：SQLite 与 admin-password.txt 落仓库根 data/；应用与 config 已在镜像里
+      - ../data:/data
     ports:
       - "127.0.0.1:8010:8000"      # 宿主机 8010 → 容器 8000；只绑本机
     extra_hosts:

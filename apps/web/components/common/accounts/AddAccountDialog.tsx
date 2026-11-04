@@ -240,7 +240,7 @@ export function AddAccountDialog({
           {/* 固定尺寸，避免 loading/waiting/error 各阶段弹窗高度跳动 */}
           <div className="grid h-[212px] w-[212px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-white p-3 ring-1 ring-black/5">
             {phase === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}
-            {phase === 'error' && <AlertTriangle className="h-7 w-7 text-amber-500" />}
+            {phase === 'error' && <AlertTriangle className="h-7 w-7 text-warning-text" />}
             {(phase === 'waiting' || phase === 'success') && authUrl && (
               <QRCodeSVG value={authUrl} size={188} level="M" />
             )}
@@ -285,7 +285,7 @@ export function AddAccountDialog({
               (phase === 'success' ?
                 'text-emerald-500' :
                 phase === 'error' ?
-                  'text-red-500' :
+                  'text-destructive-text' :
                   'text-muted-foreground')
             }
           >

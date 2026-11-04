@@ -50,6 +50,9 @@ class Sub2ApiAdapter(ProviderAdapter):
         default_base_url="",
         capabilities=stub_capabilities(chat=True, messages=True, models=True),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        risk_level="warn",
+        risk_note="上游 sub2api 为 LGPL-3.0，只能进程隔离；"
+        "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
         readiness="needs_config",
         requires=(
             "先建分组与账号（/api/sub2api/groups、/api/sub2api/accounts，缺了请求直接 503）",

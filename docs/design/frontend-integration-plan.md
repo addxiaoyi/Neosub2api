@@ -2,7 +2,7 @@
 
 > 状态更新（2026-11-03）：`/tasks` 页面与相关幽灵端点（签到记录 / 任务日志 / 上游日志 / 任务执行 / 认领计划）已整体删除，L63-65/L209 关于「任务页已有入口」的现状描述不再成立；其余正文保持原样，未按代码重写。
 
-- 基准壳：`codebuddy2api` 的 `web/`（迁移后为本仓 `apps/web/`），见 [FRONTEND-BASELINE.md](file:///d:/qwq/项目/unified-2api/docs/FRONTEND-BASELINE.md)。
+- 基准壳：`codebuddy2api` 的 `web/`（迁移后为本仓 `apps/web/`），见 [FRONTEND-BASELINE.md](../../docs/FRONTEND-BASELINE.md)。
 - 目标：把 12 个上游仓库的后端能力落进基准壳界面。
 - 范围：只规划，不改 `apps/`，不写代码。
 - 数据来源：`apps/control/app/routers/*.py`（控制面已落地路由）、`apps/web/lib/api.ts`（前端已声明的接口）、`docs/providers/*.md`、各上游 README 与前端目录结构。

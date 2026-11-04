@@ -2,8 +2,8 @@
 
 > **已判定不采用，仅作存档。** 本文与其描述的落地方案、原型均未采纳；前端基准与红线见 [docs/FRONTEND-BASELINE.md](../FRONTEND-BASELINE.md)。正文保持原样，不再维护。
 
-- 方案：[ia-proposal.md](file:///d:/qwq/项目/unified-2api/docs/design/ia-proposal.md)
-- 原型：[prototype.html](file:///d:/qwq/项目/unified-2api/docs/design/prototype.html)
+- 方案：[ia-proposal.md](../../docs/design/ia-proposal.md)
+- 原型：[prototype.html](../../docs/design/prototype.html)
 - 本文回答一件事：这些结论怎么落到 `apps/web/` 的现有代码里，按改动成本排先后。
 
 ## 0. 边界

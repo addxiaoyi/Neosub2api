@@ -6,7 +6,8 @@
 ## 上游信息
 
 - 仓库：<https://github.com/jasonxu114514/opencode2api>
-- 许可：**GPL-3.0**（本仓不包含其源码，也不链接/修改它）
+- 许可：**GPL-3.0（许可证分层：只能进程隔离）**——上游代码只允许独立进程方式接入，
+  本仓不包含其源码、也不链接/修改它；主仓实现为 clean-room 自研 MIT
 - 能力：OpenCode Zen / Zen Go 的 OpenAI 与 Anthropic 兼容网关
 
 ## 主仓如何实现同等能力

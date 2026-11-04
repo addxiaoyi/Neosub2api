@@ -1,4 +1,4 @@
-# unified-2api 安全与合规审计
+# Neosub2api 安全与合规审计
 
 > 审计方式：只读代码审查 + 临时数据库运行时验证（未改动仓库业务代码，未触碰 `data/unified.db`）。
 > 快照时间：2026-11-02 17:40–17:55（Asia/Shanghai）。
@@ -119,7 +119,7 @@
 
 ## 修复状态（逐条验收，2026-11-02）
 
-> 回归基线：`apps/control` 下 `python -m pytest tests -q` → **73 passed, 3 subtests passed**（含本次新增 `tests/test_security.py` 9 项）。该数字为当次审查快照；当前基线为 `250 passed, 1 skipped, 3 subtests passed`。
+> 回归基线：`apps/control` 下 `python -m pytest tests -q` → **73 passed, 3 subtests passed**（含本次新增 `tests/test_security.py` 9 项）。该数字为当次审查快照；当前基线以 2026-11-04 全量实测为准（443 passed, 1 skipped, 0 failed, 0 xfailed，125.07 秒，收集 444 条，量级约 444）。
 > 说明：每条只写「状态 / 改了什么 / 怎么验」，未修复的一律标明原因，无静默跳过。
 
 | 编号 | 状态 | 处理内容与验证方式 |

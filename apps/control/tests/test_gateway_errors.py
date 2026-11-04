@@ -57,17 +57,26 @@ def _messages(anon: httpx.Client, key: str, model: str, *, provider: str = "code
 
 @pytest.fixture(scope="module")
 def zcode_on_fake(admin: httpx.Client, fake_base: str):
-    """把 zcode 临时指到假上游并填一把假 key，结束后还原，避免污染其它用例。"""
+    """临时启用 zcode 并指到假上游（停用 provider 已不允许调用），结束后原样还原。"""
     before = next(p for p in admin.get("/api/providers").json() if p["id"] == "zcode")
     patched = admin.patch(
-        "/api/providers/zcode", json={"base_url": fake_base, "api_key": "zcode-fake-key"}
+        "/api/providers/zcode",
+        json={"enabled": True, "base_url": fake_base, "api_key": "zcode-fake-key"},
     )
     assert patched.status_code == 200, patched.text
-    yield
-    restore_key = "***" if before["has_api_key"] else ""
-    admin.patch(
-        "/api/providers/zcode", json={"base_url": before["base_url"], "api_key": restore_key}
-    )
+    try:
+        yield
+    finally:
+        restore_key = "***" if before["has_api_key"] else ""
+        r = admin.patch(
+            "/api/providers/zcode",
+            json={
+                "enabled": bool(before["enabled"]),
+                "base_url": before["base_url"],
+                "api_key": restore_key,
+            },
+        )
+        assert r.status_code == 200, f"{r.status_code} {r.text}"
 
 
 # ---------------- 统一错误形状 ----------------

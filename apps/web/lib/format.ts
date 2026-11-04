@@ -143,7 +143,7 @@ export function expiryVisual(remainSeconds: number): ExpiryVisual {
   if (remainSeconds <= 0) {
     return {
       tier: 'expired',
-      textClass: 'text-red-600 dark:text-red-400',
+      textClass: 'text-destructive-text',
       barColor: 'var(--destructive)',
       label: t('expiry.expired'),
     };
@@ -151,7 +151,7 @@ export function expiryVisual(remainSeconds: number): ExpiryVisual {
   if (remainSeconds < 3600) {
     return {
       tier: 'urgent',
-      textClass: 'text-amber-600 dark:text-amber-400',
+      textClass: 'text-warning-text',
       barColor: '#f59e0b',
       label: t('expiry.urgent'),
     };
@@ -269,29 +269,42 @@ export function usdToMicro(usd: number): number {
  */
 export function fmtMicroUsd(micro: unknown): string {
   if (typeof micro !== 'number' || !Number.isFinite(micro)) return '—';
-  return microToUsd(micro).toLocaleString(intlLocale(), {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  });
+  return formatUsd(microToUsd(micro));
 }
 
 /** 后端已折算成美元浮点的字段，按同一口径展示 */
 export function fmtUsd(usd: number | null | undefined): string {
   if (usd === null || usd === undefined || !Number.isFinite(usd)) return '—';
-  return fmtMicroUsd(usdToMicro(usd));
+  return formatUsd(usd);
 }
 
 /**
- * 扣费金额格式化（上游 usage.credit）。
- * 单次调用常是 0.0x 量级，直接 toLocaleString 会显示成 0，因此小数值保留
- * 最多 4 位有效小数；整数则按千分位显示。
+ * 扣费金额（上游 usage.credit），同样是美元，与上面两处一个口径。
+ * 单次调用常是 0.0x 量级，此前它固定 4 位小数且不带币种，
+ * 0.000125 会印成 0.0001，与配额页同一笔钱长得不一样。
  */
 export function fmtCredit(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
-  if (v === 0) return '0';
-  if (Math.abs(v) >= 100) return Math.round(v).toLocaleString();
-  if (Math.abs(v) >= 1) return v.toFixed(2);
-  return v.toFixed(4);
+  return formatUsd(v);
+}
+
+/**
+ * 小额不丢位的小数位数：≥1 美元按常规 2 位；更小的值要保住 4 位有效数字，
+ * 0.000125 得给到 7 位小数才印得全。上限 12 位，免得拖一串 0。
+ * 固定 4 位是老实现的毛病：它把 0.000125 印成 0.0001。
+ */
+function usdFractionDigits(usd: number): number {
+  const abs = Math.abs(usd);
+  if (abs >= 1 || abs === 0) return 2;
+  return Math.min(12, Math.max(4, Math.ceil(-Math.log10(abs)) + 3));
+}
+
+/** 金额统一走这里：带币种符号、按量级给小数位，且始终是标准记数法（不出科学计数法）。 */
+function formatUsd(usd: number): string {
+  return usd.toLocaleString(intlLocale(), {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: usdFractionDigits(usd),
+  });
 }

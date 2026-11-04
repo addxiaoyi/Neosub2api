@@ -64,7 +64,7 @@ notes:
 
 请求进入 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 后按下列顺序解析：
 
-1. `x-provider` 请求头显式指定 → 用该 provider，`model` 原样，**完全跳过别名表**。现网行为保留，用于排障和强制走某家。
+1. `x-provider` 请求头显式指定 → 用该 provider，**完全跳过别名表**。现网行为保留，用于排障和强制走某家。`model` 同时带 `provider/model` 前缀时：同源（前缀与头指向同一 provider）按前缀剥离、只把裸模型名给上游；异源 → 400 `conflicting_provider_hints`（不静默取头）；头指向本地没有的 provider → 404 `provider_not_found`。判定顺序：本地存在性(404) → 冲突(400) → 停用(503)。
 2. `model` 形如 `<provider_id>/<rest>` 且前缀是已注册 provider → 用该 provider，取 `rest`，**跳过别名表**。前缀不认识时不做二次猜测。
 3. 别名精确匹配：`model.strip().lower()` 命中 `aliases` 键 → 进入候选选择。`upstream_model` 保持文件里的原始大小写（`GLM-5.3` 与 `glm-5.3` 各自按上游要求发送）。
 4. 迁移期兼容：未命中别名时读旧 `model_map`（见 [model-map-migration.md](model-map-migration.md)）。新别名优先于旧 map；同名冲突记 warning，新表胜出。

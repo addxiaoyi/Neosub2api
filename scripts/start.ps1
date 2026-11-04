@@ -35,9 +35,11 @@ function Import-DotEnv([string]$Path) {
 }
 
 Write-Step "检查 Python 运行时"
+$bundled = Join-Path $root ".runtime\python\python.exe"
 $py = $null
-foreach ($candidate in @($env:PYTHON, "python", "python3")) {
+foreach ($candidate in @($bundled, $env:PYTHON, "python", "python3")) {
     if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    if ($candidate -eq $bundled -and -not (Test-Path -LiteralPath $bundled)) { continue }
     $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
     if ($cmd) { $py = $cmd.Source; break }
 }

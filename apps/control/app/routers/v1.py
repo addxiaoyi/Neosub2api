@@ -37,13 +37,9 @@ LAST_USED_THROTTLE_SEC = 60
 DEFAULT_SSE_MAX_SECONDS = 600
 
 
-def _anonymous_allowed(request: Request) -> bool:
+def _anonymous_allowed(request: Request, conn) -> bool:
     """匿名开关：DB 配置优先，缺省回落到环境变量（默认关）。"""
-    conn = request.app.state.db.connect()
-    try:
-        cfg = get_json_setting(conn, "gateway", {})
-    finally:
-        conn.close()
+    cfg = get_json_setting(conn, "gateway", {})
     if isinstance(cfg, dict) and "allow_anonymous" in cfg:
         try:
             return parse_bool(cfg["allow_anonymous"], "allow_anonymous")
@@ -58,7 +54,7 @@ def _bearer_token(header: str) -> str:
     return header[7:].strip() if header.lower().startswith("bearer ") else header
 
 
-def _gateway_key(request: Request) -> dict[str, Any]:
+def _gateway_key(request: Request, conn) -> dict[str, Any]:
     # Anthropic 官方 SDK 默认发 x-api-key；Authorization 仍然优先且行为不变
     auth_header = request.headers.get("authorization", "").strip()
     api_key = request.headers.get("x-api-key", "").strip()
@@ -72,8 +68,8 @@ def _gateway_key(request: Request) -> dict[str, Any]:
                 code="conflicting_auth_headers",
             )
     if not auth_header and not api_key:
-        if _anonymous_allowed(request):
-            return {"id": None, "name": "anonymous"}
+        if _anonymous_allowed(request, conn):
+            return {"id": None, "name": "anonymous", "prefix": None}
         raise GatewayError(
             401,
             "缺少 Authorization: Bearer <key> 或 x-api-key",
@@ -82,37 +78,36 @@ def _gateway_key(request: Request) -> dict[str, Any]:
         )
     token = _bearer_token(auth_header) if auth_header else api_key
     digest = hashlib.sha256(token.encode()).hexdigest()
-    conn = request.app.state.db.connect()
-    try:
-        row = conn.execute(
-            "SELECT id, name FROM api_keys WHERE key_hash = ? AND enabled = 1", (digest,)
-        ).fetchone()
-        if row is None:
-            raise GatewayError(401, "无效的 API Key", type_="authentication_error", code="invalid_api_key")
-        conn.execute(
-            "UPDATE api_keys SET last_used_at = ? WHERE id = ? "
-            "AND (last_used_at IS NULL OR last_used_at < ?)",
-            (now(), row["id"], now() - LAST_USED_THROTTLE_SEC),
-        )
+    row = conn.execute(
+        # prefix 随行带出：日志写入时固化，删 key 后 join 不到仍可溯源
+        "SELECT id, name, prefix FROM api_keys WHERE key_hash = ? AND enabled = 1", (digest,)
+    ).fetchone()
+    if row is None:
+        raise GatewayError(401, "无效的 API Key", type_="authentication_error", code="invalid_api_key")
+    updated = conn.execute(
+        "UPDATE api_keys SET last_used_at = ? WHERE id = ? "
+        "AND (last_used_at IS NULL OR last_used_at < ?)",
+        (now(), row["id"], now() - LAST_USED_THROTTLE_SEC),
+    )
+    if updated.rowcount:
         conn.commit()
-        return {"id": row["id"], "name": row["name"]}
-    finally:
-        conn.close()
+    else:
+        # 节流窗口内命中 0 行不提交（省一次纯写事务）；连接是准入段共用的，
+        # 必须回滚掉隐式 BEGIN，后面的配额/价格检查不能读进这条空写事务
+        conn.rollback()
+    return {"id": row["id"], "name": row["name"], "prefix": row["prefix"]}
 
 
-def _price_snapshot(request: Request, provider: str, model: str, at: int) -> dict[str, Any] | None:
+def _price_snapshot(conn, provider: str, model: str, at: int) -> dict[str, Any] | None:
     """准入时解析一次价格并随请求冻结。
 
     计费是旁路：价格表读失败只记日志、不回滚请求；settle 侧按"未定价"记 0 元。
     """
-    conn = request.app.state.db.connect()
     try:
         lines = resolve_prices(conn, provider=provider, model=model, at=at)
     except Exception as exc:  # noqa: BLE001 - 旁路不能阻断网关
         logger.warning("价格解析失败 provider=%s model=%s：%s", provider, model, exc)
         return None
-    finally:
-        conn.close()
     return {"provider": provider, "model": model, "at": at, "lines": lines}
 
 
@@ -122,14 +117,14 @@ def _log_rejection(
     """被拒请求只留 request_logs 痕迹（现有 /api/logs 可见），不写 usage/ledger。"""
     conn.execute(
         "INSERT INTO request_logs(ts, provider, model, status, prompt_tokens, completion_tokens, "
-        "latency_ms, stream, error, key_id, key_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "latency_ms, stream, error, key_id, key_name, key_prefix) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (now(), mask_text(provider), mask_text(model), 429, 0, 0, 0, 0,
          mask_text(json.dumps(denial, ensure_ascii=False)),
-         key.get("id"), mask_text(key.get("name") or "")),
+         key.get("id"), mask_text(key.get("name") or ""), key.get("prefix")),
     )
 
 
-def _quota_guard(request: Request, key: dict[str, Any], provider: str, model: str) -> None:
+def _quota_guard(conn, key: dict[str, Any], provider: str, model: str) -> None:
     """准入校验：超限直接 429，必须在打上游之前完成。
 
     与计费旁路同一容错口径：配额读库失败只记日志、不阻断网关。
@@ -138,7 +133,6 @@ def _quota_guard(request: Request, key: dict[str, Any], provider: str, model: st
     if key_id is None:  # 匿名请求没有密钥归属，策略只按 u2a_ 密钥生效
         return
     denial: dict[str, Any] | None = None
-    conn = request.app.state.db.connect()
     try:
         denial = check_quota(conn, key_id=int(key_id), provider=provider, model=model, at=now())
         if denial is not None:
@@ -146,9 +140,9 @@ def _quota_guard(request: Request, key: dict[str, Any], provider: str, model: st
             conn.commit()
     except Exception as exc:  # noqa: BLE001 - 查询失败不能打挂请求
         logger.warning("配额检查失败 key_id=%s：%s", key_id, exc)
+        # 共用连接：残留事务在这里回滚，等价旧实现各开各关时 close 的隐式回滚
+        conn.rollback()
         return
-    finally:
-        conn.close()
     if denial is not None:
         # 结构化 detail：窗口 / 指标 / 当前用量 / 上限 / 重置时间，不是笼统的「配额不足」
         raise GatewayError(
@@ -161,7 +155,7 @@ def _quota_guard(request: Request, key: dict[str, Any], provider: str, model: st
         )
 
 
-def _failure_guard(request: Request, key: dict[str, Any], provider: str, model: str) -> None:
+def _failure_guard(request: Request, conn, key: dict[str, Any], provider: str, model: str) -> None:
     """失败请求限流：窗口内失败过多就 429，插在配额校验之后、打上游之前。
 
     只拦失败刷量，不写 usage/ledger；被拒请求本身落 request_logs(status=429)，
@@ -174,7 +168,6 @@ def _failure_guard(request: Request, key: dict[str, Any], provider: str, model: 
     window_sec = int(getattr(settings, "failure_window_sec", 60))
     max_failures = int(getattr(settings, "failure_window_max", 20))
     denial: dict[str, Any] | None = None
-    conn = request.app.state.db.connect()
     try:
         denial = check_failure_rate(
             conn, key_id=int(key_id), window_sec=window_sec, max_failures=max_failures, at=now()
@@ -184,9 +177,9 @@ def _failure_guard(request: Request, key: dict[str, Any], provider: str, model: 
             conn.commit()
     except Exception as exc:  # noqa: BLE001 - 限流读库失败不能打挂请求
         logger.warning("失败限流检查失败 key_id=%s：%s", key_id, exc)
+        # 同 _quota_guard：共用连接要显式清掉残留事务
+        conn.rollback()
         return
-    finally:
-        conn.close()
     if denial is not None:
         raise GatewayError(
             429,
@@ -216,12 +209,12 @@ def _record(
     ts = now()
     conn = request.app.state.db.connect()
     try:
-        conn.execute(
+        log_cur = conn.execute(
             "INSERT INTO request_logs(ts, provider, model, status, prompt_tokens, completion_tokens, "
-            "latency_ms, stream, error, key_id, key_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "latency_ms, stream, error, key_id, key_name, key_prefix) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (ts, mask_text(provider), mask_text(model), status, prompt_tokens, completion_tokens,
              latency_ms, 1 if stream else 0, mask_text(error) if error else error,
-             key.get("id"), mask_text(key.get("name") or "")),
+             key.get("id"), mask_text(key.get("name") or ""), key.get("prefix")),
         )
         record_usage(
             conn,
@@ -247,6 +240,9 @@ def _record(
                 status=status,
                 usage=usage,
                 pricing=pricing,
+                failed=bool(error),
+                # 日志行 id 即关联键：流水按它精确挂到本请求上，日志接口无需猜关联
+                log_id=int(log_cur.lastrowid),
             )
         except Exception:  # noqa: BLE001 - 计费失败不能带走已产生的日志
             logger.exception("计费 settle 失败 provider=%s model=%s，保留日志与原始 usage", provider, model)
@@ -319,7 +315,7 @@ async def _drain_reply(reply: Any, limit: int = 8192) -> bytes:
     return body[:limit]
 
 
-async def _resolve(request: Request, payload: dict[str, Any], capability: str):
+async def _resolve(request: Request, payload: dict[str, Any], capability: str, conn):
     model = str(payload.get("model") or "").strip()
     if not model:
         raise GatewayError(400, "请求体缺少 model", type_="invalid_request_error", code="missing_model")
@@ -333,6 +329,7 @@ async def _resolve(request: Request, payload: dict[str, Any], capability: str):
             fallback_first=bool(getattr(request.app.state.settings, "model_fallback_first", False)),
             # 兜底日志的关联 id：客户端带 x-request-id 就沿用，否则现生成一个短 id
             request_id=(request.headers.get("x-request-id") or "").strip() or uuid.uuid4().hex[:12],
+            conn=conn,
         )
     except ProviderError as exc:
         raise from_provider_error(exc) from exc
@@ -351,16 +348,23 @@ async def _resolve(request: Request, payload: dict[str, Any], capability: str):
 
 
 async def _proxy(request: Request, capability: str):
-    key = _gateway_key(request)
-    payload = await _json_payload(request)
-    adapter, effective = await _resolve(request, payload, capability)
-    payload["model"] = effective
-    # 先校验额度再冻结价格：被拒请求不产生快照与流水，通过后仍按原逻辑冻结价格
-    _quota_guard(request, key, adapter.spec.id, effective)
-    _failure_guard(request, key, adapter.spec.id, effective)
-    stream = bool(payload.get("stream"))
-    # 价格在准入时定格：请求进行中改价（新插入更晚生效的行）不会改变这笔请求的金额
-    pricing = _price_snapshot(request, adapter.spec.id, effective, now())
+    # 准入段（鉴权/解析/配额/失败限流/取价）共用一条连接：这些小表读各开各关时，
+    # 建连+首查+关连接约 1.4ms/次、SQL 本身不到 0.05ms（见 PERFORMANCE.md 3.3）。
+    # 连接随请求创建、随请求关闭，不跨请求复用；整段在事件循环线程内同步使用。
+    conn = request.app.state.db.connect()
+    try:
+        key = _gateway_key(request, conn)
+        payload = await _json_payload(request)
+        adapter, effective = await _resolve(request, payload, capability, conn)
+        payload["model"] = effective
+        # 先校验额度再冻结价格：被拒请求不产生快照与流水，通过后仍按原逻辑冻结价格
+        _quota_guard(conn, key, adapter.spec.id, effective)
+        _failure_guard(request, conn, key, adapter.spec.id, effective)
+        stream = bool(payload.get("stream"))
+        # 价格在准入时定格：请求进行中改价（新插入更晚生效的行）不会改变这笔请求的金额
+        pricing = _price_snapshot(conn, adapter.spec.id, effective, now())
+    finally:
+        conn.close()
     started = time.perf_counter()
     try:
         if capability == "chat":
@@ -478,7 +482,11 @@ async def openai_responses(request: Request):
 
 @router.get("/v1/models")
 async def openai_models(request: Request):
-    _gateway_key(request)
+    conn = request.app.state.db.connect()
+    try:
+        _gateway_key(request, conn)
+    finally:
+        conn.close()
     data: list[dict[str, Any]] = []
     for adapter in request.app.state.registry.enabled():
         if not adapter.spec.capabilities.get("models"):

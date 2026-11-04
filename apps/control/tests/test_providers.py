@@ -50,6 +50,16 @@ def _by_id(items: list[dict], pid: str) -> dict:
     raise KeyError(pid)
 
 
+@pytest.fixture
+def restore_codebuddy_base_url(admin: httpx.Client):
+    """收尾把 codebuddy.base_url 拉回进用例前的值，避免污染同 session 后续用例。"""
+    before = _by_id(admin.get("/api/providers").json(), "codebuddy").get("base_url") or ""
+    try:
+        yield
+    finally:
+        admin.patch("/api/providers/codebuddy", json={"base_url": before})
+
+
 def test_spec_to_public_exposes_readiness() -> None:
     spec = ProviderSpec(
         id="demo",
@@ -118,34 +128,36 @@ def test_patch_enable_disable(admin: httpx.Client) -> None:
     before = admin.get("/api/providers")
     codebuddy = _by_id(before.json(), "codebuddy")
     was_enabled = bool(codebuddy.get("enabled"))
+    was_opencode = bool(_by_id(before.json(), "opencode").get("enabled"))
 
-    # 关掉
-    off = admin.patch("/api/providers/codebuddy", json={"enabled": False})
-    assert off.status_code == 200, f"patch off: {off.status_code} {off.text}"
-    assert off.json()["enabled"] is False
+    try:
+        # 关掉
+        off = admin.patch("/api/providers/codebuddy", json={"enabled": False})
+        assert off.status_code == 200, f"patch off: {off.status_code} {off.text}"
+        assert off.json()["enabled"] is False
 
-    check = admin.get("/api/providers")
-    assert _by_id(check.json(), "codebuddy")["enabled"] is False
+        check = admin.get("/api/providers")
+        assert _by_id(check.json(), "codebuddy")["enabled"] is False
 
-    # 开回原值
-    on = admin.patch("/api/providers/codebuddy", json={"enabled": was_enabled})
-    assert on.status_code == 200
-    assert bool(on.json()["enabled"]) is was_enabled
+        # 开回原值
+        on = admin.patch("/api/providers/codebuddy", json={"enabled": was_enabled})
+        assert on.status_code == 200
+        assert bool(on.json()["enabled"]) is was_enabled
 
-    # 验证 opencode（初始 enabled=0）也能翻
-    off2 = admin.patch("/api/providers/opencode", json={"enabled": True})
-    assert off2.status_code == 200, f"opencode patch: {off2.status_code} {off2.text}"
-    assert off2.json()["enabled"] is True
-    admin.patch("/api/providers/opencode", json={"enabled": False})
+        # 验证 opencode（初始 enabled=0）也能翻
+        off2 = admin.patch("/api/providers/opencode", json={"enabled": True})
+        assert off2.status_code == 200, f"opencode patch: {off2.status_code} {off2.text}"
+        assert off2.json()["enabled"] is True
+    finally:
+        admin.patch("/api/providers/codebuddy", json={"enabled": was_enabled})
+        admin.patch("/api/providers/opencode", json={"enabled": was_opencode})
 
 
-def test_patch_base_url_takes_effect(admin: httpx.Client, fake_base: str) -> None:
+def test_patch_base_url_takes_effect(
+    admin: httpx.Client, fake_base: str, restore_codebuddy_base_url: None
+) -> None:
     # codebuddy 初始 base_url 在环境变量里已经指向 fake_base；
     # 我们改成一个假的占位，再改回来。registry.update() 立即应用到进程内适配器。
-    snapshot = admin.get("/api/providers").json()
-    codebuddy = _by_id(snapshot, "codebuddy")
-    original = codebuddy.get("base_url") or fake_base
-
     placeholder = "http://127.0.0.1:19999"
     changed = admin.patch("/api/providers/codebuddy", json={"base_url": placeholder})
     assert changed.status_code == 200, f"patch base_url: {changed.status_code} {changed.text}"
@@ -155,7 +167,7 @@ def test_patch_base_url_takes_effect(admin: httpx.Client, fake_base: str) -> Non
     body = admin.get("/api/providers").json()
     assert _by_id(body, "codebuddy")["base_url"] == placeholder
 
-    # 改回原值（环境变量 fake_base）
+    # 改回环境变量地址；用例前的库内状态由 restore_codebuddy_base_url 收尾还原
     restore = admin.patch("/api/providers/codebuddy", json={"base_url": fake_base})
     assert restore.status_code == 200
     assert restore.json()["base_url"] == fake_base

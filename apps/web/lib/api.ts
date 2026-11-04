@@ -239,7 +239,16 @@ export const tokenApi = {
 
 /* ── 日志 ───────────────────────────────────────────── */
 export const logApi = {
-  list: (params: Record<string, unknown>) => get<Page<RequestLog>>('/api/logs', params),
+  /** 形参键须与后端 logs.list_logs 的 query 参数同名，contract_check 逐键对账 */
+  list: (params: {
+    page?: number;
+    size?: number;
+    key_id?: string;
+    provider?: string;
+    model?: string;
+    status?: string;
+    days?: number;
+  }) => get<Page<RequestLog>>('/api/logs', params),
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
 };
 

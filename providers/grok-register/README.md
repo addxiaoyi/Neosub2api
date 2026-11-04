@@ -7,7 +7,7 @@
 ## 上游信息
 
 - 仓库：<https://github.com/kaibush/grok-register>
-- 许可：**MIT**
+- 许可：**MIT（许可证分层：可入主仓）**
 - 形态：FastAPI + React + Camoufox/CloakBrowser 的 Web 注册控制台
 - 关键 API：`/api/health`、`/api/stats`、`/api/job/start|stop`、`/api/job/logs`、
   `/api/accounts`、`/api/config`、`/api/connectivity`

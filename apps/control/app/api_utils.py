@@ -7,6 +7,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from .key_prefix import KEY_PREFIX
+
 
 def now() -> int:
     return int(time.time())
@@ -38,7 +40,7 @@ def mask_secret(value: str) -> str:
     return f"{text[:4]}…{text[-4:]}"
 
 
-_KEY_IN_TEXT = re.compile(r"u2a_[A-Za-z0-9_-]{4,}")
+_KEY_IN_TEXT = re.compile(re.escape(KEY_PREFIX) + r"[A-Za-z0-9_-]{4,}")
 
 
 def mask_text(value: str) -> str:

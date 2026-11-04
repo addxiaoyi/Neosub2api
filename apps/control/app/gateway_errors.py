@@ -56,6 +56,19 @@ _ERROR_CODES = {
     504: "upstream_timeout",
 }
 
+PROTOCOL_OPENAI = "openai"
+PROTOCOL_ANTHROPIC = "anthropic"
+
+# 框架级错误（未匹配路由、方法不允许）的对外文案；细节留在服务端日志里
+_FRAMEWORK_MESSAGES = {
+    404: "接口不存在，请检查请求路径",
+    405: "该接口不支持当前请求方法",
+}
+_FRAMEWORK_CODES = {
+    404: "route_not_found",
+    405: "method_not_allowed",
+}
+
 # Anthropic 协议的错误类型枚举（/v1/messages 用；没有 billing 对应，402 归 invalid_request_error）
 _ANTHROPIC_TYPES = {
     400: "invalid_request_error",
@@ -89,6 +102,30 @@ def error_type(status_code: int) -> str:
 
 def error_code(status_code: int) -> str:
     return _ERROR_CODES.get(status_code, "upstream_error")
+
+
+def protocol_for_path(path: str) -> str:
+    """按路径判协议族：只有 /v1/messages 说 Anthropic，其余 /v1 一律 OpenAI。
+
+    404/405 这类框架级错误也必须遵守同一套外壳，否则 SDK 拿不到结构化 error。
+    """
+    return PROTOCOL_ANTHROPIC if path.startswith("/v1/messages") else PROTOCOL_OPENAI
+
+
+def framework_payload(path: str, status_code: int, detail: Any = None) -> dict[str, Any]:
+    """框架级错误（未匹配路由 404、方法不允许 405）按端点协议出壳。
+
+    OpenAI 壳保留兼容字段 detail；Anthropic 壳只给顶层 type + error，两种壳不混用。
+    """
+    message = _FRAMEWORK_MESSAGES.get(status_code)
+    if message is None:
+        message = detail if isinstance(detail, str) and detail else "请求失败"
+    code = _FRAMEWORK_CODES.get(status_code, "route_error")
+    if protocol_for_path(path) == PROTOCOL_ANTHROPIC:
+        inner_type = "not_found_error" if status_code == 404 else "invalid_request_error"
+        return {"type": "error", "error": {"type": inner_type, "message": message, "code": code}}
+    error = {"message": message, "type": "invalid_request_error", "param": None, "code": code}
+    return {"error": error, "detail": message}
 
 
 def parse_upstream_error(body: bytes) -> tuple[str | None, str | None]:
@@ -130,6 +167,9 @@ class GatewayError(HTTPException):
         }
         if provider:
             self.error["provider"] = provider
+        elif isinstance(detail, dict) and isinstance(detail.get("provider"), str) and detail["provider"]:
+            # Anthropic 壳没有 detail，OpenAI 壳的 detail.provider 要对称下沉到 error.provider
+            self.error["provider"] = detail["provider"]
         if upstream_status is not None:
             self.error["upstream_status"] = upstream_status
         if upstream_code is not None:
@@ -145,10 +185,19 @@ class GatewayError(HTTPException):
         return {"error": self.error, "detail": self.detail}
 
     def anthropic_payload(self) -> dict[str, Any]:
-        """Anthropic 协议（messages）：顶层 type=error，厂商信息作为 error 的附加键。"""
+        """Anthropic 协议（messages）：顶层 type=error，厂商信息作为 error 的附加键。
+
+        code 与 OpenAI 壳对称：两种协议的同一错误必须能拿到同一个 error.code。
+        """
+        # provider 被停用是配置问题而非过载，重试无用，不能映射成 overloaded_error
+        if self.status_code == 503 and self.error.get("code") == "provider_disabled":
+            inner_type = "api_error"
+        else:
+            inner_type = _ANTHROPIC_TYPES.get(self.status_code, "api_error")
         inner = {
-            "type": _ANTHROPIC_TYPES.get(self.status_code, "api_error"),
+            "type": inner_type,
             "message": self.error["message"],
+            "code": self.error["code"],
             **self.extra_fields(),
         }
         return {"type": "error", "error": inner}

@@ -204,7 +204,7 @@ export default function PricingPage() {
           <div className="space-y-1.5">
             <Label className="text-xs">{t('pricing.colProvider')}</Label>
             <Select value={rProvider} onValueChange={setRProvider}>
-              <SelectTrigger className="h-9">
+              <SelectTrigger aria-label={t('pricing.colProvider')} className="h-9">
                 <SelectValue placeholder={t('pricing.providerPlaceholder')} />
               </SelectTrigger>
               <SelectContent>
@@ -228,6 +228,7 @@ export default function PricingPage() {
             <Input
               className="h-9"
               type="datetime-local"
+              aria-label={t('pricing.resolveAt')}
               value={rAt}
               onChange={(e) => setRAt(e.target.value)}
             />
@@ -273,7 +274,7 @@ export default function PricingPage() {
                         </TableCell>
                         <TableCell className="pr-4 text-right tabular-nums">
                           {line ? `$${line.price_usd_per_1m}` : (
-                            <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">
+                            <Badge variant="secondary" className="rounded-full text-warning-text">
                               {t('pricing.resolveMissing')}
                             </Badge>
                           )}
@@ -285,7 +286,7 @@ export default function PricingPage() {
               </Table>
             </div>
             {resolved.missing.length > 0 && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              <p className="text-[11px] text-warning-text">
                 {t('pricing.resolveMissingHint', {list: resolved.missing.join(', ')})}
               </p>
             )}
@@ -309,7 +310,7 @@ export default function PricingPage() {
             placeholder={t('pricing.filterModel')}
           />
           <Select value={fClass} onValueChange={setFClass}>
-            <SelectTrigger className="h-9">
+            <SelectTrigger aria-label={t('pricing.colClass')} className="h-9">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -399,7 +400,7 @@ export default function PricingPage() {
                 <div className="space-y-1.5">
                   <Label>{t('pricing.colClass')}</Label>
                   <Select value={form.token_class} onValueChange={(v) => setForm({...form, token_class: v})}>
-                    <SelectTrigger>
+                    <SelectTrigger aria-label={t('pricing.colClass')}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -425,6 +426,7 @@ export default function PricingPage() {
                 <Label>{t('pricing.colEffectiveFrom')}</Label>
                 <Input
                   type="datetime-local"
+                  aria-label={t('pricing.colEffectiveFrom')}
                   value={form.at}
                   onChange={(e) => setForm({...form, at: e.target.value})}
                 />
@@ -471,7 +473,7 @@ export default function PricingPage() {
             {preview && preview.errors.length > 0 && (
               <div className="scroll-slim max-h-40 space-y-1 overflow-y-auto px-5 pb-4">
                 {preview.errors.map((e, i) => (
-                  <p key={i} className="font-mono text-[11px] text-red-600 dark:text-red-400">{e}</p>
+                  <p key={i} className="font-mono text-[11px] text-destructive-text">{e}</p>
                 ))}
               </div>
             )}

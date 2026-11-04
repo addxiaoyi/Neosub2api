@@ -137,34 +137,34 @@ export default function KeysPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colPrefix')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colCreated')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colLastUsed')}</TableHead>
-              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
+              <TableHead scope="col" className="pl-4 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
+              <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('keys.colPrefix')}</TableHead>
+              <TableHead scope="col" className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
+              <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('keys.colCreated')}</TableHead>
+              <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('keys.colLastUsed')}</TableHead>
+              {isAdmin && <TableHead scope="col" className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
             {keys.map((k) => (
               <TableRow key={k.id} className="border-b border-border/40">
                 <TableCell className="pl-4 text-sm font-medium">{k.name}</TableCell>
-                <TableCell className="font-mono text-xs text-muted-foreground">{k.prefix}…</TableCell>
+                <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{k.prefix}…</TableCell>
                 <TableCell>
                   {!k.enabled ? (
                     <Badge variant="secondary" className="rounded-full text-muted-foreground">{t('keys.badgeDisabled')}</Badge>
                   ) : (
-                    <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{t('keys.badgeOk')}</Badge>
+                    <Badge variant="secondary" className="rounded-full text-emerald-700 dark:text-emerald-400">{t('keys.badgeOk')}</Badge>
                   )}
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{fmtDateTime(k.created_at)}</TableCell>
-                <TableCell className="text-xs text-muted-foreground">
+                <TableCell className="hidden text-xs text-muted-foreground md:table-cell">{fmtDateTime(k.created_at)}</TableCell>
+                <TableCell className="hidden text-xs text-muted-foreground md:table-cell">
                   {k.last_used_at ? fmtDateTime(k.last_used_at) : t('keys.neverUsed')}
                 </TableCell>
                 {isAdmin && (
                   <TableCell className="pr-4">
                     <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('keys.edit')} onClick={() => openEdit(k)}>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('keys.edit')} aria-label={t('keys.edit')} onClick={() => openEdit(k)}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
                       <Button
@@ -172,6 +172,7 @@ export default function KeysPage() {
                         size="icon"
                         className="h-7 w-7 rounded-md"
                         title={k.enabled ? t('keys.disable') : t('keys.enable')}
+                        aria-label={k.enabled ? t('keys.disable') : t('keys.enable')}
                         onClick={() => toggle(k)}
                       >
                         {k.enabled ? <Ban className="h-3.5 w-3.5" /> : <CircleCheck className="h-3.5 w-3.5" />}
@@ -187,7 +188,7 @@ export default function KeysPage() {
                           load();
                         }}
                         trigger={
-                          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('keys.delete')}>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-destructive-text hover:text-destructive-text" title={t('keys.delete')} aria-label={t('keys.delete')}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         }
@@ -228,8 +229,8 @@ export default function KeysPage() {
           </DialogHeader>
           <DialogBody>
             <div className="space-y-1.5 px-6 pb-2">
-              <Label className="text-[11px] text-muted-foreground">{t('keys.name')}</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('keys.namePlaceholder')} />
+              <Label htmlFor="key-name" className="text-[11px] text-muted-foreground">{t('keys.name')}</Label>
+              <Input id="key-name" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('keys.namePlaceholder')} />
             </div>
           </DialogBody>
           <DialogFooter>

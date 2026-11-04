@@ -73,8 +73,8 @@ difficulty 取 `1 / 10 / 1000 / 100000 / 1000000`，合成的 challenge/prefix�
 
 ### 6. 仓内现状（代理形态与端口）
 
-- 适配器只是 HTTP 转发，Anthropic 路径要重写成 `/anthropic/v1/messages`：[deepseek_sidecar.py:47-51](file:///D:/qwq/%E9%A1%B9%E7%9B%AE/unified-2api/apps/control/app/adapters/deepseek_sidecar.py#L47-L51)
-- 仓内默认 base URL 是 `http://127.0.0.1:5001`：[config.py:81](file:///D:/qwq/%E9%A1%B9%E7%9B%AE/unified-2api/apps/control/app/config.py#L81)、[config.py:109](file:///D:/qwq/%E9%A1%B9%E7%9B%AE/unified-2api/apps/control/app/config.py#L109)
+- 适配器只是 HTTP 转发，Anthropic 路径要重写成 `/anthropic/v1/messages`：[deepseek_sidecar.py:47-51](../../apps/control/app/adapters/deepseek_sidecar.py#L47-L51)
+- 仓内默认 base URL 是 `http://127.0.0.1:5001`：[config.py:81](../../apps/control/app/config.py#L81)、[config.py:109](../../apps/control/app/config.py#L109)
 - 上游默认端口是 `5001`（`PORT` 可覆盖）：`main.go:1396-1399`
   → 两处默认值已对齐（仓内早期版本为 7872；从旧版升级且 .env 里写过 7872 的，需同步改为 5001 或给 sidecar 设 `PORT=7872`）。
 - 上游 Anthropic 流式未实现（直接 501）：`main.go:1237-1241`
@@ -115,7 +115,7 @@ difficulty 取 `1 / 10 / 1000 / 100000 / 1000000`，合成的 challenge/prefix�
 ## 继续 sidecar 的维持方案与部署要求（B 的运维口径）
 
 **形态**
-- 上游进程独立运行（Go + Wazero），仓内只保留 [deepseek_sidecar.py](file:///D:/qwq/%E9%A1%B9%E7%9B%AE/unified-2api/apps/control/app/adapters/deepseek_sidecar.py) 做 HTTP 代理。
+- 上游进程独立运行（Go + Wazero），仓内只保留 [deepseek_sidecar.py](../../apps/control/app/adapters/deepseek_sidecar.py) 做 HTTP 代理。
 - 仓内**不携带** `module.wasm`、不携带上游源码/二进制；由使用者自行准备。
 
 **部署清单**

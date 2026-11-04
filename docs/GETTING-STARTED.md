@@ -20,7 +20,7 @@
 cp .env.example .env
 ```
 
-`.env` 里的每个变量（解析逻辑在 `apps/control/app/config.py`，启动时读一次）：
+`.env` 里的每个变量（解析逻辑在 `apps/control/app/config.py`，启动时从进程环境读一次）。仓库里没有 dotenv 加载：`.env` 只被 `scripts/start.*`、`scripts/demo.*` 与 docker compose 消费，第 4 节直接跑 `python -m uvicorn` 时它不生效——想用 `.env` 就改用 `scripts\start.ps1` / `bash scripts/start.sh`：
 
 | 变量 | 默认值 | 说明 | 什么时候必须改 |
 | --- | --- | --- | --- |
@@ -43,8 +43,24 @@ cp .env.example .env
 | `UNIFIED_MODEL_FALLBACK_FIRST` | `0` | 未知模型名是否兜底到首家启用的、支持该端点能力位的 provider | 默认 `0`：404 `model_not_found`（严格模式）；设 `1` 恢复旧行为，只影响「一家都没命中」，多家命中仍是 400 `ambiguous_model` |
 | `UNIFIED_FAILURE_WINDOW_SEC` | `60` | 失败请求滑动窗口长度（秒） | 与下面一项同时 `> 0` 才生效；任一项为 `0` 即关闭失败限流 |
 | `UNIFIED_FAILURE_WINDOW_MAX` | `20` | 窗口内失败请求上限（按密钥计数） | 同上；调高可减少误伤，调低更早拦截刷量 |
+| `UNIFIED_HOST` | `127.0.0.1` | 控制面监听地址 | 本机保持回环；容器内由 Dockerfile/compose 固定为 `0.0.0.0` |
+| `UNIFIED_PORT` | `8010` | 控制面监听端口 | 宿主机约定 8010；容器内固定 `8000` |
+| `UNIFIED_ALLOW_PRIVATE_UPSTREAMS` | `false` | 是否放行上游指向环回/私网/链路本地 | 内网 sidecar 场景置 `1`；云元数据地址始终拒绝 |
+| `UNIFIED_SSE_MAX_SECONDS` | `600` | 单请求流式响应最大时长（秒），`0` 不限 | 上游长流被截断时调大 |
+| `UNIFIED_ENABLE_DOCS` | `false` | 是否开放 `/docs`、`/openapi.json`、`/redoc` | 生产保持 `false` |
+| `UNIFIED_LOG_LEVEL` | `info` | uvicorn 启动日志级别 | 仅 `python -m app.main` 入口读取，`uvicorn` CLI 启动时忽略 |
+| `UNIFIED_LOG_FORMAT` | `text` | 访问日志格式 | 采集系统要 JSON 时设 `json` |
+| `UNIFIED_UPSTREAM_MAX_CONNECTIONS` | `100` | 每个上游 client 的连接上限 | 高并发时调大 |
+| `UNIFIED_UPSTREAM_MAX_KEEPALIVE` | `50` | 每个上游 client 的 keepalive 连接数 | 按需 |
+| `TRAE_SIDECAR_BASE` | `http://127.0.0.1:7871` | Trae sidecar 地址 | sidecar 未启动时该 provider 显示不可达 |
+| `DEEPSEEK_SIDECAR_BASE` | `http://127.0.0.1:5001` | Deepseek2Go sidecar 地址（上游默认端口 5001） | 自行改 sidecar 端口时同步 |
+| `QODER_SIDECAR_BASE` | `http://127.0.0.1:7873` | qoder sidecar 地址 | 同上 |
+| `CODAR_SIDECAR_BASE` | `http://127.0.0.1:8801` | codar2api sidecar 地址（上游不在主仓，需自行 clone 启动） | 同上 |
+| `UNIFIED_DEMO_MODE` | `false` | 演示模式（假上游 + 演示数据） | 只用 `scripts/demo.*` 启动；三份 compose 强制 `0`，见 [DEMO.md](DEMO.md) |
 
-前端还有两个构建期变量（不进 `.env` 也能跑，见 `apps/web/next.config.ts`）：
+根 `docker-compose.yml` 与 `deploy/` 编排都会透传 `UNIFIED_LOG_LEVEL`、`UNIFIED_LOG_FORMAT`、`UNIFIED_ENABLE_DOCS`、`UNIFIED_UPSTREAM_MAX_CONNECTIONS`、`UNIFIED_UPSTREAM_MAX_KEEPALIVE` 这 5 个键（根 compose 走 `${VAR:-默认值}` 插值读根 `.env`，deploy/ 走 `env_file` 读 `deploy/.env`），改完重启 control 生效。`UNIFIED_BIND_HOST` 只被根 compose 用于端口映射（默认 `127.0.0.1`），不是控制面进程变量。
+
+前端还有两个构建期变量（放 `apps/web/.env`，模板见 `apps/web/.env.example`——next 只读自己目录的 `.env`，根 `.env` 里的 `NEXT_PUBLIC_*` 不生效；不设置也能跑，见 `apps/web/next.config.ts`）：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |

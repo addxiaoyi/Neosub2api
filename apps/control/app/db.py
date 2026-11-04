@@ -170,10 +170,12 @@ CREATE TABLE IF NOT EXISTS billing_ledger(
   billed_micro INTEGER NOT NULL DEFAULT 0,         -- 定格金额 micro-USD，只增不改成负数（退款走负行）
   price_snapshot_id INTEGER,                       -- 指向 price_book_snapshots.id
   estimated INTEGER NOT NULL DEFAULT 0,            -- 1=金额不完整/为估值（命中未定价档）
-  note TEXT NOT NULL DEFAULT ''                    -- usage_missing / unpriced:input,output / ...
+  note TEXT NOT NULL DEFAULT '',                   -- usage_missing / unpriced:input,output / ...
+  log_id INTEGER                                   -- 关联 request_logs.id（settle 写入），/api/logs 按此精确回填逐条金额
 );
 CREATE INDEX IF NOT EXISTS idx_billing_ledger_ts ON billing_ledger(ts);
-CREATE INDEX IF NOT EXISTS idx_billing_ledger_key ON billing_ledger(key_id, ts);
+-- 覆盖 unscoped 配额聚合：SUM(billed_micro) 不回表（实测乱序 20 万行 1978ms -> 22ms）
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_key ON billing_ledger(key_id, ts, billed_micro);
 CREATE INDEX IF NOT EXISTS idx_billing_ledger_account ON billing_ledger(billing_account_id, ts);
 
 -- ===== M3-2 配额域：按网关密钥（u2a_）设日/月额度，可再按 provider/模型收窄 =====
@@ -263,6 +265,9 @@ class Database:
         _restrict(path.parent, 0o700)
         conn = self.connect()
         try:
+            # journal_mode 是库文件头里的持久属性，建库时设一次即可；以前每条连接
+            # 重复设一遍，在已 WAL 的库上是纯往返（实测 0.7ms/次，含首触 -shm）
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             # M3-1 的 price_books / price_book_snapshots / billing_ledger 是纯新表，
             # 靠 SCHEMA 里的 CREATE TABLE IF NOT EXISTS 自动补到已有库，不需要 ALTER。
@@ -273,8 +278,14 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
             _ensure_column(conn, "request_logs", "key_id", "INTEGER")
             _ensure_column(conn, "request_logs", "key_name", "TEXT NOT NULL DEFAULT ''")
+            # 前缀写时固化：删 key 后历史日志仍要能回答「这条请求是哪个 key 发的」；
+            # 老行为 NULL，读取端回退 join，两边都拿不到才给 null
+            _ensure_column(conn, "request_logs", "key_prefix", "TEXT")
             # 失败限流按 (key_id, ts) 聚合 request_logs，索引让窗口查询不退化成全表扫描
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_key_ts ON request_logs(key_id, ts)")
+            # 逐条扣费关联键：老库 billing_ledger 没有 log_id，补完列再建索引（同 request_logs 的顺序）
+            _ensure_column(conn, "billing_ledger", "log_id", "INTEGER")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_billing_ledger_log ON billing_ledger(log_id)")
             # F2 缺陷修复：空池拒绝也要留痕，给流水加可空的原因字段
             _ensure_column(conn, "sub2_ledger", "reason", "TEXT")
             # M2 起 codebuddy 默认指向管理端 7864（M1 默认是数据面 7863），只迁移没动过的存量
@@ -293,17 +304,21 @@ class Database:
             conn.execute(
                 "UPDATE providers SET base_url = '' WHERE id = 'grok-register' AND base_url LIKE '%:7866%'"
             )
+            # 热路径索引：建表/补列之后统一接线；定义升级靠 ensure_indexes 比对重建
+            from .perf_indexes import ensure_indexes
+
+            ensure_indexes(conn)
             conn.commit()
+            # S-05：库里存上游 key 与会话 token，权限在库文件创建时设一次就够；
+            # 以前每条连接对 db/-wal/-shm 各 chmod 一次，纯属热路径无效系统调用
+            for candidate in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
+                _restrict(candidate, 0o600)
         finally:
             conn.close()
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        # 库里存上游 key 与会话 token，文件只允许属主读写（S-05）
-        for candidate in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
-            _restrict(candidate, 0o600)
         return conn
 
 

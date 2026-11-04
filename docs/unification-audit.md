@@ -1,4 +1,4 @@
-# 全站一致性审计（unified-2api）
+# 全站一致性审计（Neosub2api）
 
 - 审计日期：2026-11-03
 - 范围：`apps/control`（FastAPI 控制面）、`apps/web`（Next.js 前端）、`docs/`
@@ -6,7 +6,8 @@
 - 口径：**以代码为准**。文档与代码不一致时按代码记录，并标注「文档过时」。
 - 红线：不改前端外观/导航结构，不建议重做架构；外观以 `docs/FRONTEND-BASELINE.md` 为准。
 - 产出：仅新增本文件，未修改任何源码或既有文档。
-- 复核（2026-11-03，提交 `dc82454` → `e6cf315` 之后）：按工作区代码与 `250 passed, 1 skipped, 3 subtests passed` 的测试基线就地更新状态；原审计记录保留，修正处以「状态」「修正记录」标注。
+- 复核（2026-11-03，提交 `dc82454` → `e6cf315` 之后）：按工作区代码与最近一次全量 `pytest` 基线（2026-11-04 实测：443 passed, 1 skipped, 0 failed, 0 xfailed，收集 444 条，量级约 444）就地更新状态；原审计记录保留，修正处以「状态」「修正记录」标注。
+- 文档收口（2026-11-03）：新增 [docs/README.md](README.md) 与 [CHANGELOG.md](../CHANGELOG.md)，重写仓库根 [README.md](../README.md)。测试数量以最近一次全量 `pytest` 结果为准（2026-11-04 实测量级约 444），历史快照里的 `250` 不再作为当前基线；本轮新增的 4 个 `/api/settings/runtime-config*` 端点补入附录 A8，附录 F 同步记录已修与仍未修的文档矛盾。
 
 ## 0. 结论概览
 
@@ -16,9 +17,9 @@
 | P1 | 8 | 明确的功能缺口、权限/契约冲突、用户可见错误 |
 | P2 | 10 | 一致性债、死代码、文档漂移，暂不影响主流程 |
 
-后端管理端点（不含 `/v1/*`）共 **83** 个；前端调用但后端不存在的「幽灵端点」按路径计原为 **27 条**（15 组），本轮改指真实端点 8 条、随页面删除 16 条，剩 **3 条**死方法（见附录 C）。原记录写的「17 个」是按行计数、把多路径行算成 1 导致的低估，已按路径重算。
+后端管理端点（不含 `/v1/*`）共 **87** 个（原 83，本轮新增 4 个运行参数端点）；前端调用但后端不存在的「幽灵端点」按路径计原为 **27 条**（15 组），本轮改指真实端点 8 条、随页面删除 16 条；原剩的 **3 条**死方法已从 `api.ts` 删除，2026-11-04 复跑 `scripts/contract_check.py` 实测幽灵端点 0、方法不匹配 0（见附录 C）。原记录写的「17 个」是按行计数、把多路径行算成 1 导致的低估，已按路径重算。
 
-### 处理状态（2026-11-03 复核）
+### 处理状态（2026-11-03 复核；2026-11-04 部分条目再核）
 
 | 条目 | 状态 | 最终做法 |
 | --- | --- | --- |
@@ -36,10 +37,10 @@
 | P1-8 令牌选项冲突 | 已修 | UI 收敛为只读作用域，创建只发 `name` |
 | P2-1 micro 换算 | 已修 | 统一到 `lib/format`（`usdToMicro` / `fmtUsd` / `fmtMicroUsd`） |
 | P2-2 日志原始 JSON | 已修 | 日志页对配额拒绝结构化渲染（`failure_rate_limited` 尚未结构化） |
-| P2-3 viewer 自动 admin 请求 | 部分修 | `accounts` 已加 `isAdmin` 守卫；`dashboard` 仍无条件调 `refresh-credits` |
+| P2-3 viewer 自动 admin 请求 | 已修 | `accounts`、`dashboard` 均已加 `isAdmin` 守卫（2026-11-04 复核 `dashboard/page.tsx:79`） |
 | P2-4 审计别名 | 未修 | 两个路径仍并存 |
 | P2-5 Upstash 测试按钮 | 已修 | 按钮已移除 |
-| P2-6 无调用方方法 | 部分修 | OAuth 批量与认领计划已删；`credits` / `reloadState` / `reloadUpstream` 仍在 |
+| P2-6 无调用方方法 | 已修 | OAuth 批量与认领计划已删；`credits` / `reloadState` / `reloadUpstream` 也已从 `api.ts` 删除（2026-11-04 复核） |
 | P2-7 集成方案文档过时 | 未修 | 本轮仅改 `docs/` 的事实性段落，未重写该方案文档 |
 | P2-8 grok 文档自相矛盾 | 部分修 | `frontend-integration-plan.md` 顶部加 `/tasks` 删除注记 |
 | P2-9 页面白名单冲突 | 未修 | 未补批准记录 |
@@ -266,7 +267,7 @@
   - `apps/control/app/routers/accounts.py:122`（`refresh-credits`，ADMIN）
 - **影响**：每次进页多一次必然失败的请求；无用户可见错误，但服务端日志/审计会持续出现 403 噪声。
 - **建议修法**：与 P1-7 同口径，`isAdmin` 为 false 时跳过；或后端允许 viewer 读缓存值、仅 `force=true` 限管理员。
-- **状态（2026-11-03）**：部分已修。`accounts/page.tsx:113` 已加 `if (!caps.credits || !isAdmin) return`；`dashboard/page.tsx:76` 仍然无条件 `refreshCredits(false)`，viewer 进仪表盘仍有一次 403。
+- **状态（2026-11-03 部分已修；2026-11-04 复核已修）**：`accounts/page.tsx:113` 已加 `if (!caps.credits || !isAdmin) return`；`dashboard/page.tsx:79` 的 `refreshCredits(false)` 也已放入 `isAdmin` 分支（`useAuth` 见 `:55`），viewer 进仪表盘不再自动打 admin 端点。
 - **改动面**：2 文件（小）。
 
 ### P2-4 审计日志有两个等价端点
@@ -286,7 +287,7 @@
   - `apps/web/lib/api.ts:429-430`
 - **影响**：按钮永远失败，且文案把内部里程碑编号暴露给用户。
 - **建议修法**：未接入期间隐藏按钮，或改成「即将支持」的禁用态。
-- **状态（2026-11-03）**：已修（前端）。设置页组件里已无 Upstash 相关按钮（`components/common/settings` 下无匹配），后端固定返回的端点未动，属无害残留。
+- **状态（2026-11-03 已移除前端按钮；2026-11-04 后端已改真实实现）**：设置页组件里已无 Upstash 相关按钮（`components/common/settings` 下无匹配）；`POST /api/settings/upstash/test` 已从桩改为真实只读探测——`POST {url}/pipeline` 下发 `[["PING"]]` + Bearer，`trust_env=False`、超时 10s，失败走 `{detail, error{type, code}}` 外壳（`apps/control/app/routers/settings.py:799-801`，错误码表 `docs/API-REFERENCE.md:610-619`），不再是固定文案。
 - **改动面**：1 组件（小）。
 
 ### P2-6 前端 `api.ts` 存在无 UI 调用方的方法，其中 1 个指向不存在的读端点
@@ -299,7 +300,7 @@
   - `apps/web/lib/api.ts:432-435`（reload state / reload）
 - **影响**：后续维护者会误以为这些能力已接通；类型与后端契约持续漂移。
 - **建议修法**：删除方法或统一标注 `@deprecated` + 指向真实端点；`credits` 若要保留，后端补端点或改用 `refresh-credits`。
-- **状态（2026-11-03）**：部分已修。`oauthBatchStart/Status/List`、`taskClaimSchedule/saveTaskClaimSchedule` 已随任务页删除；`accountApi.credits`、`settingsApi.reloadState`、`settingsApi.reloadUpstream` 仍在 `api.ts`，三者都无 UI 调用，且后端均无对应路由（`/api/accounts/{file}/credits`、`/api/upstream/reload-state`、`/api/settings/upstash/reload`）。
+- **状态（2026-11-03 部分已修；2026-11-04 已修）**：`oauthBatchStart/Status/List`、`taskClaimSchedule/saveTaskClaimSchedule` 已随任务页删除；`accountApi.credits`、`settingsApi.reloadState`、`settingsApi.reloadUpstream` 也已从 `apps/web/lib/api.ts` 删除（全仓 `reload-state`、`upstash/reload`、`accounts/{file}/credits` 均 0 命中，后端本就没有这三个路由），复跑 `scripts/contract_check.py` 实测幽灵端点 0、方法不匹配 0。
 - **改动面**：`api.ts` 1 文件（小）。
 
 ### P2-7 文档过时：称 `tokens.py` / `system.py` 未挂载，实际已挂载
@@ -353,7 +354,7 @@
 
 ---
 
-## 附录 A：后端管理端点覆盖矩阵（83 条，不含 `/v1/*`）
+## 附录 A：后端管理端点覆盖矩阵（87 条，不含 `/v1/*`）
 
 图例：**有入口** = 页面/按钮/表单可触达；**缺页面** = 需要界面但当前没有；**无须界面** = 有意不做或由其他流程覆盖。
 
@@ -363,7 +364,7 @@
 | --- | --- | --- | --- |
 | `GET /api/accounts` | user | accounts 页、dashboard、quickAdd | 有入口 |
 | `POST /api/accounts/sync` | admin | 无 | 无须界面（GET 列表已自动同步，`accounts.py:81`） |
-| `POST /api/accounts/refresh-credits` | admin | 页头「刷新积分」(isAdmin, `accounts/page.tsx:815`)；自动刷新已加 isAdmin 守卫（`:113`），dashboard 仍自动调用 | 有入口（P2-3 部分修） |
+| `POST /api/accounts/refresh-credits` | admin | 页头「刷新积分」(isAdmin, `accounts/page.tsx:815`)；自动刷新已加 isAdmin 守卫（`:113`），dashboard 也已守卫（`dashboard/page.tsx:79`，2026-11-04 复核） | 有入口（P2-3 已修） |
 | `POST /api/accounts/checkin-all` | admin | 页头「全部签到」(isAdmin, `:838`) | 有入口 |
 | `PUT /api/accounts/{file}/note` | admin | 行操作 `AccountNoteDialog.tsx:57` | 有入口 |
 | `POST /api/accounts/{file}/disabled` | admin | 行操作 `accounts/page.tsx:747` | 有入口 |
@@ -457,7 +458,7 @@
 
 > 处理状态（2026-11-03）：`/api/quota/*` 三个 GET 已改为「admin 全部 / 非 admin 仅自有密钥（按 `api_keys.owner_user_id`）」，不再是纯 admin；`/api/sub2api/{groups,accounts,ledger}` 仍为 `admin`，viewer 在查库前 403。上表鉴权列保留原审计时的判断，以本注为准；详见 API-REFERENCE §1/§9。
 
-### A8. 设置 / 用户 / 安全 / 统计 / 系统（22）
+### A8. 设置 / 用户 / 安全 / 统计 / 系统（26）
 
 | 端点 | 鉴权 | 前端入口 | 结论 |
 | --- | --- | --- | --- |
@@ -468,14 +469,18 @@
 | `POST /api/settings/gateway` | admin | 同页开关 | 有入口 |
 | `GET /api/settings/model-map` | admin | 设置·模型映射（viewer 已不再请求） | 有入口（P1-7 已修） |
 | `POST /api/settings/model-map` | admin | 同页保存 | 有入口 |
-| `POST /api/settings/upstash/test` | admin | 无（按钮已移除） | 无须界面（P2-5 已修） |
+| `GET /api/settings/runtime-config` | admin | 设置·运行参数 | 有入口（本轮新增） |
+| `POST /api/settings/runtime-config` | admin | 同区块保存 | 有入口（本轮新增） |
+| `GET /api/settings/runtime-config/export` | admin | 同区块「导出 JSON」 | 有入口（本轮新增） |
+| `POST /api/settings/runtime-config/import` | admin | 同区块「导入 JSON」 | 有入口（本轮新增） |
+| `POST /api/settings/upstash/test` | admin | 无（按钮已移除） | 无须界面（P2-5 已修；2026-11-04 起为真实只读探测） |
 | `GET /api/users` | user | 设置·用户 | 有入口 |
 | `POST /api/users` | admin | 同页 | 有入口 |
 | `PATCH /api/users/{username}` | admin | 同页 | 有入口 |
 | `DELETE /api/users/{username}` | admin | 同页 | 有入口 |
 | `GET /api/security/guard` | user | security 页 | 有入口 |
-| `GET /api/security/login-failures` | user | security 页 | 有入口 |
-| `GET /api/audit-logs` | user | security 页 | 有入口 |
+| `GET /api/security/login-failures` | user | security 页 | 有入口（非 admin 仅 `scope=self`） |
+| `GET /api/audit-logs` | user | security 页 | 有入口（非 admin 仅 `actor=自己`，查他人 403） |
 | `GET /api/security/audit` | user | 无 | 无须界面（等价别名，P2-4） |
 | `GET /api/stats/summary` | user | stats 页 | 有入口 |
 | `GET /api/stats/daily` | user | stats 页 | 有入口 |
@@ -490,7 +495,7 @@
 
 | # | 端点/按钮 | 后端 | 前端 | 结论 |
 | --- | --- | --- | --- | --- |
-| B1 | `POST /api/accounts/refresh-credits` | admin | 按钮按 isAdmin 隐藏；accounts 页自动请求已加守卫，dashboard 仍自动请求 | 前端多余请求（P2-3 部分修） |
+| B1 | `POST /api/accounts/refresh-credits` | admin | 按钮按 isAdmin 隐藏；accounts 与 dashboard 自动请求均已加守卫（2026-11-04 复核） | 前端多余请求（P2-3 已修） |
 | B2 | `GET /api/settings/upstream` / `model-map` | admin | 设置页对所有角色无条件请求（已加守卫） | 静默 403，界面误显示「未加载」（P1-7 已修） |
 | B3 | `GET /api/settings/gateway` | admin | 服务商区块对所有角色无条件请求（已早退） | 同上（P1-7 已修） |
 | B4 | `POST /api/tokens` 的 `scope/expires_at` | 只允许 `readonly` + 无到期 | UI 已只提交 `name` | 参数契约冲突已由前端收敛（P1-8 已修） |
@@ -500,7 +505,7 @@
 
 ## 附录 C：前端调用但后端不存在的「幽灵端点」
 
-复核（2026-11-03）：原 **27 条路径 / 15 组**，改指真实端点 8 条、删除 16 条，剩 **3 条**，全部是「`api.ts` 有方法、无 UI 调用、后端无路由」的死代码。
+复核（2026-11-03）：原 **27 条路径 / 15 组**，改指真实端点 8 条、删除 16 条，剩 **3 条**死代码；再复核（2026-11-04）：这 3 条也已从 `api.ts` 删除，复跑 `scripts/contract_check.py` 实测幽灵端点 0、方法不匹配 0，下表仅作历史记录。
 
 | 前端路径 | 现状 | 处理 |
 | --- | --- | --- |
@@ -516,9 +521,9 @@
 | `/api/stats/by-model`、`/api/stats/by-key`、`/api/stats/upstream` | 已删 | P1-1 已降级删除 |
 | `/api/stats/rebuild-usage`、`/api/stats/repair-usage` | 已删 | 同上 |
 | `/api/system/update`、`/api/system/upstream-ref` | 已删 | P1-2 已降级删除 |
-| `/api/accounts/{file}/credits` | **仍在** `api.ts`，无 UI 调用，后端无路由 | 待删（P2-6） |
-| `/api/upstream/reload-state` | **仍在** `api.ts`，无 UI 调用，后端无路由 | 待删（P2-6） |
-| `/api/settings/upstash/reload` | **仍在** `api.ts`，无 UI 调用，后端无路由 | 待删（P2-6） |
+| `/api/accounts/{file}/credits` | 方法已从 `api.ts` 删除 | 已修（2026-11-04） |
+| `/api/upstream/reload-state` | 方法已从 `api.ts` 删除 | 已修（2026-11-04） |
+| `/api/settings/upstash/reload` | 方法已从 `api.ts` 删除 | 已修（2026-11-04） |
 
 ## 附录 D：i18n 完整性
 
@@ -589,8 +594,11 @@
 | `docs/design/frontend-integration-plan.md:90` | 注册任务不进界面 | 与 L63 自相矛盾 | **文档自相矛盾** |
 | `docs/FRONTEND-BASELINE.md:48` | 不得新增页面 | `:60-68` 又把 `/quota`、`/pricing` 列入清单 | **文档自相矛盾**，需批准记录 |
 | `README.md`、`GETTING-STARTED.md`、`FRONTEND-BASELINE.md`、`docs/design/*` | 页面清单与导航仍含 `/tasks` | `/tasks` 页面与相关幽灵端点已整体删除 | **已修**（2026-11-03，页面清单移除、设计文档加删除注记） |
-| `README.md`、`docs/ADDING-A-PROVIDER.md` | 测试基线 177 / 73 / 76 | 实跑为 `250 passed, 1 skipped, 3 subtests passed` | **已修**（README 与 ADDING-A-PROVIDER 更新；审计类文档保留当次快照并加注） |
+| `README.md`、`docs/ADDING-A-PROVIDER.md:161`、`docs/FRONTEND-SKELETON.md:100`、`docs/security-audit.md:122`、`docs/ux-review.md:54` | 测试基线写作固定值（README 旧为约 425，其余称「当前基线 250」） | 本次提交实测约 425 passed，且会继续增长；2026-11-04 全量实测 443 passed + 1 skipped + 0 failed + 0 xfailed，收集 444 条 | **已修**（2026-11-03 改写为「以最近一次全量 `pytest` 结果为准」；当前基线以 2026-11-04 实测值为准，量级约 444） |
 | `docs/API-REFERENCE.md` 配额读权限段 | `api_keys` 无归属字段，读接口只放行 admin | 已有 `owner_user_id`，非 admin 可读自有密钥 | **已修**（2026-11-03） |
+| `docs/API-REFERENCE.md` §8 | 未列 `/api/settings/runtime-config`、`/export`、`/import` 四个端点 | 代码已实现，设置页「运行参数」在用 | **已修**（2026-11-03，§8 补入四个端点的字段、admin-only 与「先全量校验再单事务写入、异常 rollback」语义） |
+| `docs/API-REFERENCE.md:478,486,494` | `GET /api/settings/upstream`、`/gateway`、`/model-map` 标「登录」 | 三个 GET 均为 `admin_user` | **已修**（2026-11-03，三处改为「管理员」，并复核全篇其余权限标注与路由依赖一致） |
+| `docs/CONTRACT.md`、`docs/DEMO.md`、`docs/security-retest-2026-11-03.md` | 命令与路径写死本机盘符绝对路径（`[盘符]:\qwq\...`） | 换机器或换目录即失效，与 README 的相对路径约定不一致 | **已修**（2026-11-03，改为仓库相对路径；复扫 `docs/**/*.md` 残留 0 行，见 consistency-report §8 修复记录） |
 
 ---
 
@@ -615,3 +623,22 @@
 | `/providers` 无独立页 | 已并入设置页「服务商」tab，baseline 明确允许 |
 | 网关原样透传上游 4xx/5xx body | 下游协议兼容所需；与管理面错误契约分开看 |
 | grok worker 端点无界面 | 属运维观测，长期不做界面也合理（但需在文档写死） |
+
+---
+
+## 附录 G：2026-11-04 变更事实索引
+
+> 原拟作为「附录 D」，本文件附录 D 已被「i18n 完整性」占用，顺延为 G。只登记证据与落点，不重复正文叙述。
+
+| 事实 | 一句话说明 | 代码/配置证据（文件:行） | 对应文档落点 |
+| --- | --- | --- | --- |
+| 1. 模型解析判定顺序 | 显式 provider 判定依次为本地存在性 404 → 头/前缀冲突 400 → 停用 503，同源时按 `provider/` 前缀剥离 | `apps/control/app/model_resolve.py:286-296`（顺序与「冲突必须先于停用」，另见 `:100`）、`:171-180`（404 `provider_not_found`，常量 `:39`）、`:183`（400 `conflicting_provider_hints`，常量 `:35`）、`:85-96`（503 `provider_disabled`，常量 `:38`）、`:294-296` 与 `:112-117`（同源剥离） | `docs/error-contract.md:67-71` |
+| 2. `billing_ledger.log_id` 行级关联与五档 | 扣费用 `log_id` 与日志行精确关联，日志页「扣费」列给五档 `credit_status`，`unpriced` 徽标点开即现查价格 | `apps/control/app/db.py:174`（`log_id` 列）、`apps/control/app/routers/logs.py:8-12`（五档口径）、`:168-187` 与 `:216-218`（join 与判定）、`apps/web/app/(main)/logs/page.tsx:344,403-422`（列与徽标）、`:159-174,441-453`（`unpriced` 调 `pricingApi.resolve` 现查） | `docs/API-REFERENCE.md:1073-1075` |
+| 3. 热路径覆盖索引与老库升级 | 两棵覆盖索引 + 一棵带 `WHERE` 谓词的部分索引；老库升级只补 `log_id` 列不回填，存量日志显示 `unlinked` | `apps/control/app/perf_indexes.py:35,39,52`（三索引）、`:54`（`WHERE error IS NOT NULL`）、`apps/control/app/db.py:286-288`（`_ensure_column` 加列，无回填语句）、`apps/control/app/routers/logs.py:180-187`（`bl.log_id IS NULL → unlinked`） | `docs/PERFORMANCE.md:355,442`；`docs/OPS-RUNBOOK.md:68`；`docs/BACKUP.md:137` |
+| 4. 单请求建连 8 → 4 → 2 | 分三轮收口，最终每请求 2 次连接（准入 1 次 + `_record` 1 次），第三次收口把 `registry.get` 的两条元数据读并入准入段连接 | `docs/PERFORMANCE.md:392-393`（2026-11-04 最终值与收口方式；原文写「第三次收口」，非「二次」） | `docs/PERFORMANCE.md:392-393,431-432` |
+| 5. `ProviderSpec.limitations` | 能力受限以 `limitations` 声明，`deepseek_sidecar` 的 messages 只支持非流式，501 报错与声明共用同一常量 | `apps/control/app/adapters/base.py:108`（字段）、`apps/control/app/adapters/deepseek_sidecar.py:18`（常量）、`:48`（声明）、`:56-57`（501 引用同一常量） | `docs/API-REFERENCE.md:318,493` |
+| 6. 许可证四档与风险分级 | MIT 7 家入主仓，GPL-3.0 / LGPL-3.0 仅进程隔离，PolyForm-NC 与无 LICENSE 商用禁用；`risk_level` 三档配 `risk_note`，`qoder` 直连 `safe`、`qoder_sidecar` `danger` | `upstreams/README.md:15-18`（四档表与 11 家清单）、`apps/control/app/adapters/opencode.py:73`、`sub2api.py:67`、`qoder.py:391`（`risk_note`）、`qoder.py:390`（`safe`）、`qoder_sidecar.py:40`（`danger`） | `upstreams/README.md:15-18`；`docs/ADDING-A-PROVIDER.md:88` |
+| 7. `BUILDERS` 14 ↔ 上游 11 家 | 14 个适配器注册项对应 11 家上游，trae / qoder / codar 各有直连与 sidecar 双路径、各占 2 | `apps/control/app/adapters/__init__.py:20-35`（14 条 `BUILDERS`，双路径为 `trae/trae_sidecar`、`qoder/qoder_sidecar`、`codar/codar_sidecar`）、`upstreams/README.md:15-18`（11 家） | `docs/design/ia-proposal.md:46`（14 个适配器）；`docs/dependency-audit.md:70`（11 家上游）；14↔11 对照仅本表记录 |
+| 8. 构建上下文与宿主端口 | `.dockerignore` 把构建上下文从 905.7MB 压到 6.3MB；Windows + Docker Desktop 只为 `127.0.0.1` 建宿主端口 | `docker-compose.yml:61`（控制面 `127.0.0.1:8000:80`）、`:87`（控制面 `127.0.0.1:8300:8300`） | `CHANGELOG.md:53`、`deploy/README.md:98,102`（905.7MB → 6.3MB）；`deploy/README.md:77`（仅 `127.0.0.1`） |
+| 9. 日志扣费列渲染细节 | 金额列 `hidden md:table-cell` 只在 ≥768px 展示，窄屏把口径压成一行 10px 文本（代码断点是 `md`，不是 390），金额为 null 显 `—` | `apps/web/app/(main)/logs/page.tsx:344,403`（`hidden md:table-cell`）、`:386-387`（`md:hidden text-[10px]` 单行）、`:405-406`（金额 `fmtMicroUsd`）、`apps/web/lib/format.ts:270-271`（非数值返回 `—`） | 仅本表记录（`390` 仅是测试视口，见 `docs/design/README.md:85`） |
+

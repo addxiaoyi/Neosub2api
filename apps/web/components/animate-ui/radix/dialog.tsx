@@ -15,6 +15,8 @@ import {ScrollArea} from '@/components/ui/scroll-area';
 
 type DialogContextType = {
   isOpen: boolean;
+  // 无 DialogTrigger 的受控弹窗需要自己记住触发元素，关闭时归还焦点
+  openerRef: React.RefObject<HTMLElement | null>;
 };
 
 const DialogContext = React.createContext<DialogContextType | undefined>(
@@ -40,16 +42,39 @@ function Dialog({children, ...props}: DialogProps) {
     if (props?.open !== undefined) setIsOpen(props.open);
   }, [props?.open]);
 
+  // 弹窗打开期间焦点在弹窗内，关闭期间记录最后一次落在弹窗外的焦点元素，
+  // 这就是要归还的触发元素。
+  const openerRef = React.useRef<HTMLElement | null>(null);
+
+  React.useEffect(() => {
+    const remember = (event: FocusEvent) => {
+      const element = event.target as HTMLElement | null;
+      if (element && element !== document.body && !element.closest('[role="dialog"]')) {
+        openerRef.current = element;
+      }
+    };
+    document.addEventListener('focusin', remember);
+    return () => document.removeEventListener('focusin', remember);
+  }, []);
+
   const handleOpenChange = React.useCallback(
       (open: boolean) => {
         setIsOpen(open);
+        if (!open) {
+          // 退场动效是 spring（~650ms），等卸载再归还焦点会让焦点长时间停在 body。
+          // 关闭当帧先归还，卸载时 onCloseAutoFocus 再兜底一次。
+          requestAnimationFrame(() => {
+            const opener = openerRef.current;
+            if (opener?.isConnected) opener.focus();
+          });
+        }
         props.onOpenChange?.(open);
       },
       [props],
   );
 
   return (
-    <DialogContext.Provider value={{isOpen}}>
+    <DialogContext.Provider value={{isOpen, openerRef}}>
       <DialogPrimitive.Root
         data-slot="dialog"
         {...props}
@@ -111,7 +136,8 @@ function DialogContent({
   showCloseButton = true,
   ...props
 }: DialogContentProps) {
-  const {isOpen} = useDialog();
+  // 触发元素由 Dialog 根组件跟踪，关闭时归还焦点
+  const {isOpen, openerRef} = useDialog();
 
   const initialRotation =
     from === 'top' || from === 'left' ? '20deg' : '-20deg';
@@ -131,7 +157,19 @@ function DialogContent({
               transition={{duration: 0}}
             />
           </DialogOverlay>
-          <DialogPrimitive.Content asChild forceMount {...props}>
+          <DialogPrimitive.Content
+            asChild
+            forceMount
+            {...props}
+            onCloseAutoFocus={(event) => {
+              if (event.defaultPrevented) return;
+              const opener = openerRef.current;
+              if (opener?.isConnected) {
+                event.preventDefault();
+                opener.focus();
+              }
+            }}
+          >
             <motion.div
               key="dialog-content"
               data-slot="dialog-content"

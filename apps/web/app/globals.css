@@ -25,6 +25,8 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-text: var(--destructive-text);
+  --color-warning-text: var(--warning-text);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -56,10 +58,15 @@
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
   --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
+  /* 0.552 在白/浅灰底上只有 4.39:1，压到 AA 线以下；0.53 稳定 >= 4.8:1 */
+  --muted-foreground: oklch(0.53 0.016 285.938);
   --accent: oklch(0.967 0.001 286.375);
   --accent-foreground: oklch(0.21 0.006 285.885);
   --destructive: oklch(0.577 0.245 27.325);
+  /* 文字级危险色：red-600 在白/浅灰底只有 4.34:1，压到 red-700 才稳过 AA */
+  --destructive-text: oklch(0.505 0.213 27.518);
+  /* 文字级警告色：amber-600 在 amber-500/10 底上只有 2.69:1 */
+  --warning-text: oklch(0.473 0.114 45.904);
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.92 0.004 286.32);
   --ring: oklch(0.705 0.015 286.067);
@@ -97,10 +104,13 @@
   --accent: oklch(0.274 0.006 286.033);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
+  --destructive-text: oklch(0.704 0.191 22.216);
+  --warning-text: oklch(0.828 0.189 84.429);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.552 0.016 285.938);
-  --chart-1: oklch(0.488 0.243 264.376);
+  /* 折线/柱条序列色：0.488 在暗色画布上只有 2.18:1，图形对象需要 >=3:1 */
+  --chart-1: oklch(0.707 0.165 254.624);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
@@ -171,6 +181,30 @@
 
 .scroll-slim::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/*
+ * 表格横向溢出时的边缘渐隐：scroll-slim 的细滚动条在覆盖式滚动条系统上不滚动
+ * 就不显示，光靠它用户不知道右侧还有列。data-overflow 由 ui/table.tsx 的滚动
+ * 监听写入：end=右边还有内容，start=左边有，both=两边都有，none=已全部可见。
+ */
+[data-slot='table-container'][data-overflow='end'] {
+  -webkit-mask-image: linear-gradient(to left, transparent, #000 44px);
+  mask-image: linear-gradient(to left, transparent, #000 44px);
+}
+
+[data-slot='table-container'][data-overflow='start'] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 44px);
+  mask-image: linear-gradient(to right, transparent, #000 44px);
+}
+
+[data-slot='table-container'][data-overflow='both'] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 44px),
+    linear-gradient(to left, transparent, #000 44px);
+  mask-image: linear-gradient(to right, transparent, #000 44px),
+    linear-gradient(to left, transparent, #000 44px);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
 }
 
 button {
@@ -269,6 +303,32 @@ button {
 
 .dark [data-sonner-toast][data-type="loading"] [data-icon] {
   color: #9ca3af;
+}
+
+/* ── 超长下拉值不再撑破页面 ─────────────────────────────
+   配额页选中长密钥名（如 e2e-fix-1793611378）时，SelectTrigger 因为是
+   w-fit 且不收缩，会比外层 w-56 宽出一截，把 768 下的整页向右顶出视口。
+   这里只把宽度约束交给父容器，并允许值区收缩、截断——不涉及配色与圆角。 */
+[data-slot="select-trigger"] {
+  max-width: 100%;
+}
+
+[data-slot="select-trigger"] > [data-slot="select-value"] {
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 图表工具提示的文字对比度 ───────────────────────────
+   Recharts 默认把提示文字染成序列色：深色主题下 chart-1 蓝在黑底只有
+   2.59:1，浅色主题下 chart-5 橙在白底 3.58:1，正文尺寸未达 AA。
+   折线/面积仍用序列色区分，仅提示文字改用前景色，不改任何调色板。 */
+.recharts-tooltip-item,
+.recharts-tooltip-item-name,
+.recharts-tooltip-item-separator,
+.recharts-tooltip-item-value {
+  color: var(--foreground) !important;
 }
 
 /* 侧边栏菜单高亮增强样式 */

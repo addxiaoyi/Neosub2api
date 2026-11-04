@@ -165,6 +165,7 @@ def _state(
         "source": source,
         "readiness": spec.readiness,
         "requires": list(spec.requires),
+        "limitations": dict(spec.limitations),
         "enabled": enabled,
         "available": available,
         "unavailable_reason": reason,

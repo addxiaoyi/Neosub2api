@@ -27,12 +27,12 @@ from pydantic import BaseModel, Field
 
 from ..api_utils import now
 from ..billing import QUOTA_WINDOWS, to_usd, window_usage
+from ..key_prefix import KEY_PREFIX, mask_prefix
 from ..security import PermissionDenied, admin_user, audit_event, current_user
 
 router = APIRouter(prefix="/api/quota", tags=["quota"])
 
 MAX_PERCENT = 1000
-KEY_PREFIX = "u2a_"
 DENIED_MESSAGE = "无权查看该密钥的配额数据"
 
 
@@ -114,13 +114,10 @@ def _scope_key(conn, key_id: str | None, api_key: str | None, user: dict):
 
 
 def _mask_prefix(prefix: str) -> str:
-    """只回显 u2a_ 后 4 位 + 掩码，任何场景都不输出完整密钥。"""
+    """只回显前缀后 4 位 + 掩码，任何场景都不输出完整密钥。"""
     if not prefix:
         return ""
-    if prefix.startswith(KEY_PREFIX):
-        visible = prefix[len(KEY_PREFIX):][:4]
-        return f"{KEY_PREFIX}{visible}****"
-    return f"{prefix[:4]}****"
+    return mask_prefix(prefix)
 
 
 def _thresholds(conn, policy_id: int) -> list[int]:
