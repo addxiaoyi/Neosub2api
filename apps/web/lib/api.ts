@@ -2,22 +2,30 @@ import axios, {AxiosError} from 'axios';
 import {BASE_PATH} from './base-path';
 import {tp} from './i18n';
 import type {Realm} from './realm-context';
-import type {ProviderCredential, ProviderCredentialInput, ProviderInfo} from './providers';
+import type {ProviderCredential, ProviderCredentialInput, ProviderHealth, ProviderInfo} from './providers';
 import type {
   Account,
   CreditsMeta,
   AccountsResponse,
   ApiKey,
   ApiToken,
+  BatchKeyResponse,
   CreatedApiToken,
   Me,
   AuditLogPage,
   GuardInfo,
+  GrokRegisterDetail,
+  GrokRegisterTask,
+  GrokRegisterTaskInput,
+  GrokRegisterWorkerStats,
   LoginFailuresResponse,
   ModelListResponse,
   Page,
   RequestLog,
   Changelog,
+  BackupList,
+  BackupCreated,
+  BackupRestored,
   StatsSummary,
   UpstreamConfig,
   UpstreamStatus,
@@ -33,12 +41,15 @@ import type {
   PriceResolveResult,
 } from './types';
 
+/** 单次请求 60s 封顶：转发链路包含上游排队与生成，再久基本已是卡死，交给用户重试 */
+const REQUEST_TIMEOUT_MS = 60_000;
+
 export const http = axios.create({
   // 子路径部署时接口也挂在前缀下（反向代理剥掉前缀再转发给本服务）。
   // 这里必须用 basePath，否则所有请求都会打到域名根路径的 /api 上。
   baseURL: BASE_PATH,
   withCredentials: true,
-  timeout: 60000,
+  timeout: REQUEST_TIMEOUT_MS,
 });
 
 /**
@@ -104,6 +115,23 @@ export const providerApi = {
       options?: Record<string, unknown>;
     },
   ) => patch<ProviderInfo>(`/api/providers/${encodeURIComponent(id)}`, body),
+  /** 定时健康检测：只读观测，不改路由/启用状态 */
+  health: (provider?: string) =>
+    get<ProviderHealth>('/api/providers/health', provider ? {provider} : undefined),
+  runHealth: () => post<ProviderHealth>('/api/providers/health/run'),
+};
+
+/* ── 运行参数（这里只用到健康检测总开关） ─────────────── */
+export type RuntimeConfigPayload = {
+  ok: boolean;
+  items: {key: string; value: unknown}[];
+  saved?: string[];
+};
+
+export const runtimeConfigApi = {
+  get: () => get<RuntimeConfigPayload>('/api/settings/runtime-config'),
+  save: (patch: Record<string, unknown>) =>
+    post<RuntimeConfigPayload>('/api/settings/runtime-config', patch),
 };
 
 /* ── 网关鉴权开关 ─────────────────────────────────────── */
@@ -114,10 +142,33 @@ export const gatewayApi = {
 };
 
 /* ── 鉴权 ───────────────────────────────────────────── */
+export type LoginResult =
+  | {ok: true; username: string; role: string}
+  | {ok: false; need_totp: true; challenge: string; expires_in: number};
+
+export type TotpStatus = {enabled: boolean; recovery_codes_left: number; period: number};
+
 export const authApi = {
   me: () => get<Me>('/api/me'),
   login: (username: string, password: string) =>
-    post<{ok: boolean; username: string; role: string}>('/api/login', {username, password}),
+    post<LoginResult>('/api/login', {username, password}),
+  /** 2FA 第二步：用一次性 challenge + 验证码（或恢复码）换会话 */
+  totpVerify: (challenge: string, code?: string, recoveryCode?: string) =>
+    post<{ok: boolean; username: string; role: string}>('/api/auth/totp/verify', {
+      challenge,
+      code: code || null,
+      recovery_code: recoveryCode || null,
+    }),
+  totpStatus: () => get<TotpStatus>('/api/auth/totp/status'),
+  totpSetup: () =>
+    post<{secret: string; otpauth_uri: string; algorithm: string; digits: number; period: number}>(
+      '/api/auth/totp/setup',
+    ),
+  totpEnable: (code: string) =>
+    post<{ok: boolean; enabled: boolean; recovery_codes: string[]}>('/api/auth/totp/enable', {code}),
+  totpDisable: (password: string, code: string) =>
+    post<{ok: boolean; enabled: boolean}>('/api/auth/totp/disable', {password, code}),
+  refresh: () => post<{ok: boolean; username: string; role: string; expires_in: number}>('/api/auth/refresh'),
   logout: () => post<{ok: boolean}>('/api/logout'),
   /** 吊销当前用户的**全部**会话（含本机）——服务端递增会话版本，所有 cookie 立即失效。 */
   revokeSessions: () => post<{ok: boolean; relogin_required: boolean}>('/api/sessions/revoke'),
@@ -201,6 +252,20 @@ export const accountApi = {
       {note},
     ),
   restart: () => post<{ok: boolean; message: string}>('/api/accounts/restart'),
+  /**
+   * 批量操作（admin-only）：整批恒 200，逐条结果在 results 里。
+   * 不支持该动作的 provider 会逐条回 error，界面必须原样展示，不能吞成「部分失败」。
+   */
+  batch: (
+    action: 'disable' | 'delete' | 'restart',
+    files: string[],
+    disabled = true,
+  ) =>
+    post<{
+      ok: boolean;
+      action: string;
+      results: {id: string; ok: boolean; error?: string}[];
+    }>('/api/accounts/batch', {action, files, disabled}),
 };
 
 /* ── 上游状态 ───────────────────────────────────────── */
@@ -218,6 +283,9 @@ export const keyApi = {
   update: (id: number, body: {name?: string; enabled?: boolean}) =>
     patch<ApiKey>(`/api/keys/${id}`, body),
   remove: (id: number) => del<{ok: boolean}>(`/api/keys/${id}`),
+  /** 批量启停/删除：后端逐条回执，单条失败不影响其余（ids 以字符串传给后端） */
+  batch: (action: 'enable' | 'disable' | 'delete', ids: number[]) =>
+    post<BatchKeyResponse>('/api/keys/batch', {action, ids: ids.map(String)}),
 };
 
 /* ── 访问令牌（管理面作用域化 API Token）──────────────────
@@ -235,9 +303,20 @@ export const tokenApi = {
     expires_at?: null;
   }) => patch<ApiToken>(`/api/tokens/${id}`, body),
   remove: (id: number) => del<{ok: boolean}>(`/api/tokens/${id}`),
+  batch: (action: 'enable' | 'disable' | 'delete', ids: number[]) =>
+    post<BatchKeyResponse>('/api/tokens/batch', {action, ids: ids.map(String)}),
 };
 
 /* ── 日志 ───────────────────────────────────────────── */
+/** 列表与导出共用同一组筛选键，后端 logs._where 是同一套语义 */
+export type LogQuery = {
+  key_id?: string;
+  provider?: string;
+  model?: string;
+  status?: string;
+  days?: number;
+};
+
 export const logApi = {
   /** 形参键须与后端 logs.list_logs 的 query 参数同名，contract_check 逐键对账 */
   list: (params: {
@@ -250,7 +329,37 @@ export const logApi = {
     days?: number;
   }) => get<Page<RequestLog>>('/api/logs', params),
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
+  /** 导出 CSV：筛选键与列表同源；错误体是 Blob，文案要先用 downloadErrText 解码 */
+  exportCsv: async (params: LogQuery) => {
+    const res = await http.get('/api/logs/export', {params, responseType: 'blob'});
+    return {blob: res.data as Blob, filename: filenameOf(res.headers['content-disposition'])};
+  },
 };
+
+/** 从 Content-Disposition 取文件名；后端给的已是 ASCII */
+const CSV_SUFFIX = '.csv';
+
+function filenameOf(header: unknown): string {
+  const match = typeof header === 'string' ? header.match(/filename="?([^";]+)"?/) : null;
+  // 文件名不是界面文案；后缀单独拼，免得被 i18n 键扫描当成翻译键
+  return match ? match[1] : `logs${CSV_SUFFIX}`;
+}
+
+/**
+ * 二进制下载失败时 axios 拿到的是 Blob：先读回 JSON 才能复用 errText 的短语表，
+ * 否则只会显示一句没有信息量的「请求失败」。
+ */
+export async function downloadErrText(e: unknown): Promise<string> {
+  const blob = (e as AxiosError<Blob>)?.response?.data;
+  if (!(blob instanceof Blob)) return errText(e);
+  try {
+    const payload = JSON.parse(await blob.text()) as {detail?: unknown};
+    const raw = typeof payload.detail === 'string' ? payload.detail : '';
+    return raw ? tp(raw) : errText(e);
+  } catch {
+    return errText(e);
+  }
+}
 
 /* ── sub2api 配额域（订阅分组 / 账号池 / 流水）────────── */
 export const sub2Api = {
@@ -326,7 +435,85 @@ export const securityApi = {
   /** 管理端审计事件（登录/改密码/清日志等），limit/offset 分页 */
   audit: (params: {limit?: number; offset?: number; action?: string; actor?: string} = {}) =>
     get<AuditLogPage>('/api/audit-logs', params),
+  /**
+   * 定向清除登录失败计数（admin-only）：ip / username 至少给一个，没有 all 通配。
+   * 无匹配时后端回 200 + 全 0，界面按「无可清理项」处理，不是错误。
+   */
+  clearLoginFailures: (body: {ip?: string; username?: string}) =>
+    post<{ok: boolean; cleared: {throttle_keys: number; users: number}}>(
+      '/api/security/login-failures/clear',
+      {ip: body.ip ?? '', username: body.username ?? ''},
+    ),
 };
+
+/* ── qoder_sidecar 会话搬运（原字节转发，响应保持 sidecar 自有 JSON 壳）── */
+export interface RawSidecarReply {
+  status: number;
+  ok: boolean;
+  contentType: string;
+  body: string;
+}
+
+/** 原样转发：不改写请求体、不包装响应，非 2xx 也要把 sidecar 的原文带回来 */
+async function postRaw(url: string, body: unknown): Promise<RawSidecarReply> {
+  const r = await http.post(url, body, {
+    responseType: 'text',
+    transformResponse: [(d: string) => d],
+    validateStatus: () => true,
+  });
+  return {
+    status: r.status,
+    ok: r.status >= 200 && r.status < 300,
+    contentType: String(r.headers['content-type'] || ''),
+    body: typeof r.data === 'string' ? r.data : JSON.stringify(r.data),
+  };
+}
+
+export const qoderSessionsApi = {
+  /** 包写到 sidecar 主机的 outPath，本仓不产出可下载文件 */
+  export: (body: {outPath: string; uid?: string; sessionIds?: string[]; region?: string}) =>
+    postRaw('/api/providers/qoder_sidecar/sessions/export', body),
+  /** 加法写：重复导入同一会话会产生副本 */
+  import: (body: {path: string; uid?: string; region?: string}) =>
+    postRaw('/api/providers/qoder_sidecar/sessions/import', body),
+};
+
+/* ── 模型映射批量导入 / 导出 / 回滚 ───────────────────── */
+export type ModelMapImportMode = 'merge' | 'overwrite';
+
+export interface ModelMapEntryResult {
+  alias: string;
+  target?: string;
+  /** applied / skipped / failed；整体被拒时后端另给 reason=aborted_by_invalid_entries */
+  status?: string;
+  /** added / updated / removed / unchanged；被拒或校验失败时为 null */
+  action?: string | null;
+  previous?: string | null;
+  reason?: string | null;
+  message?: string | null;
+}
+
+export interface ModelMapImportReply {
+  ok: boolean;
+  mode?: string;
+  changed?: boolean;
+  snapshot_taken?: boolean;
+  total?: number;
+  applied?: number;
+  skipped?: number;
+  removed?: number;
+  failed?: number;
+  results: ModelMapEntryResult[];
+  error?: {type: string; message: string; errors?: ModelMapEntryResult[]};
+}
+
+export interface ModelMapExport {
+  kind: string;
+  version: number;
+  /** epoch 秒 */
+  exported_at: number;
+  mappings: Record<string, string>;
+}
 
 /* ── 上游配置 / 用户 ───────────────────────────────── */
 export const settingsApi = {
@@ -339,6 +526,20 @@ export const settingsApi = {
   modelMap: () => get<Record<string, string>>('/api/settings/model-map'),
   saveModelMap: (body: Record<string, string>) =>
     post<Record<string, string>>('/api/settings/model-map', body),
+  exportModelMap: () => get<ModelMapExport>('/api/settings/model-map/export'),
+  /** 关键：400 与 500 的响应体也带 results，必须连状态码一起交回界面逐条展示 */
+  importModelMap: async (mode: ModelMapImportMode, mappings: Record<string, unknown>) => {
+    const r = await http.post<ModelMapImportReply>(
+      '/api/settings/model-map/import',
+      {mode, mappings},
+      {validateStatus: () => true},
+    );
+    return {status: r.status, data: r.data};
+  },
+  rollbackModelMap: () =>
+    post<{ok: boolean; restored: Record<string, string>; snapshot_taken_at?: number}>(
+      '/api/settings/model-map/rollback',
+    ),
   users: () => get<UserItem[]>('/api/users'),
   addUser: (body: {username: string; password: string; role: string}) =>
     post<UserItem>('/api/users', body),
@@ -359,6 +560,13 @@ export const systemApi = {
   versions: () => get<Versions>('/api/system/versions'),
   /** 更新日志（解析仓库根目录 CHANGELOG.md，离线可用） */
   changelog: () => get<Changelog>('/api/system/changelog'),
+  /** 备份归档清单（admin） */
+  backups: () => get<BackupList>('/api/system/backups'),
+  /** 立即备份一次；已有备份/恢复在跑时后端返 409 */
+  createBackup: () => post<BackupCreated>('/api/system/backup'),
+  /** 用指定归档覆盖当前库；confirm 必须显式 true，后端会先自动存一份当前快照 */
+  restoreBackup: (name: string) =>
+    post<BackupRestored>('/api/system/restore', {name, confirm: true}),
 };
 
 /* ── 服务商凭据（统一凭据库，secret 只回掩码）────────────── */
@@ -372,4 +580,16 @@ export const credentialApi = {
     body: Omit<ProviderCredentialInput, 'provider'>,
   ) => patch<ProviderCredential>(`/api/provider-credentials/${id}`, body),
   remove: (id: number) => del<{ok: boolean; id: number}>(`/api/provider-credentials/${id}`),
+};
+
+/* ── Grok 注册任务（读写全 admin，见 tests/test_security_matrix.py）── */
+export const grokRegisterApi = {
+  list: (limit = 50) => get<GrokRegisterTask[]>('/api/grok/register/tasks', {limit}),
+  create: (body: GrokRegisterTaskInput) => post<GrokRegisterTask>('/api/grok/register/tasks', body),
+  cancel: (id: number) => post<GrokRegisterTask>(`/api/grok/register/tasks/${id}/cancel`),
+  retry: (id: number) => post<GrokRegisterTask>(`/api/grok/register/tasks/${id}/retry`),
+  /** 状态机步骤 + 时间线（含失败原文），仅 admin */
+  detail: (id: number) => get<GrokRegisterDetail>(`/api/grok/register/tasks/${id}/detail`),
+  /** 队列计数 + 执行器是否已配置（任何登录用户可读） */
+  worker: () => get<GrokRegisterWorkerStats>('/api/grok/register/worker'),
 };

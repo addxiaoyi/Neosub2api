@@ -270,7 +270,7 @@ export function ChangelogPanel() {
         <Button asChild variant="ghost" size="sm" className="h-7 gap-1.5 text-xs">
           <a href={REPO_URL} target="_blank" rel="noreferrer">
             <Package className="h-3.5 w-3.5" />
-            Releases
+            {t('changelog.releases')}
           </a>
         </Button>
       </div>

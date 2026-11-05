@@ -19,6 +19,7 @@ import {
   Link2,
   FolderGit2,
   ChevronRight,
+  X as XIcon,
   Coins,
   Tags,
 } from 'lucide-react';
@@ -44,6 +45,7 @@ import {
 import {Avatar, AvatarFallback} from '@/components/ui/avatar';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {TotpSection} from '@/components/common/settings/TotpSection';
 
 const IconOptions = {
   className: 'h-4 w-4',
@@ -92,6 +94,8 @@ export function ManagementBar() {
   const [dockPosition, setDockPosition] = useState<DockPosition | null>(null);
   const [showDockTip, setShowDockTip] = useState(false);
   const [dockTipStep, setDockTipStep] = useState(0);
+  /** 到点先淡出再收起，避免提示一直压着页面内容 */
+  const [dockTipFading, setDockTipFading] = useState(false);
   /** 受管账号数量（真实数据，供个人信息面板展示） */
   const [accountCount, setAccountCount] = useState<number | null>(null);
   /**
@@ -332,6 +336,7 @@ export function ManagementBar() {
   const handleDismissDockTip = useCallback(() => {
     setShowDockTip(false);
     setDockTipStep(0);
+    setDockTipFading(false);
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(DOCK_TIP_STORAGE_KEY, 'true');
     }
@@ -359,6 +364,17 @@ export function ManagementBar() {
       return current + 1;
     });
   }, [dockTipSteps.length, handleDismissDockTip]);
+
+  // 首次引导停留 12 秒后自动淡出，不再长期盖住图表与表格
+  useEffect(() => {
+    if (!showDockTip) return;
+    const fadeTimer = window.setTimeout(() => setDockTipFading(true), 12000);
+    const hideTimer = window.setTimeout(handleDismissDockTip, 12400);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(hideTimer);
+    };
+  }, [showDockTip, dockTipStep, handleDismissDockTip]);
 
   const clearDockPressTimer = useCallback(() => {
     if (dockPressTimerRef.current !== null) {
@@ -624,6 +640,10 @@ export function ManagementBar() {
 
                         <Separator />
 
+                        <TotpSection />
+
+                        <Separator />
+
                         <div className="space-y-2">
                           <div className="text-[11px] font-medium text-muted-foreground">{t('profile.poolOverview')}</div>
                           <div className="flex flex-wrap items-center gap-2">
@@ -761,50 +781,58 @@ export function ManagementBar() {
             {visibility: 'hidden'}
         }
       >
-        {showDockTip && (
-          <div
-            data-dock-no-drag="true"
-            className="pointer-events-auto absolute bottom-full right-0 mb-2 w-[min(15rem,calc(100vw-2.5rem))] rounded-2xl border border-border/60 bg-background/95 px-2.5 py-2 text-left shadow-[0_18px_40px_rgba(15,23,42,0.12)] ring-1 ring-black/[0.03] backdrop-blur-sm md:left-1/2 md:right-auto md:mb-2.5 md:w-[17rem] md:-translate-x-1/2 md:px-3 dark:bg-background dark:shadow-[0_18px_40px_rgba(0,0,0,0.35)] dark:ring-white/[0.04]"
-            onPointerDown={(event) => event.stopPropagation()}
-            onPointerUp={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="space-y-1.5">
-              <div className="text-[10px] font-medium leading-4 text-foreground md:text-[11px]">
-                {t('dock.tipTitle')}
-              </div>
-              <p className="text-[10px] leading-4 text-muted-foreground md:text-[11px]">
-                {dockTipSteps[dockTipStep]}
-              </p>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-1.5">
-                  {dockTipSteps.map((_, index) => (
-                    <span
-                      key={index}
-                      className={`h-1.5 rounded-full transition-all ${index === dockTipStep ? 'w-4 bg-foreground/75' : 'w-1.5 bg-muted-foreground/25'}`}
-                    />
-                  ))}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={t('dock.tipTitle')}
-                  className="h-5 rounded-full px-1 text-[10px] text-muted-foreground md:h-6 md:px-1.5 md:text-[11px]"
-                  onClick={handleNextDockTip}
-                >
-                  <ChevronRight className="size-3 md:size-3.5" />
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
         <FloatingDock
           items={dockItems}
           desktopClassName="bg-background/70 backdrop-blur-md border border-border/40 shadow-lg shadow-black/10 dark:shadow-white/5 h-16 pb-3 px-4 gap-2"
           mobileButtonClassName="bg-background/70 backdrop-blur-md border border-border/40 shadow-lg shadow-black/10 dark:shadow-white/5 h-12 w-12"
         />
       </div>
+
+      {/* 引导放页面顶部而不是底栏上方：底栏那条位置会压住图表和告警表格 */}
+      {showDockTip && (
+        <div
+          className={`fixed left-1/2 top-3 z-50 w-[min(17rem,calc(100vw-2rem))] -translate-x-1/2 rounded-2xl border border-border/60 bg-background/95 px-3 py-2 text-left shadow-[0_18px_40px_rgba(15,23,42,0.12)] ring-1 ring-black/[0.03] backdrop-blur-sm transition-opacity duration-300 dark:bg-background dark:shadow-[0_18px_40px_rgba(0,0,0,0.35)] dark:ring-white/[0.04] ${dockTipFading ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+        >
+          <div className="space-y-1.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-[10px] font-medium leading-4 text-foreground md:text-[11px]">
+                {t('dock.tipTitle')}
+              </div>
+              <button
+                type="button"
+                aria-label={t('dock.dismissTip')}
+                className="-mr-1 -mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-muted-foreground hover:text-foreground"
+                onClick={handleDismissDockTip}
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+            <p className="text-[10px] leading-4 text-muted-foreground md:text-[11px]">
+              {dockTipSteps[dockTipStep]}
+            </p>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5">
+                {dockTipSteps.map((_, index) => (
+                  <span
+                    key={index}
+                    className={`h-1.5 rounded-full transition-all ${index === dockTipStep ? 'w-4 bg-foreground/75' : 'w-1.5 bg-muted-foreground/25'}`}
+                  />
+                ))}
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={t('dock.nextTip')}
+                className="h-5 rounded-full px-1 text-[10px] text-muted-foreground md:h-6 md:px-1.5 md:text-[11px]"
+                onClick={handleNextDockTip}
+              >
+                <ChevronRight className="size-3 md:size-3.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <AddAccountDialog
         open={addOpen}

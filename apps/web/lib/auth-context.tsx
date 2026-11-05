@@ -34,7 +34,10 @@ interface AuthContextValue {
   isAdmin: boolean;
   role: Role | null;
   refresh: () => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
+  /** 第一步：账号密码。需要 2FA 时返回一次性 challenge，不写登录态 */
+  login: (username: string, password: string) => Promise<{needTotp: false} | {needTotp: true; challenge: string}>;
+  /** 第二步：用 challenge + 验证码/恢复码换会话 */
+  completeTotp: (challenge: string, code?: string, recoveryCode?: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -61,6 +64,16 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await authApi.login(username, password);
+    if (!res.ok) return {needTotp: true as const, challenge: res.challenge};
+    const next = {username: res.username, role: res.role as Role};
+    setMe(next);
+    writeCachedMe(next);
+    setLoading(false);
+    return {needTotp: false as const};
+  }, []);
+
+  const completeTotp = useCallback(async (challenge: string, code?: string, recoveryCode?: string) => {
+    const res = await authApi.totpVerify(challenge, code, recoveryCode);
     const next = {username: res.username, role: res.role as Role};
     setMe(next);
     writeCachedMe(next);
@@ -93,7 +106,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   return (
     <AuthContext.Provider
-      value={{me, loading, isAdmin: me?.role === 'admin', role: me?.role ?? null, refresh, login, logout}}
+      value={{me, loading, isAdmin: me?.role === 'admin', role: me?.role ?? null, refresh, login, completeTotp, logout}}
     >
       {children}
     </AuthContext.Provider>

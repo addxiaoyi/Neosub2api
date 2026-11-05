@@ -37,7 +37,33 @@ type FieldError = {
   message: string;
 };
 
+type FailoverSource = 'env' | 'db' | 'default';
+
+type FailoverState = {
+  ok: boolean;
+  enabled: boolean;
+  max_attempts: number;
+  defaults: {enabled: boolean; max_attempts: number};
+  limits: {min_attempts: number; max_attempts: number};
+  source: {enabled: FailoverSource; max_attempts: FailoverSource};
+  stored: {enabled?: boolean; max_attempts?: number};
+  env: {
+    enabled_var: string;
+    max_attempts_var: string;
+    enabled_locked: boolean;
+    max_attempts_locked: boolean;
+  };
+  stats: {
+    attempt_rows: number;
+    transferred_rows: number;
+    attempt_rows_24h: number;
+    last_attempt_at: number | null;
+  };
+  saved?: string[];
+};
+
 const ENDPOINT = '/api/settings/runtime-config';
+const FAILOVER_ENDPOINT = '/api/settings/failover';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -62,6 +88,12 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
   const [baseline, setBaseline] = useState<Record<string, string | boolean>>({});
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<FieldError[]>([]);
+  const [failover, setFailover] = useState<FailoverState | null>(null);
+  const [enabledDraft, setEnabledDraft] = useState(false);
+  const [attemptsDraft, setAttemptsDraft] = useState('2');
+  const [enabledBase, setEnabledBase] = useState(false);
+  const [attemptsBase, setAttemptsBase] = useState('2');
+  const [failoverBusy, setFailoverBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const adopt = useCallback((state: RuntimeState) => {
@@ -74,6 +106,14 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
     setErrors([]);
   }, []);
 
+  const adoptFailover = useCallback((state: FailoverState) => {
+    setFailover(state);
+    setEnabledDraft(state.enabled);
+    setAttemptsDraft(String(state.max_attempts));
+    setEnabledBase(state.enabled);
+    setAttemptsBase(String(state.max_attempts));
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const res = await http.get<RuntimeState>(ENDPOINT);
@@ -81,7 +121,13 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
     } catch (e) {
       notify.err(t('settings.runtime.readFailed'), errText(e));
     }
-  }, [adopt, t]);
+    try {
+      const res = await http.get<FailoverState>(FAILOVER_ENDPOINT);
+      adoptFailover(res.data);
+    } catch (e) {
+      notify.err(t('settings.runtime.failover.readFailed'), errText(e));
+    }
+  }, [adopt, adoptFailover, t]);
 
   useEffect(() => {
     // 非 admin 完全不发请求，接口本身也会 403
@@ -131,6 +177,42 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
     }
   }
 
+  async function saveFailover() {
+    if (!failover) return;
+    const attempts = Number(attemptsDraft);
+    if (
+      !Number.isInteger(attempts) ||
+      attempts < failover.limits.min_attempts ||
+      attempts > failover.limits.max_attempts
+    ) {
+      notify.err(
+        t('settings.runtime.failover.saveFailed'),
+        t('settings.runtime.failover.rangeError', {
+          min: failover.limits.min_attempts,
+          max: failover.limits.max_attempts,
+        }),
+      );
+      return;
+    }
+    const patch: {enabled?: boolean; max_attempts?: number} = {};
+    if (enabledDraft !== enabledBase) patch.enabled = enabledDraft;
+    if (String(attempts) !== attemptsBase) patch.max_attempts = attempts;
+    if (Object.keys(patch).length === 0) {
+      notify.info(t('settings.noChanges'));
+      return;
+    }
+    setFailoverBusy(true);
+    try {
+      const res = await http.post<FailoverState>(FAILOVER_ENDPOINT, patch);
+      adoptFailover(res.data);
+      notify.ok(t('settings.runtime.failover.saved'), t('settings.runtime.savedHint'));
+    } catch (e) {
+      notify.err(t('settings.runtime.failover.saveFailed'), errText(e));
+    } finally {
+      setFailoverBusy(false);
+    }
+  }
+
   async function exportConfig() {
     try {
       const res = await http.get<Record<string, unknown>>(`${ENDPOINT}/export`);
@@ -172,6 +254,22 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = '';
     }
+  }
+
+  const failoverLocked = Boolean(
+    failover && (failover.env.enabled_locked || failover.env.max_attempts_locked),
+  );
+
+  function failoverSourceText(field: 'enabled' | 'max_attempts') {
+    if (!failover) return '';
+    const source = failover.source[field];
+    if (source === 'env') {
+      const name = field === 'enabled' ? failover.env.enabled_var : failover.env.max_attempts_var;
+      return t('settings.runtime.failover.sourceEnv', {var: name});
+    }
+    return source === 'db'
+      ? t('settings.runtime.failover.sourceDb')
+      : t('settings.runtime.failover.sourceDefault');
   }
 
   return (
@@ -238,6 +336,118 @@ export function RuntimeConfigSection({isAdmin}: {isAdmin: boolean}) {
           </div>
         )}
       </div>
+
+      {failover !== null && (
+        <div className="rounded-[20px] bg-muted px-3.5 py-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t('settings.runtime.failover.title')}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{t('settings.runtime.failover.desc')}</div>
+            </div>
+            <Button
+              size="sm"
+              className="rounded-full"
+              disabled={
+                failoverBusy ||
+                failoverLocked ||
+                (enabledDraft === enabledBase && attemptsDraft === attemptsBase)
+              }
+              onClick={saveFailover}
+            >
+              <Save className="h-3.5 w-3.5" />
+              {t('common.save')}
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-2">
+            <div className="rounded-2xl bg-background/60 px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-medium">{t('settings.runtime.failover.enabledLabel')}</span>
+                    <span className="rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {failoverSourceText('enabled')}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                    {t('settings.runtime.failover.enabledDesc')}
+                  </div>
+                </div>
+                <Switch
+                  checked={enabledDraft}
+                  disabled={failover.env.enabled_locked}
+                  onCheckedChange={setEnabledDraft}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-background/60 px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-medium">{t('settings.runtime.failover.attemptsLabel')}</span>
+                    <span className="rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {failoverSourceText('max_attempts')}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                    {t('settings.runtime.failover.attemptsDesc')}
+                  </div>
+                  <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                    {t('settings.runtime.failover.attemptsRange', {
+                      min: failover.limits.min_attempts,
+                      max: failover.limits.max_attempts,
+                    })}
+                  </div>
+                </div>
+                <Input
+                  type="number"
+                  className="h-8 w-24 rounded-xl text-right text-xs"
+                  min={failover.limits.min_attempts}
+                  max={failover.limits.max_attempts}
+                  disabled={failover.env.max_attempts_locked}
+                  value={attemptsDraft}
+                  onChange={(e) => setAttemptsDraft(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          {failoverLocked && (
+            <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+              {t('settings.runtime.failover.envLockedHint', {
+                vars: [
+                  failover.env.enabled_locked ? failover.env.enabled_var : '',
+                  failover.env.max_attempts_locked ? failover.env.max_attempts_var : '',
+                ]
+                  .filter(Boolean)
+                  .join(' / '),
+              })}
+            </div>
+          )}
+
+          <div className="mt-2 rounded-2xl border border-border/60 bg-background/60 px-3 py-2">
+            <div className="mb-1 flex items-center gap-1.5 text-xs font-medium">
+              <TriangleAlert className="h-3.5 w-3.5" />
+              {t('settings.runtime.failover.contractTitle')}
+            </div>
+            <div className="text-[11px] leading-relaxed text-muted-foreground">
+              {t('settings.runtime.failover.contractDesc')}
+            </div>
+          </div>
+
+          <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            {failover.stats.transferred_rows > 0
+              ? t('settings.runtime.failover.statsSeen', {
+                  count: failover.stats.transferred_rows,
+                  recent: failover.stats.attempt_rows_24h,
+                })
+              : t('settings.runtime.failover.statsNone')}
+            {' '}
+            {t('settings.runtime.failover.statsSource')}
+          </div>
+        </div>
+      )}
 
       {errors.length > 0 && (
         <div className="rounded-[20px] border border-destructive/30 px-3.5 py-3">

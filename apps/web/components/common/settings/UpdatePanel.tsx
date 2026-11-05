@@ -11,6 +11,10 @@ import {Badge} from '@/components/ui/badge';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useT} from '@/lib/i18n/provider';
 
+/** 更新进行中 1.5 秒一拉，日志跟得上；空闲 15 秒一拉，避免无意义请求（更新期间服务会短暂不可用） */
+const RUNNING_POLL_MS = 1500;
+const IDLE_POLL_MS = 15000;
+
 export function UpdatePanel() {
   const t = useT();
   const [status, setStatus] = useState<UpdateStatus | null>(null);
@@ -74,7 +78,7 @@ export function UpdatePanel() {
   // 运行中高频轮询，空闲时低频（服务可能在更新中短暂不可用）
   const running = !!status?.running;
   useEffect(() => {
-    const interval = running ? 1500 : 15000;
+    const interval = running ? RUNNING_POLL_MS : IDLE_POLL_MS;
     const timer = window.setInterval(() => {
       void load();
     }, interval);

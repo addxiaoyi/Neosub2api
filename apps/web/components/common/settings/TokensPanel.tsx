@@ -1,12 +1,12 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {KeyRound, Plus, Trash2} from 'lucide-react';
+import {KeyRound, Pause, Play, Plus, Trash2} from 'lucide-react';
 import {errText, tokenApi} from '@/lib/api';
 import {useAuth} from '@/lib/auth-context';
 import {useI18n} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
-import type {ApiToken, CreatedApiToken} from '@/lib/types';
+import type {ApiToken, BatchKeyResult, CreatedApiToken} from '@/lib/types';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {CopyButton} from '@/components/ui/copy-button';
@@ -39,6 +39,9 @@ export function TokensPanel() {
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<CreatedApiToken | null>(null);
   const [form, setForm] = useState<{name: string}>({name: ''});
+  const [selected, setSelected] = useState<number[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchResult, setBatchResult] = useState<BatchKeyResult[] | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -54,6 +57,56 @@ export function TokensPanel() {
     // 只读账号看到的是「为什么看不到」而不是一次失败请求）。
     if (isAdmin) void load();
   }, [load, isAdmin]);
+
+  // 选中项跟着列表走：已被删掉的令牌不该留在批量请求里
+  useEffect(() => {
+    const alive = new Set(tokens.map((tk) => tk.id));
+    setSelected((prev) => {
+      const next = prev.filter((id) => alive.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [tokens]);
+
+  // 与后端 /api/tokens/batch 的上限一致
+  const BATCH_LIMIT = 200;
+  const allSelected = tokens.length > 0 && selected.length === tokens.length;
+
+  function toggleSelected(id: number) {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function toggleAll() {
+    setSelected(allSelected ? [] : tokens.map((tk) => tk.id));
+  }
+
+  async function runBatch(action: 'enable' | 'disable' | 'delete') {
+    if (!selected.length || batchBusy) return;
+    if (selected.length > BATCH_LIMIT) {
+      notify.err(t('keys.batchTooMany', {max: BATCH_LIMIT}));
+      return;
+    }
+    setBatchBusy(true);
+    try {
+      const r = await tokenApi.batch(action, selected);
+      const failed = r.results.filter((item) => !item.ok);
+      setBatchResult(r.results);
+      setSelected([]);
+      const okCount = r.results.length - failed.length;
+      if (failed.length) {
+        notify.warn(
+          t('keys.batchFailedTitle', {n: failed.length}),
+          t('keys.batchSummary', {ok: okCount, fail: failed.length}),
+        );
+      } else {
+        notify.ok(t('keys.batchAllOk'), t('keys.batchSummary', {ok: okCount, fail: 0}));
+      }
+      await load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setBatchBusy(false);
+    }
+  }
 
   if (!isAdmin) {
     return (
@@ -142,12 +195,115 @@ export function TokensPanel() {
         {t('settings.tokensSessionOnlyHint')}
       </div>
 
+      {/* 批量操作条：与账号页同一套视觉；本面板只对 admin 渲染，viewer 看到的是上面的说明块 */}
+      {(selected.length > 0 || batchResult) && (
+        <div className="rounded-[20px] bg-muted px-4 py-3">
+          {selected.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs font-medium tabular-nums">
+                {batchBusy ? t('keys.batchRunning') : t('keys.batchSelected', {n: selected.length})}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => runBatch('disable')}
+              >
+                <Pause className="mr-1 h-3 w-3" />
+                {t('keys.batchDisable')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => runBatch('enable')}
+              >
+                <Play className="mr-1 h-3 w-3" />
+                {t('keys.batchEnable')}
+              </Button>
+              <ConfirmDialog
+                title={t('keys.batchDeleteTitle', {n: selected.length})}
+                description={t('keys.batchDeleteDesc')}
+                confirmText={t('keys.delete')}
+                destructive
+                onConfirm={() => runBatch('delete')}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px] text-destructive-text hover:text-destructive-text"
+                    disabled={batchBusy}
+                  >
+                    <Trash2 className="mr-1 h-3 w-3" />
+                    {t('keys.delete')}
+                  </Button>
+                }
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => setSelected([])}
+              >
+                {t('keys.batchClear')}
+              </Button>
+            </div>
+          )}
+
+          {batchResult && (
+            <div className={selected.length > 0 ? 'mt-2 border-t border-border/40 pt-2' : ''}>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                <span>
+                  {t('keys.batchSummary', {
+                    ok: batchResult.filter((item) => item.ok).length,
+                    fail: batchResult.filter((item) => !item.ok).length,
+                  })}
+                </span>
+                <span>{t('keys.batchLoadNote')}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 rounded-full text-[11px]"
+                  onClick={() => setBatchResult(null)}
+                >
+                  {t('common.close')}
+                </Button>
+              </div>
+              {batchResult.some((item) => !item.ok) && (
+                <div className="mt-1 flex flex-col gap-0.5">
+                  {batchResult.filter((item) => !item.ok).map((item) => (
+                    <div key={item.id} className="flex flex-wrap items-baseline gap-1.5 text-[10px] leading-4">
+                      <span className="font-mono text-foreground">{item.id}</span>
+                      <span className="whitespace-normal text-destructive-text">
+                        {item.error || t('keys.batchNoReason')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── 列表 ── */}
       <div className="overflow-hidden rounded-[20px] bg-muted">
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">
+              <TableHead className="w-9 pl-4 pr-0">
+                <input
+                  type="checkbox"
+                  className="size-4 cursor-pointer align-middle accent-primary"
+                  checked={allSelected}
+                  onChange={toggleAll}
+                  aria-label={t('keys.batchSelectAll')}
+                />
+              </TableHead>
+              <TableHead className="pl-1 text-[11px] text-muted-foreground">
                 {t('settings.tokensColName')}
               </TableHead>
               <TableHead className="text-[11px] text-muted-foreground">
@@ -170,7 +326,16 @@ export function TokensPanel() {
           <TableBody>
             {tokens.map((tk) => (
               <TableRow key={tk.id} className="border-b border-border/40">
-                <TableCell className="pl-4 text-sm font-medium">{tk.name}</TableCell>
+                <TableCell className="w-9 pl-4 pr-0">
+                  <input
+                    type="checkbox"
+                    className="size-4 cursor-pointer align-middle accent-primary"
+                    checked={selected.includes(tk.id)}
+                    onChange={() => toggleSelected(tk.id)}
+                    aria-label={t('keys.batchSelectRow', {name: tk.name})}
+                  />
+                </TableCell>
+                <TableCell className="pl-1 text-sm font-medium">{tk.name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {tk.prefix}…
                 </TableCell>

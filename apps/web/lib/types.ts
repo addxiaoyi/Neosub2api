@@ -8,6 +8,8 @@ export interface Me {
 export interface Account {
   /** 账号归属的服务商 id；缺省按 codebuddy 处理（存量账号全是它） */
   provider?: string;
+  /** 本端「导入账号」登记的行：上游没有这份账号，删除只回收本端行与镜像凭据 */
+  local_only?: boolean;
   /** 该令牌签发的总时长（秒）；后端从 JWT 解出，解不出为 null */
   ttl_seconds?: number | null;
   /** 令牌签发时间（秒）≈ 最近一次刷新时间；后端从 JWT iat 解出，解不出为 null */
@@ -258,6 +260,22 @@ export interface ApiToken {
 /** 创建令牌的返回：比 ApiToken 多一个**仅此一次**的明文字段。 */
 export interface CreatedApiToken extends ApiToken {
   token: string;
+}
+
+/**
+ * 密钥/令牌批量操作的逐条回执。
+ * 成功项只回 `ok`，失败项带后端原文原因；响应里不会出现密钥明文或哈希。
+ */
+export interface BatchKeyResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface BatchKeyResponse {
+  ok: boolean;
+  action: string;
+  results: BatchKeyResult[];
 }
 
 export interface RequestLog {
@@ -736,4 +754,118 @@ export interface PriceResolveResult {
   >;
   /** 未命中价格的 token_class 列表 */
   missing: string[];
+}
+
+/* ── Grok 注册任务（/api/grok/register）────────────────── */
+
+export type GrokRegisterTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/** 任务行：字段与 apps/control/app/db.py 的 grok_tasks 表一一对应 */
+export interface GrokRegisterTask {
+  id: number;
+  status: GrokRegisterTaskStatus;
+  /** 目标注册数量 */
+  count: number;
+  workers: number;
+  email_provider: string;
+  proxy: string;
+  payload_json: string;
+  result_json: string;
+  attempts: number;
+  max_attempts: number;
+  /** 后端原样的失败原因，成功时为空串 */
+  error: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  next_run_at: number;
+}
+
+/** 入参与后端 TaskCreate 同名同义，范围限制也一致 */
+export interface GrokRegisterTaskInput {
+  count: number;
+  workers: number;
+  email_provider: string;
+  proxy: string;
+  max_attempts: number;
+  payload: Record<string, unknown>;
+}
+
+/** GET /api/grok/register/worker：队列计数 + 执行器配置状态 */
+export interface GrokRegisterWorkerStats {
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  max_concurrency: number;
+  max_workers: number;
+  executor: 'http' | 'unconfigured';
+}
+
+/** grok_task_events 的一行：状态机每次流转落一条，不是前端按时间戳倒推 */
+export interface GrokRegisterEvent {
+  ts: number;
+  /** 阶段：queued / running / retried / retry / succeeded / failed / cancelled */
+  step: string;
+  /** 该阶段结果：ok / failed */
+  status: string;
+  /** 后端原样原因文本；失败事件即错误原文，前端不得截断 */
+  detail: string;
+}
+
+/** GET /api/grok/register/tasks/{id}/detail：任务行 + 结构化步骤 + 时间线 */
+export interface GrokRegisterDetail {
+  task: GrokRegisterTask;
+  status: GrokRegisterTaskStatus;
+  error: string;
+  steps: GrokRegisterEvent[];
+  timeline: {
+    created_at: number;
+    started_at: number | null;
+    finished_at: number | null;
+    next_run_at: number;
+  };
+}
+
+/** GET /api/system/backups：data/backups 下的归档，新→旧 */
+export interface BackupItem {
+  name: string;
+  size_bytes: number;
+  /** 归档文件的 mtime（秒） */
+  created_at: number;
+  /** 已过 mask_text，可直接展示 */
+  path: string;
+  /** 同名 .sha256 侧车是否存在 */
+  has_checksum: boolean;
+}
+
+export interface BackupList {
+  backups: BackupItem[];
+  count: number;
+  dir: string;
+}
+
+/** POST /api/system/backup */
+export interface BackupCreated {
+  ok: boolean;
+  name: string;
+  size_bytes: number;
+  duration_ms: number;
+  path: string;
+  sha256: string;
+  created_at: number;
+}
+
+/** POST /api/system/restore：pre_restore_backup 是恢复前的自动快照，可原样再恢复一次退回去 */
+export interface BackupRestored {
+  ok: boolean;
+  restored: string;
+  path: string;
+  pre_restore_backup: string;
+  pre_restore_path: string;
+  duration_ms: number;
+  selfcheck_ok: boolean;
+  /** 恢复后各表行数（来自归档 manifest） */
+  rows_after: Record<string, number>;
 }

@@ -34,9 +34,11 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
+import {BackupPanel} from '@/components/common/settings/BackupPanel';
 import {TokensPanel} from '@/components/common/settings/TokensPanel';
 import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
 import {ProvidersSection} from '@/components/common/settings/ProvidersSection';
+import {ModelMapTransfer} from '@/components/common/settings/ModelMapTransfer';
 import {RuntimeConfigSection} from './RuntimeConfigSection';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
@@ -822,6 +824,15 @@ export default function SettingsPage() {
     setExpiryDaily(getExpiryDailyGroup());
   }, []);
 
+  /**
+   * 展示用 host：SSR 阶段拿不到 location，先留空只显示 listen 原值；
+   * 挂载后补上当前域名，避免在反代部署下把监听地址误报成 127.0.0.1。
+   */
+  const [viewHost, setViewHost] = useState('');
+  useEffect(() => {
+    setViewHost(window.location.hostname);
+  }, []);
+
   /** 可视化表单状态 */
   const [form, setForm] = useState<Record<Group, Record<string, FieldValue>>>({
     schedule: defaultValues(SCHEDULE_FIELDS),
@@ -921,10 +932,10 @@ export default function SettingsPage() {
         }
       }
       if (mm.status === 'fulfilled') setModelMap(mm.value);
+      // 用户列表是 admin-only：viewer 不请求，否则开一次设置页就多吃一次 403
+      const u = await Promise.allSettled([settingsApi.users()]);
+      if (u[0].status === 'fulfilled') setUsers(u[0].value);
     }
-    // 用户列表是 current_user 权限，viewer 也能看（只读）
-    const u = await Promise.allSettled([settingsApi.users()]);
-    if (u[0].status === 'fulfilled') setUsers(u[0].value);
 }, [isAdmin]);
 
   /**
@@ -1075,6 +1086,15 @@ export default function SettingsPage() {
     }
   }
 
+  /** 导入 / 回滚会成批改映射，接口不回最终结果，必须重新拉一次 */
+  async function refreshModelMap() {
+    try {
+      setModelMap(await settingsApi.modelMap());
+    } catch (e) {
+      notify.err(errText(e));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -1142,7 +1162,7 @@ export default function SettingsPage() {
               <div className="mb-2 text-sm font-medium">{t('settings.serviceInfo')}</div>
               <div className="space-y-1.5 text-xs">
                 {([
-                  ['listen', t('settings.infoListen'), cfg?.listen ? `127.0.0.1${cfg.listen}` : '—'],
+                  ['listen', t('settings.infoListen'), cfg?.listen ? `${viewHost}${cfg.listen}` : '—'],
                   ['apiKey', t('settings.infoApiKey'), cfg?.api_key_masked ? t('settings.infoApiKeySet') : '—'],
                   ['authDir', t('settings.infoAuthDir'), cfg?.auth_dir || '—'],
                 ] as [string, string, string][]).map(([id, k, v]) => (
@@ -1504,7 +1524,7 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">Upstash Token</Label>
+                <Label className="text-[11px] text-muted-foreground">{t('settings.upstashTokenLabel')}</Label>
                 <Input
                   type="password"
                   value={upstashForm.token}
@@ -1823,15 +1843,18 @@ export default function SettingsPage() {
               </div>
             )}
           </div>
-            </>
-          ) : (
-            <section className="rounded-[20px] bg-muted px-3.5 py-4">
-              <div className="text-xs font-medium">{t('settings.adminOnlyConfig')}</div>
-              <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
-                {t('settings.adminOnlyConfigDesc')}
-              </div>
-            </section>
-          )}
+
+          {/* 批量导入 / 导出 / 回滚：入口只在 admin 分支里，viewer 看不到 */}
+          <ModelMapTransfer onChanged={refreshModelMap} />
+        </>
+      ) : (
+        <section className="rounded-[20px] bg-muted px-3.5 py-4">
+          <div className="text-xs font-medium">{t('settings.adminOnlyConfig')}</div>
+          <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
+            {t('settings.adminOnlyConfigDesc')}
+          </div>
+        </section>
+      )}
         </TabsContent>
 
         {/* ═══ 管理用户 ═══ */}
@@ -1889,6 +1912,7 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {isAdmin ? (
           <div className="overflow-hidden rounded-[20px] bg-muted">
             <Table>
               <TableHeader>
@@ -1974,6 +1998,12 @@ export default function SettingsPage() {
               />
             )}
           </div>
+          ) : (
+            <section className="rounded-[20px] bg-muted px-3.5 py-4">
+              <div className="text-xs font-medium">{t('settings.tokensAdminRequired')}</div>
+              <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{t('settings.adminOnlyConfigDesc')}</div>
+            </section>
+          )}
         </TabsContent>
 
         {/* ═══ 访问令牌 ═══ */}
@@ -1984,6 +2014,8 @@ export default function SettingsPage() {
         {/* ═══ 系统更新 ═══ */}
         <TabsContent value="system" className="mt-4 space-y-4">
           <UpdatePanel />
+          {/* 备份与恢复：端点与设置页其余维护动作一样是 admin-only */}
+          {isAdmin && <BackupPanel />}
         </TabsContent>
 
         {/* ═══ 更新日志 ═══ */}

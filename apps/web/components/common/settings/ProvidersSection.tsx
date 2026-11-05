@@ -14,14 +14,22 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import {credentialApi, errText, gatewayApi, providerApi} from '@/lib/api';
+import {credentialApi, errText, gatewayApi, providerApi, runtimeConfigApi} from '@/lib/api';
 import {notify} from '@/lib/toast';
 import {useAuth} from '@/lib/auth-context';
 import {useT} from '@/lib/i18n/provider';
-import type {ProviderCredential, ProviderCredentialInput, ProviderInfo} from '@/lib/providers';
+import type {
+  ProviderCredential,
+  ProviderCredentialInput,
+  ProviderHealth,
+  ProviderInfo,
+} from '@/lib/providers';
+import {formatDateTime} from '@/lib/utils';
 import {CAPABILITY_LABELS, exposedOptionFields, STATUS_LABEL_KEY} from '@/lib/provider-schema';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {GrokRegisterTasks} from '@/components/common/settings/GrokRegisterTasks';
+import {QoderSessionsPanel} from '@/components/common/settings/QoderSessionsPanel';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
@@ -46,6 +54,19 @@ interface CredDraft {
 }
 
 const EMPTY_CRED: CredDraft = {label: '', base_url: '', secret: '', sort_order: '', note: '', enabled: true};
+
+const HEALTH_LABEL_KEY: Record<string, string> = {
+  ok: 'providers.healthOk',
+  failed: 'providers.healthFailed',
+  unsupported: 'providers.healthUnsupported',
+};
+
+/** ok 用主色，failed 才用告警色，unsupported/未检测保持中性，避免把「不支持」画成故障。 */
+function healthVariant(status: string | null): 'default' | 'destructive' | 'secondary' {
+  if (status === 'ok') return 'default';
+  if (status === 'failed') return 'destructive';
+  return 'secondary';
+}
 
 /** 编辑时 secret 故意留空：掩码值不回填，也不会被当成新密钥提交。 */
 function draftOfCred(c: ProviderCredential): CredDraft {
@@ -73,6 +94,10 @@ export function ProvidersSection() {
   const [busy, setBusy] = useState<string | null>(null);
   const [allowAnonymous, setAllowAnonymous] = useState<boolean | null>(null);
   const [gatewayBusy, setGatewayBusy] = useState(false);
+  const [health, setHealth] = useState<ProviderHealth | null>(null);
+  const [healthEnabled, setHealthEnabled] = useState<boolean | null>(null);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [healthToggleBusy, setHealthToggleBusy] = useState(false);
 
   const [creds, setCreds] = useState<ProviderCredential[]>([]);
   const [credLoading, setCredLoading] = useState(true);
@@ -98,6 +123,12 @@ export function ProvidersSection() {
         setCreds([]);
         setCredError(errText(e));
       }
+      try {
+        // 检测结果是只读观测，viewer 也看；失败不拖垮上面的列表
+        setHealth(await providerApi.health());
+      } catch {
+        setHealth(null);
+      }
     } catch {
       // 不透传 axios 原文（网络问题会变成英文 Network Error）
       setError(t('providers.loadFailed'));
@@ -117,6 +148,14 @@ export function ProvidersSection() {
       .get()
       .then((g) => setAllowAnonymous(g.allow_anonymous))
       .catch(() => setAllowAnonymous(null));
+    // 总开关存在运行参数里（viewer 拿不到这个接口，也不该看到开关）
+    runtimeConfigApi
+      .get()
+      .then((r) => {
+        const item = r.items.find((i) => i.key === 'health_check_enabled');
+        setHealthEnabled(Boolean(item?.value));
+      })
+      .catch(() => setHealthEnabled(null));
   }, [load, isAdmin]);
 
   async function patch(
@@ -148,6 +187,35 @@ export function ProvidersSection() {
       notify.err(errText(e));
     } finally {
       setGatewayBusy(false);
+    }
+  }
+
+  /** 手动触发一轮；总开关关着也能跑（只影响自动调度，不影响手动验证） */
+  async function runHealth() {
+    setHealthBusy(true);
+    try {
+      const next = await providerApi.runHealth();
+      setHealth(next);
+      setHealthEnabled(next.enabled);
+      notify.ok(t('providers.healthRunOk'), t('providers.healthRunDone', {count: next.providers.length}));
+    } catch (e) {
+      notify.err(`${t('providers.healthRunFailed')}：${errText(e)}`);
+    } finally {
+      setHealthBusy(false);
+    }
+  }
+
+  async function toggleHealthCheck(checked: boolean) {
+    setHealthToggleBusy(true);
+    try {
+      await runtimeConfigApi.save({health_check_enabled: checked});
+      setHealthEnabled(checked);
+      setHealth((prev) => (prev ? {...prev, enabled: checked} : prev));
+      notify.ok(t('providers.healthToggleSaved'));
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setHealthToggleBusy(false);
     }
   }
 
@@ -185,6 +253,7 @@ export function ProvidersSection() {
   const optionsDirty = (p: ProviderInfo) =>
     JSON.stringify(optDrafts[p.id] ?? p.options) !== JSON.stringify(p.options);
   const credsOf = (p: ProviderInfo) => creds.filter((c) => c.provider === p.id);
+  const healthOf = (p: ProviderInfo) => health?.providers.find((h) => h.provider === p.id);
 
   /** 排序字段留空 = 交给后端默认值；填了就必须是整数，先拦下再提交。 */
   function parsedSort(raw: string): number | null | undefined {
@@ -404,6 +473,26 @@ export function ProvidersSection() {
                         {t(p.readiness === 'needs_config' ? 'providers.needsConfig' : 'providers.ready')}
                       </Badge>
                     </div>
+                    {(() => {
+                      const entry = healthOf(p);
+                      const status = entry?.status ?? null;
+                      return (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <Badge
+                            variant={healthVariant(status)}
+                            className="rounded-full text-[10px]"
+                            title={entry?.error || undefined}
+                          >
+                            {t(status ? HEALTH_LABEL_KEY[status] : 'providers.healthNone')}
+                          </Badge>
+                          {entry?.checked_at ? (
+                            <span className="text-[10px] text-muted-foreground">
+                              {formatDateTime(new Date(entry.checked_at * 1000).toISOString())}
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell className="max-w-[180px] whitespace-normal text-[11px] text-muted-foreground">
                     {CAPABILITY_LABELS.filter(([key]) => p.capabilities[key])
@@ -715,6 +804,12 @@ export function ProvidersSection() {
                             </div>
                           )}
                         </div>
+
+                        {/* 注册任务：只挂 grok-register 一家，admin-only（接口本身也只放行 admin） */}
+                        {p.id === 'grok-register' && isAdmin && <GrokRegisterTasks />}
+
+                        {/* 会话搬运：只挂启用的 qoder_sidecar，admin-only；未启用时整块不出现 */}
+                        {p.id === 'qoder_sidecar' && isAdmin && p.enabled && <QoderSessionsPanel />}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -760,6 +855,39 @@ export function ProvidersSection() {
           <div className="px-4 pb-3 text-[11px] text-muted-foreground">{t('providers.requiresAdmin')}</div>
         )}
       </section>
+
+      {/* 定时健康检测：只观测可用性，不改路由/启用状态，也不并入连败告警。
+          admin-only：viewer 既看不到按钮，也不发写请求 */}
+      {isAdmin && (
+        <section className="rounded-[20px] bg-muted px-3.5 py-3">
+          <div className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-xs font-medium">{t('providers.healthTitle')}</div>
+              <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                {t('providers.healthDesc', {sec: health?.interval_sec ?? 300})}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-full text-[11px]"
+                disabled={healthBusy}
+                onClick={runHealth}
+              >
+                <RefreshCw className={healthBusy ? 'mr-1 h-3 w-3 animate-spin' : 'mr-1 h-3 w-3'} />
+                {healthBusy ? t('providers.healthRunning') : t('providers.healthRun')}
+              </Button>
+              <Switch
+                checked={Boolean(healthEnabled)}
+                disabled={healthToggleBusy || healthEnabled === null}
+                onCheckedChange={toggleHealthCheck}
+                aria-label={t('providers.healthTitle')}
+              />
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* 网关鉴权：默认要求 Bearer key；匿名访问仅本机调试时打开。
           这是 admin-only 配置，viewer 不渲染，也不发请求 */}

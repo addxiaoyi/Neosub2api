@@ -15,6 +15,14 @@ export interface ProviderCapabilities {
   credits: boolean;
   register: boolean;
   sidecar: boolean;
+  // 扩展位：后端普遍输出，但也有手写 dict 的 sidecar 只输出自己声明的子集，故为可选
+  embeddings?: boolean;
+  images?: boolean;
+  videos?: boolean;
+  media?: boolean;
+  rerank?: boolean;
+  usage?: boolean;
+  count_tokens?: boolean;
 }
 
 export type ProviderStatus = 'implemented' | 'stub' | 'sidecar';
@@ -49,6 +57,36 @@ export interface ProviderCredentialInput {
 
 /** 许可证/合规风险等级：safe = MIT/Apache/BSD 可自由合入；warn = GPL/LGPL 需传染性隔离；danger = 无 LICENSE 或非商用禁止，仅 sidecar 评估。 */
 export type RiskLevel = 'safe' | 'warn' | 'danger';
+
+/** 健康检测三档：ok = 探测通过；failed = 探测失败（如实记录）；unsupported = 该 provider 没有可探测的能力，不算失败。 */
+export type ProviderHealthStatus = 'ok' | 'failed' | 'unsupported';
+
+/** 某家 provider 的最近一次检测结果；checked_at 为空即「未检测」。 */
+export interface ProviderHealthEntry {
+  provider: string;
+  status: ProviderHealthStatus | null;
+  checked_at: number | null;
+  latency_ms: number | null;
+  error: string;
+}
+
+export interface ProviderHealthCheck {
+  id: number;
+  provider: string;
+  status: ProviderHealthStatus;
+  started_at: number;
+  finished_at: number;
+  latency_ms: number;
+  error: string;
+}
+
+export interface ProviderHealth {
+  ok: boolean;
+  enabled: boolean;
+  interval_sec: number;
+  providers: ProviderHealthEntry[];
+  history: ProviderHealthCheck[];
+}
 
 export interface ProviderInfo {
   id: string;
