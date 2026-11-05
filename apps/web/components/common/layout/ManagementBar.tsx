@@ -262,7 +262,7 @@ export function ManagementBar() {
     };
   }, []);
 
-  // 每个浏览器会话检测一次新版本，有更新则弹出提醒（避免打扰不重复提示）
+  // 每个浏览器会话检测一次新版本，有更新则弹出提醒（避免重复打扰）
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return;
     const KEY = 'workbuddy-manager:update-notified';
@@ -271,14 +271,15 @@ export function ManagementBar() {
 
     (async () => {
       try {
-        const c = await systemApi.checkUpdate();
-        if (!c.has_any) return;
-        const parts: string[] = [];
-        if (c.manager.has_update) parts.push(t('update.managerVersion', {v: c.manager.latest}));
-        if (c.upstream.has_update) parts.push(t('update.upstreamVersion', {v: c.upstream.latest}));
-        notify.warn(t('update.newVersion'), t('update.notice', {targets: parts.join(' · ')}));
+        const st = await systemApi.updateStatus();
+        // 有新版本且本部署装得上才提醒：避免给一个装不上的版本弹提示
+        if (!st.available || !st.can_apply) return;
+        notify.warn(
+          t('update.newVersion'),
+          t('update.notice', {targets: t('update.managerVersion', {v: st.latest_version})}),
+        );
       } catch {
-        /* 检测失败静默：不打扰用户（如服务器访问 GitHub 受限） */
+        /* 检测失败静默：不打扰用户（如服务器访问发布源受限） */
       }
     })();
   }, [mounted, t]);
