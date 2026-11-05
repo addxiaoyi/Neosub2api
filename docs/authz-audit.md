@@ -196,6 +196,10 @@
 | GET | /api/system/check-update | current_user | 合规（无远端查询，system.py:116-143） | system.py:116-117 |
 | GET | /api/system/update-status | current_user | 合规 | system.py:146-147 |
 
+> **（2026-11-05 已更正，原表格该行保留作历史）** `GET /api/system/check-update` 已于 2026-11-05 下线：`apps/control/app/routers/system.py` 不再注册该路由，请求它现在直接 404，`system.py:116-117` 的 handler 与 `:116-143` 的实现已不存在；本表中存活的是 `changelog` / `versions` / `update-status` 三行。
+>
+> **这条为什么重要**：按本表做鉴权审计会把一个已删除的端点当成存活攻击面，重复排期或误报「viewer 可读」；旧行号还会把人带到一个早已删除的 handler，让复核结论建立在空引用上。
+
 ### logs.py（prefix `/api/logs`）
 
 | 方法 | 路径 | 当前鉴权 | 判定 | 证据 |

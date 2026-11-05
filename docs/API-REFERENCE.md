@@ -883,6 +883,10 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 - `GET /api/system/changelog`：解析根目录 `CHANGELOG.md`，返回 `{available: true, path: "CHANGELOG.md", total, versions: [...], truncated, current}`；`versions` 每项 `{version, date, unreleased, sections: [{title, items: [{level, text}]}]}`（`## 版本` / `### 分类` / `- 条目`）。文件缺失或不可读返回 `available: false` + `error` + 空 `versions`，不 500。
 - `GET /api/system/update-status`：与 `check-update` 同源的固定「无更新」结构 + 面板所需字段：`{available: false, current_version, reason: "本部署不提供在线更新", version, running: false, ok: null, step: "", logs: [], updater_found: false, upstream_dir: "", can_update_upstream: false, in_container, upstream_ref: ""}`。
 
+> **（2026-11-05 已更正）** `GET /api/system/check-update` 已于 2026-11-05 下线：`apps/control/app/routers/system.py` 不再注册该路由，旧投影函数 `check_update_legacy` 也从 `apps/control/app/routers/update.py` 删除，请求它现在直接 404。`/api/system/update-status` 不再「与 `check-update` 同源」，它由 `apps/control/app/routers/update.py` 的 `status_payload` 取 `app.state.update_feed.summary()`，与已删除的旧壳没有共享结构。
+>
+> **读旧响应会得到的误判**：按原文继续请求 `check-update`，会把 404 当成鉴权失效或发布源临时故障去排查，实际是端点已不存在；按「两套外形共用一份探测逻辑」去找旧路径，会误以为 `update_feed` 之外还有一条外呼链路，而默认 `UNIFIED_UPDATE_ENABLED=false` 时 `update-status` 一个外网请求都不发。原文列出的固定字段（`version`、`running`、`step`、`logs`、`upstream_ref` 等）也不是当前返回，照旧键取值只会得到缺键，而不是「无更新」。
+
 ### 备份与恢复（`/api/system/*`，三个端点均管理员）
 
 路由前缀 `/api/system`（`backup.py:36`）；保留份数 `BACKUP_KEEP = 14`（`backup.py:38`）。

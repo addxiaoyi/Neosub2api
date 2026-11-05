@@ -170,15 +170,21 @@ def test_changelog_missing_file_is_not_500(tmp_path: Path) -> None:
 
 
 def test_update_status_is_honest(admin: httpx.Client) -> None:
+    """默认配置下在线更新是关的：状态必须如实说明原因，不许假装能更新。"""
     r = admin.get("/api/system/update-status")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["available"] is False
     assert body["current_version"] == __version__
-    assert body["version"] == __version__
+    assert body["latest_version"] == __version__
+    assert body["available"] is False
+    assert body["signature"] == "none"
     assert body["reason"]
-    assert body["running"] is False and body["logs"] == []
     assert body["updater_found"] is False
+    assert body["can_apply"] is False
+    job = body["job"]
+    assert job["state"] == "idle"
+    assert job["progress"] == 0
+    assert job["log_tail"] == []
 
 
 def test_versions_shape_and_viewer_can_read(admin: httpx.Client) -> None:
@@ -199,28 +205,3 @@ def test_versions_shape_and_viewer_can_read(admin: httpx.Client) -> None:
         viewer.close()
 
 
-def test_check_update_never_invents_a_new_version(admin: httpx.Client) -> None:
-    viewer = _login_viewer(admin)
-    try:
-        r = viewer.get("/api/system/check-update")
-        force = viewer.get("/api/system/check-update", params={"force": "true"})
-    finally:
-        viewer.close()
-    assert r.status_code == 200, r.text
-    assert force.status_code == 200, "force 也应可用，只是结论不变"
-
-    body = r.json()
-    assert body["has_any"] is False
-    assert body["current_version"] == __version__
-    assert body["manager"]["current"] == __version__
-    assert body["manager"]["latest"] == __version__, "没有远端时不得报出更高的版本号"
-    assert body["manager"]["has_update"] is False
-    assert body["upstream"]["has_update"] is False
-    assert body["upstream"]["latest"] == ""
-    # 与 update-status 同源：同一句原因，避免两套语义
-    status = admin.get("/api/system/update-status").json()
-    assert body["reason"] == status["reason"]
-    assert body["manager"]["error"] == status["reason"]
-    assert body["upstream"]["error"] == status["reason"]
-    assert body["checked_at"] > 0 and body["cached"] is False
-    assert force.json()["has_any"] is False

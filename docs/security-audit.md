@@ -76,6 +76,10 @@
 | S-21 | low | `apps/control/app/routers/auth.py:21-26`；`apps/control/app/routers/settings.py:77-135`、`:199-218` | 管理员改 provider key、开匿名、加用户等 | 仅登录/登录失败写 `audit_logs`；配置类写操作无审计，事后无法追溯谁改了上游凭证或开放了匿名 | 在管理面写操作统一记录 actor/action/target/ip（不记录密钥值） |
 | S-22 | low | `.github/workflows/ci.yml`（`npm ci --no-audit`） | 依赖引入已知高危版本 | CI 明确关闭 npm 审计，S-07 这类公告不会在流水线暴露 | 恢复 `npm audit --omit=dev`（或等价 SCA）作为非阻断报告 + 高危阻断 |
 
+> **（2026-11-05 已更正，原 S-20 行保留作历史）** S-20 里的 `check-update` 已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由），viewer 无法再调用它，也就没有「反复调用触发外部请求」这条路径；仍对 viewer 开放的是 `GET /api/system/versions`，它只读库内 `accounts` 计数、不发外网请求。
+>
+> **这条为什么重要**：按旧行会继续按「可能出现外呼」的严重度给 S-20 排期，或去 `check-update` 的 handler 找限流缺口；实际剩余风险只是版本页暴露已启用上游账号数，处置方式（是否改 `admin_user`）与外部请求无关。
+
 ## 重点问题证据
 
 - **S-01**：`_read_config` 在 `provider_config` 分支里把数据库 JSON 原样并入返回（`settings.py:57-64`），`GET /settings/upstream` 仅 `current_user`（`:72-74`）。临时库实测响应中出现 `SECRET-UPSTREAM-KEY-42`。前端 settings 页却按 `api_key_masked` / `token_masked` 渲染，说明前后端契约本身已错位。
@@ -150,6 +154,10 @@
 | S-20 | 延期 | `check-update`/`versions` 对 viewer 开放；改为管理员或加缓存需确认前端调用方。 |
 | S-21 | 部分修复（延期） | 已落审计：`settings.gateway`（匿名开关）、`settings.reveal_secret`（查看明文）。延期：provider key 变更、用户增删改、model-map 保存的统一审计，需先定 `audit_logs` 的 action 命名与保留期。 |
 | S-22 | 延期（CI 决策） | 原因：恢复 `npm audit --omit=dev` 门禁要处理现有 1 critical + 4 high 的存量告警（与 S-07 的升级窗口绑定），否则流水线会长期红。 |
+
+> **（2026-11-05 已更正，原 S-20 状态行保留作历史）** `check-update` 已下线（`apps/control/app/routers/system.py` 不再注册该路由），S-20 的延期理由只剩 `versions` 对 viewer 开放这一项；后者不发外网请求，「加缓存与限流」对它不适用，待决的只有是否收紧为 `admin_user`。
+>
+> **这条为什么重要**：按旧状态行会以为 S-20 还压着一个外部请求限流项，验收时找不到可测的外呼路径；也会把已删除端点算进未修复清单，虚增延期项。
 
 > **2026-11-04 已更正（原表格 S-15 行保留作历史）**：S-15 于 2026-11-04 进一步收紧——「`/api/users` 列表」现为 `admin_user`（`apps/control/app/routers/settings.py:958-964`，def 行 959）、「Grok 任务详情」现为 `admin_user`（`apps/control/app/routers/grok.py:39-41`、`:44-47`，def 行 40、45），两项均不再对 viewer 开放；仍对 viewer 开放的只剩「`/api/keys` 列表」，且已带 `owner_user_id` 体内收窄（`apps/control/app/routers/keys.py:36-46`）。原行「`/api/keys` 列表、`/api/users` 列表、Grok 任务详情仍对 viewer 开放」仅前半句仍成立。这条为什么重要：修复状态表是验收依据，旧状态会让人以为三项都没动而重复排期，也会让 keys 列表的体内收窄改造被漏看。
 

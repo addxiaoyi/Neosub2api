@@ -1,13 +1,11 @@
-"""系统信息面板：更新日志（仓库根 CHANGELOG.md）与更新状态。
+"""系统信息面板：更新日志（仓库根 CHANGELOG.md）与上游账号概览。
 
-本仓没有在线更新能力：update-status / check-update 都如实报告没有新版本，
-check-update 复用 update-status 的同一份摘要（available/current_version/reason），
-不另造一套「有新版本可用」的语义。
+在线更新状态只由 routers/update.py 的 /update-status 提供；旧的 /check-update
+兼容壳已于 2026-11-05 下线。
 """
 
 import re
 import sqlite3
-import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
@@ -81,14 +79,6 @@ def get_changelog(user: dict = Depends(current_user)):
     return read_changelog()
 
 
-NO_ONLINE_UPDATE = "本部署不提供在线更新"
-
-
-def update_summary() -> dict:
-    """update-status 与 check-update 共用，避免两套「是否有新版本」的语义。"""
-    return {"available": False, "current_version": __version__, "reason": NO_ONLINE_UPDATE}
-
-
 def count_upstream_accounts(request: Request) -> int | None:
     """已启用的上游账号数；读不到库时返回 None，不编造 0。"""
     try:
@@ -110,51 +100,4 @@ def get_versions(request: Request, user: dict = Depends(current_user)):
         "upstream_connected": bool(accounts),  # 有已启用的上游账号 = 已接入
         "upstream_accounts": accounts,
         "upstream_dir": "",  # 本部署没有可更新的上游代码目录
-    }
-
-
-@router.get("/check-update")
-def check_update(force: bool = False, user: dict = Depends(current_user)):
-    """没有远端可查，force 也改变不了结论；返回「无更新」而不是假的新版本号。"""
-    summary = update_summary()
-    reason = summary["reason"]
-    return {
-        **summary,
-        "checked_at": int(time.time()),
-        "cached": False,
-        "manager": {
-            "current": __version__,
-            "latest": __version__,  # 没有远端可比，当前版本就是最新已知版本
-            "has_update": False,
-            "error": reason,
-            "url": "",
-            "repo": "",
-        },
-        "upstream": {
-            "current": "",  # 没有本地上游代码版本可上报
-            "latest": "",
-            "has_update": False,
-            "error": reason,
-            "date": "",
-            "subject": "",
-            "repo": "",
-        },
-        "has_any": False,
-    }
-
-
-@router.get("/update-status")
-def get_update_status(user: dict = Depends(current_user)):
-    return {
-        **update_summary(),
-        "version": __version__,  # 前端 UpdatePanel 读的是 version
-        "running": False,
-        "ok": None,
-        "step": "",
-        "logs": [],
-        "updater_found": False,
-        "upstream_dir": "",
-        "can_update_upstream": False,
-        "in_container": Path("/.dockerenv").exists(),
-        "upstream_ref": "",
     }

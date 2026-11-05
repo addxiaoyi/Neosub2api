@@ -177,3 +177,7 @@ python -m pytest tests/test_security_matrix.py -q
 - **`/api/settings/upstream` 里的 URL 字段**：代码上该接口不做地址守卫，但这些值只作为配置内容下发给上游，不作为控制面出站目标；未做写库实测，因此未列为可利用发现。
 - **网络依赖端点**：`/api/system/check-update` 未实测（可能访问外网）；其余矩阵端点均已实跑。
 - **并发/竞态**：未做多进程、并发登录失败与配额并发的压力验证。
+
+> **（2026-11-05 已更正）** 上文端点已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由），该条的「未实测」对象已不存在；当前矩阵里与更新相关的只剩 `GET /api/system/update-status`，默认 `UNIFIED_UPDATE_ENABLED=false` 时不发外网请求。
+>
+> **这条为什么重要**：把一个 404 端点继续记成「漏测的网络攻击面」，会让复测报告一直挂一条无对象的遗留项，也会让「外呼目标待确认」被反复引用而实际已无外呼。

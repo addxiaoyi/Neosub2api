@@ -135,6 +135,10 @@
 - **状态（2026-11-03）**：已降级删除。前端删掉「开始更新」「固定/取消 ref」按钮与 `systemApi.startUpdate` / `setUpstreamRef`，`UpdatePanel` 只保留「检查更新」等只读能力；后端仍是 4 个 GET，未新增写端点。
 - **改动面**：后端 2 端点（中）；或前端 1 组件（小）。
 
+> **（2026-11-05 已更正，原证据行保留作历史）** 证据里的 `check-update` 已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由），`system.py:116` 的 handler 已不存在；当前 `system.py` 只有 changelog / versions 两个 GET，`update-status` 已迁到 `apps/control/app/routers/update.py`。
+>
+> **这条为什么重要**：按「4 个 GET」核对路由数会把已删除端点算进现状，去 `system.py:116` 找实现只会扑空；也会让更新面板对接时误以为旧壳仍可读，从而漏掉 `update-status` 已换文件的迁移判断。
+
 ### P1-3 「强制重启上游」路径写错，管理员点击必 404
 
 - **问题**：前端调 `POST /api/restart`，后端实际路由是 `POST /api/accounts/restart`。
@@ -489,6 +493,10 @@
 | `GET /api/system/versions` | user | 设置·更新 | 有入口 |
 | `GET /api/system/check-update` | user | 设置·更新 | 有入口 |
 | `GET /api/system/update-status` | user | 设置·更新 | 有入口 |
+
+> **（2026-11-05 已更正，原表格 `check-update` 行保留作历史）** `GET /api/system/check-update` 已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由），前端对它的调用为零；本表里存活的是 `changelog` / `versions` / `update-status` 三行。
+>
+> **这条为什么重要**：把已删除端点记为「有入口」会让端点盘点虚增一条、并在 UI 复核时去找一个不存在的「检查更新」入口；实际设置·更新页读的是 `update-status`。
 
 > 注：`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`GET /v1/models` 属网关协议面，不计入管理端点审计。
 
