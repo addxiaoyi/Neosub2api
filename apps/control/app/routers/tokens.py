@@ -11,8 +11,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from ..security import admin_user, current_user
-from .keys import create_key_record
+from ..security import admin_user, audit_event, current_user
+from .keys import BatchKeysIn, apply_key_batch, batch_ids, create_key_record, delete_key_cascade
 
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
@@ -113,13 +113,38 @@ def update_token(token_id: int, body: TokenPatch, request: Request, user: dict =
 
 @router.delete("/{token_id}")
 def revoke_token(token_id: int, request: Request, user: dict = Depends(admin_user)):
-    """删除即吊销：哈希没了，这把 u2a_ 立刻无法通过 /v1 鉴权。"""
+    """删除即吊销：哈希没了，这把 u2a_ 立刻无法通过 /v1 鉴权。
+
+    与 /api/keys 的删除共用级联回收：令牌没了，它的配额策略/告警也必须一起删，
+    否则 /api/quota/policies 会留下无主策略。
+    """
     conn = request.app.state.db.connect()
     try:
-        cur = conn.execute("DELETE FROM api_keys WHERE id = ?", (token_id,))
+        removed = delete_key_cascade(conn, token_id)
         conn.commit()
     finally:
         conn.close()
-    if cur.rowcount == 0:
+    if removed == 0:
         raise HTTPException(404, "访问令牌不存在")
     return {"ok": True}
+
+
+@router.post("/batch")
+def batch_tokens(body: BatchKeysIn, request: Request, user: dict = Depends(admin_user)):
+    """访问令牌批量启停/删除：与 /api/keys/batch 同一套逐条语义与上限。"""
+    action, ids = batch_ids(body)
+    conn = request.app.state.db.connect()
+    try:
+        results = apply_key_batch(conn, ids, action, missing="访问令牌不存在")
+        ok_count = sum(1 for item in results if item["ok"])
+        audit_event(
+            conn,
+            user["username"],
+            "tokens.batch",
+            action,
+            f"count={len(ids)} ok={ok_count}",
+            request.client.host if request.client else "",
+        )
+    finally:
+        conn.close()
+    return {"ok": all(item["ok"] for item in results), "action": action, "results": results}

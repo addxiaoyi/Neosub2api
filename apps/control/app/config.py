@@ -2,8 +2,14 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# provider 健康检测间隔（秒）：环境变量与库里都可能写坏，统一钳到 60..86400
+HEALTH_INTERVAL_DEFAULT = 300
+HEALTH_INTERVAL_MIN = 60
+HEALTH_INTERVAL_MAX = 86400
 
 # 历史版本用过的固定默认口令：只用于识别，绝不作为实际口令回退
 LEGACY_ADMIN_PASSWORD = "unified-admin"
@@ -30,6 +36,15 @@ def _bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def clamp_health_interval(raw: Any) -> int:
+    """非法值回落到默认 300，越界钳到 60..86400。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return HEALTH_INTERVAL_DEFAULT
+    return max(HEALTH_INTERVAL_MIN, min(HEALTH_INTERVAL_MAX, value))
 
 
 def _admin_password(data_dir: Path) -> tuple[str, str]:
@@ -98,6 +113,18 @@ class Settings:
     model_fallback_first: bool = False
     # 演示模式：进程内假上游 + 标注清楚的演示数据，只允许绑定回环地址（详见 docs/DEMO.md）
     demo_mode: bool = False
+    # 自助注册：默认关闭；开启后 /api/auth/register 才创建账号（role=user）
+    allow_registration: bool = False
+    # 运维告警阈值：0 表示关闭该规则。三条规则都复用 quota_alerts 存储与去重语义
+    alert_provider_failure_streak: int = 3
+    alert_quota_remaining_percent: int = 20
+    alert_usage_missing_ratio_percent: int = 50
+    alert_usage_missing_min_requests: int = 20
+    # Prometheus 抓取令牌：留空 = 只认 admin 会话；配置后额外接受 Authorization: Bearer <token>
+    metrics_token: str = ""
+    # provider 定时健康检测：默认关闭；只观测可用性，不参与路由与告警
+    health_check_enabled: bool = False
+    health_check_interval_sec: int = HEALTH_INTERVAL_DEFAULT
 
 
 def load_settings() -> Settings:
@@ -142,6 +169,20 @@ def load_settings() -> Settings:
         # 存量客户端逃生口：默认严格 404，不要默认打开
         model_fallback_first=_bool("UNIFIED_MODEL_FALLBACK_FIRST", False),
         demo_mode=_bool("UNIFIED_DEMO_MODE", False),
+        allow_registration=_bool("UNIFIED_ALLOW_REGISTRATION", False),
+        alert_provider_failure_streak=int(os.getenv("UNIFIED_ALERT_PROVIDER_FAILURE_STREAK", "3")),
+        alert_quota_remaining_percent=int(os.getenv("UNIFIED_ALERT_QUOTA_REMAINING_PERCENT", "20")),
+        alert_usage_missing_ratio_percent=int(
+            os.getenv("UNIFIED_ALERT_USAGE_MISSING_RATIO_PERCENT", "50")
+        ),
+        alert_usage_missing_min_requests=int(
+            os.getenv("UNIFIED_ALERT_USAGE_MISSING_MIN_REQUESTS", "20")
+        ),
+        metrics_token=os.getenv("UNIFIED_METRICS_TOKEN", "").strip(),
+        health_check_enabled=_bool("UNIFIED_HEALTH_CHECK_ENABLED", False),
+        health_check_interval_sec=clamp_health_interval(
+            os.getenv("UNIFIED_HEALTH_CHECK_INTERVAL_SEC", str(HEALTH_INTERVAL_DEFAULT))
+        ),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

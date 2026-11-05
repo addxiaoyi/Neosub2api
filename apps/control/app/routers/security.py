@@ -11,14 +11,15 @@ net_guard.py 实际只做一件事：校验上游地址（拒绝环回 / 私网 
 不提供 /api/security/rules 与 /api/security/logs：库里没有对应存储，也不存在执行逻辑。
 """
 
-import datetime as dt
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
+from ..billing import period_bounds
 from ..net_guard import BLOCKED_ADDRESSES, BLOCKED_HOSTNAMES
-from ..security import PermissionDenied, current_user
+from ..security import PermissionDenied, admin_user, audit_event, current_user
 from .auth import LOGIN_MAX_FAILURES, LOGIN_WINDOW_SEC, _login_failures, _login_lock
 
 router = APIRouter(prefix="/api", tags=["security"])
@@ -32,7 +33,8 @@ SCOPE_SELF = "self"
 
 
 def _day_start() -> int:
-    return int(dt.datetime.combine(dt.date.today(), dt.time.min).timestamp())
+    """「今天」按 UTC+8 的日界，与配额周期同一口径，不随宿主机时区漂移。"""
+    return period_bounds("day", int(time.time()))[0]
 
 
 def _active_throttle(now_ts: float) -> list[dict[str, Any]]:
@@ -168,6 +170,70 @@ def login_failures(request: Request, limit: int = 50, user: dict = Depends(curre
         }
     finally:
         conn.close()
+
+
+class LoginFailureClear(BaseModel):
+    ip: str = ""
+    username: str = ""
+
+
+@router.post("/security/login-failures/clear")
+def clear_login_failures(
+    body: LoginFailureClear, request: Request, user: dict = Depends(admin_user)
+):
+    """按 IP / 用户名定向清除登录失败计数与冷却。
+
+    只清「计数与冷却」，不删 audit_logs 里的 login_failed 证据；节流阈值与窗口不变，
+    清完之后新的失败仍按原规则继续累计。
+    """
+    ip = body.ip.strip()
+    username = body.username.strip()
+    if not ip and not username:
+        raise HTTPException(status_code=400, detail="需至少指定 ip 或 username 之一")
+
+    throttle_keys = 0
+    target_user = username.lower()
+    with _login_lock:
+        for key in list(_login_failures):
+            key_ip, _, key_user = key.partition("|")
+            if ip and key_ip != ip:
+                continue
+            if target_user and key_user != target_user:
+                continue
+            _login_failures.pop(key, None)
+            throttle_keys += 1
+
+    users_cleared: list[str] = []
+    conn = request.app.state.db.connect()
+    try:
+        if username:
+            rows = conn.execute(
+                "SELECT username FROM users WHERE username = ? COLLATE NOCASE", (username,)
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE users SET failed_login_count = 0, last_failed_at = 0 WHERE username = ?",
+                    (row["username"],),
+                )
+                users_cleared.append(row["username"])
+            conn.commit()
+        audit_event(
+            conn,
+            user["username"],
+            "security.login_failures_cleared",
+            username or ip,
+            f"ip={ip or '-'} username={username or '-'} "
+            f"throttle_keys={throttle_keys} users={len(users_cleared)}",
+            request.client.host if request.client else "",
+        )
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "cleared": {"throttle_keys": throttle_keys, "users": len(users_cleared)},
+        "ip": ip,
+        "username": username,
+    }
 
 
 @router.get("/audit-logs")
