@@ -188,7 +188,9 @@ notes:
 | `sub2api` | OpenAI Chat + Anthropic Messages（上游还支持 Responses/Gemini，本仓未登记） | 不维护固定模型清单；`upstream_model` 由复合路由表逐条决定，平台枚举 `anthropic/openai/gemini/grok/kimi/glm/deepseek/minimax/antigravity` | 无固定样本（`unknown`） | [providers/sub2api.md](providers/sub2api.md) 第 3.1 节 |
 | `trae_sidecar` | OpenAI Chat | 小写 GLM，`config_name` 即模型名；README 未给出 32 个清单 | `glm-5.2`、`glm-5.3` | <https://github.com/JeffHu0912/trae2api> README |
 | `deepseek_sidecar` | OpenAI Chat + Anthropic（非标路径、仅非流式） | 原生名 `deepseek-chat`；Anthropic 侧用带日期的 Claude 映射名 | `deepseek-chat`、`claude-sonnet-4-20250514` | <https://github.com/ColudAI/Deepseek2Go> README `config.json` |
-| `qoder_sidecar` | OpenAI Chat + Anthropic Messages（上游还暴露 Responses，本仓未登记） | README 未列模型；模型名由产品线 / 地域前缀决定（`workbuddy/`、`global:`、`cn:`） | 无 README 样本（`unknown`） | <https://github.com/NextAgentX/qoder-trae-workbuddy-switch> README；[qoder.py](../apps/control/app/adapters/qoder.py#L400-L413) |
+| `qoder_sidecar` | OpenAI Chat + Anthropic Messages + Responses | README 未列模型；模型名由产品线 / 地域前缀决定（`workbuddy/`、`global:`、`cn:`） | 无 README 样本（`unknown`） | <https://github.com/NextAgentX/qoder-trae-workbuddy-switch> README；[qoder.py](../apps/control/app/adapters/qoder.py#L400-L413) |
+
+> 2026-11-04 更正（原单元格值留档）：`qoder_sidecar` 行协议列原记「OpenAI Chat + Anthropic Messages（上游还暴露 Responses，本仓未登记）」，与代码不符——`apps/control/app/adapters/qoder_sidecar.py:32` 声明 `"responses": True`、`:55-57` 实现转发、`apps/control/app/routers/v1.py:479-481` 已挂 `/v1/responses`，现已登记并接入，故协议列补 `Responses`、去掉括注。`codar_sidecar` 一行仍无 Responses（`codar_sidecar.py:8` 不声明），见下表。
 
 补充：代码注册表实际有 **14** 个 provider，比上表的 10 家多出四个主仓内置直连适配器：
 

@@ -37,6 +37,8 @@
 | S-01 | critical | `apps/control/app/routers/settings.py:43-69`、`:72-74`；写入侧 `apps/control/app/registry.py:121-133` | 任意已登录账号（含 `role=viewer`）调用 `GET /api/settings/upstream` | 返回 `provider_config` 中每家上游的 `api_key` 明文，以及 `sub2api` 之外的 `upstream_config`；低权账号可批量窃取上游凭证并直接消耗额度 | 该 GET 改为 `admin_user`；对 `api_key` 只返回 `has_api_key` / 掩码；`_read_config` 增加按字段脱敏，禁止把 `provider_config` 原样回显 |
 | S-02 | critical | `apps/control/app/routers/settings.py:129`；消费侧 `apps/control/app/routers/v1.py:18-27`、`:30-35` | 管理员调用 `POST /api/settings/gateway` 时 `allow_anonymous` 传字符串 `"false"`（任何脚本/第三方客户端都可能这样传） | `bool("false") == True`，网关被静默改为匿名可用；`/v1/chat/completions`、`/v1/models` 等无需 `u2a_` 即可调用，且请求记录 `key_id=None`，无法归因/限额 | 用严格布尔解析（仅接受 `true/false/1/0`，其余 400），并加回归测试；保存后校验返回值与实际鉴权行为一致 |
 
+> **2026-11-05 修复状态（原 S-01 判据保留作历史；时点：当前工作树未提交）**：S-01 的两条触发条件均已消失——① `GET /settings/upstream` 现为 `Depends(admin_user)`（settings.py:479-481），viewer 直接 403；② `_read_config` 默认 `reveal=False`、返回 `_mask_tree` 脱敏结果（settings.py:443、472-476、73-87），密钥字段换成 `*_masked` / `has_*` 并移除原字段，不再原样回显 `provider_config`。明文路径只剩 `POST /settings/secret/reveal`，该端点同样 `Depends(admin_user)`、限定 `provider_config` / `upstream` 根、成功与失败都写审计且审计行不含明文（settings.py:505-522）。这条为什么重要：照旧判读会让人以为配置接口在裸奔，从而在别处重复加一层无用的脱敏；真正需要盯的是 reveal 这个显式出口——每调一次就是一次明文外发，该靠审计与最小化调用去管，而不是再补一层读侧掩码。
+
 ### High
 
 | 编号 | 严重度 | 位置 | 可利用条件 | 影响 | 修复建议 |
@@ -58,9 +60,11 @@
 | S-12 | medium | `apps/control/app/routers/auth.py:29-55` | 对 `/api/login` 高频撞库/口令喷洒 | 无失败计数、无锁定、无退避；仅有失败审计写入，攻击者可无限尝试；默认弱口令（S-03）下尤甚 | 按 IP + 用户名做滑动窗口限流与临时锁定；失败响应统一，避免用户名枚举差异 |
 | S-13 | medium | `apps/control/app/security.py:37-45`、`:53-69`；`apps/control/app/routers/auth.py:58-69` | 数据库泄露，或用户只点了注销 | session token 明文入库；过期行只在被再次使用时删除，无定期清理；注销只删当前 token，其他设备会话继续有效；无绝对/空闲双失效与登录后轮换 | token 存哈希（与 `u2a_` 一致）；增加定期清理任务；提供「全部下线」；敏感操作后可强制重签 |
 | S-14 | medium | `apps/control/app/adapters/client.py:76-81`、`:98-102`；`apps/control/app/main.py:61-63`；`apps/control/app/routers/v1.py:137-144` | 调用 `/v1/*` 触发上游错误或不可达 | `ProviderError` 消息包含内部 `base_url` 与上游响应体前 200 字符，并经统一异常处理器原样回给调用方；泄露内网拓扑与上游实现细节 | 对外错误只给通用文案与错误码；`base_url`、上游响应体仅写服务端日志（并对 key 做屏蔽） |
-| S-15 | medium | `apps/control/app/routers/keys.py:32-41`；`apps/control/app/routers/settings.py:189-196`；`apps/control/app/routers/grok.py:38-48`；`apps/control/app/services/grok_register.py:105-123` | viewer 登录后读取 | viewer 可读全部 key 元数据（名称/前缀/最后使用）、用户列表、Grok 注册任务详情；任务查询为 `SELECT *` 整行返回，含 `proxy`、`payload` 等执行参数 | 按最小权限收紧：key 列表、用户列表、注册任务详情改 `admin_user`；任务列表只返回状态字段并脱敏 payload/proxy |
+| S-15 | medium | `apps/control/app/routers/keys.py:35-46`；`apps/control/app/routers/settings.py:958-964`；`apps/control/app/routers/grok.py:38-48`；`apps/control/app/services/grok_register.py:105-123` | viewer 登录后读取 | viewer 可读全部 key 元数据（名称/前缀/最后使用）、用户列表、Grok 注册任务详情；任务查询为 `SELECT *` 整行返回，含 `proxy`、`payload` 等执行参数（原表述，2026-11-04 已更正，见下） | 按最小权限收紧：key 列表、用户列表、注册任务详情改 `admin_user`；任务列表只返回状态字段并脱敏 payload/proxy |
 | S-16 | medium | `apps/web/nginx.conf:1-29` | 管理台被第三方页面 iframe 嵌入，或浏览器缺少防护 | 无反代层安全响应头：无 `Content-Security-Policy`、`X-Frame-Options`/`frame-ancestors`、`X-Content-Type-Options`、`Referrer-Policy`、HSTS；存在点击劫持与内容嗅探风险 | 在 nginx `server`/`location` 增加上述响应头；管理面设置 `frame-ancestors 'none'` |
 | S-17 | medium | `apps/control/app/registry.py:128-133`；适配器使用面如 `apps/control/app/adapters/client.py:44-50`、`:68-69` | 任一 admin 写入 provider `options` | `options` 为任意 dict 深合并、无 schema：可设置 `proxy`（把带凭证的请求导向任意代理）、`extra_headers`（覆盖/注入请求头）、`timeout`；`zcode` 等还会把配置拼进 system prompt | 为每个 provider 定义 options schema（类型/枚举/范围），`proxy` 与 `extra_headers` 走白名单/地址校验，禁止任意键 |
+
+> **2026-11-04 已更正（原表格 S-15 行保留作历史）**：S-15 的三项中两项已落地——「用户列表」：`GET /api/users` 现为 `Depends(admin_user)`（`apps/control/app/routers/settings.py:958-964`，def 行 959）；「Grok 注册任务详情/列表」：现为 `Depends(admin_user)`（`apps/control/app/routers/grok.py:39-41`、`:44-47`，def 行 40、45，`:38` 注释「读侧与写侧同一口径：仅 admin」）。仍开放的一项：`GET /api/keys` 仍 `current_user`（`apps/control/app/routers/keys.py:36-46`），但函数体按 `owner_user_id` 收窄、NULL 归属行对非 admin 不可见，属体内权限而非裸暴露。修复建议中「用户列表、注册任务详情改 `admin_user`」已完成；「key 列表改 `admin`」未做（现以体内归属收窄替代）；「任务列表脱敏 payload/proxy」未做且不再必要（端点已整收 admin，viewer 拿不到任何行）。这条为什么重要：S-15 若继续按原行当「三项均对 viewer 开放」跟踪，会重复修复已完成的两项，也会误判 keys 列表的真实现状（体内收窄，不是全量裸读）。
 
 ### Low
 
@@ -138,7 +142,7 @@
 | S-12 | 延期（需决策） | 原因：登录失败限流需产品定义阈值、窗口与锁定策略（按 IP 还是 IP+用户名、锁多久、是否解锁工单），阈值拍定前贸然上线会锁死运维。 |
 | S-13 | 延期 | session token 改存哈希、全部下线、双失效与登录后轮换，属会话模型重构，需与 S-05 的凭据治理一起做。 |
 | S-14 | 延期 | 对外错误文案统一（错误码 + 通用描述，`base_url`/上游响应体只进服务端日志）需逐个适配器确认错误语义，现有 `ProviderError` 契约被 F1/F2 适配器依赖，改动要连带回归。 |
-| S-15 | 延期（部分收紧） | 已收紧 `/api/settings/*` 全部管理员；`/api/keys` 列表、`/api/users` 列表、Grok 任务详情仍对 viewer 开放，需产品确认 viewer 的职责边界后再改权限矩阵。 |
+| S-15 | 延期（部分收紧） | 已收紧 `/api/settings/*` 全部管理员；`/api/keys` 列表、`/api/users` 列表、Grok 任务详情仍对 viewer 开放，需产品确认 viewer 的职责边界后再改权限矩阵。（原表述，2026-11-04 已更正，见下） |
 | S-16 | 延期（部署面） | 原因：CSP / frame-ancestors / nosniff / Referrer-Policy / HSTS 属 `apps/web/nginx.conf` 部署配置，需与 TLS 方案（S-10）一起落。 |
 | S-17 | 延期（需决策） | 原因：逐 provider 的 `options` schema（字段白名单、类型、范围）要先定各家支持面；当前 `options.proxy`/`extra_headers` 仍为任意键，属管理面高权限操作。 |
 | S-18 | 延期 | 容器非 root 与只读根文件系统需同步调整 `/data` 权限与 compose 挂载，属镜像改造项。 |
@@ -146,6 +150,8 @@
 | S-20 | 延期 | `check-update`/`versions` 对 viewer 开放；改为管理员或加缓存需确认前端调用方。 |
 | S-21 | 部分修复（延期） | 已落审计：`settings.gateway`（匿名开关）、`settings.reveal_secret`（查看明文）。延期：provider key 变更、用户增删改、model-map 保存的统一审计，需先定 `audit_logs` 的 action 命名与保留期。 |
 | S-22 | 延期（CI 决策） | 原因：恢复 `npm audit --omit=dev` 门禁要处理现有 1 critical + 4 high 的存量告警（与 S-07 的升级窗口绑定），否则流水线会长期红。 |
+
+> **2026-11-04 已更正（原表格 S-15 行保留作历史）**：S-15 于 2026-11-04 进一步收紧——「`/api/users` 列表」现为 `admin_user`（`apps/control/app/routers/settings.py:958-964`，def 行 959）、「Grok 任务详情」现为 `admin_user`（`apps/control/app/routers/grok.py:39-41`、`:44-47`，def 行 40、45），两项均不再对 viewer 开放；仍对 viewer 开放的只剩「`/api/keys` 列表」，且已带 `owner_user_id` 体内收窄（`apps/control/app/routers/keys.py:36-46`）。原行「`/api/keys` 列表、`/api/users` 列表、Grok 任务详情仍对 viewer 开放」仅前半句仍成立。这条为什么重要：修复状态表是验收依据，旧状态会让人以为三项都没动而重复排期，也会让 keys 列表的体内收窄改造被漏看。
 
 ### S-04 边界补充（2026-11-03）
 

@@ -119,6 +119,7 @@ git -C $tmp diff --stat <analyzed_commit> HEAD
 - `docs/providers/<name>.md`
 - `upstreams/upstreams.yaml` 的 `analyzed_commit`、`analyzed_at`、`protocols`、`notes`
 - 若新增能力位，检查 `apps/control/app/adapters/base.py` 的 `CAPABILITY_KEYS` 是否已覆盖（**新增能力位属于跨会话改动，需与并行开发协调**）
+  （2026-11-05 已更正）：`CAPABILITY_KEYS` 已并入 `embeddings` / `images` / `videos` / `media` / `rerank` / `usage` / `count_tokens` 七个扩展位；这七个位的新增与声明在本会话内即可完成，不再按跨会话改动处理，其它全新能力位仍按上一句的协调约定执行。
 - 若新增 provider，还要改 `apps/control/app/adapters/__init__.py` 的 `BUILDERS`
 
 > 注意：当前有并行会话在改 `apps/control/app/` 与 `apps/web/`。适配器改动请单独提交，避免和它们的改动混在一起。

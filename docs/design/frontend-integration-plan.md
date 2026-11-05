@@ -1,6 +1,8 @@
 # 前端功能落位与实现计划
 
 > 状态更新（2026-11-03）：`/tasks` 页面与相关幽灵端点（签到记录 / 任务日志 / 上游日志 / 任务执行 / 认领计划）已整体删除，L63-65/L209 关于「任务页已有入口」的现状描述不再成立；其余正文保持原样，未按代码重写。
+>
+> 状态更新（2026-11-04）：grok 的「已有入口 / 不进界面」两套表述已按代码统一为**无界面入口（不进界面）**——§1.3 表格与 §3 落位表的注册任务行已改写并保留原句作历史，与 §1.5 口径一致（见 [unification-audit.md](../unification-audit.md) P2-8）。除这两处外，正文其余部分仍未按代码重写。
 
 - 基准壳：`codebuddy2api` 的 `web/`（迁移后为本仓 `apps/web/`），见 [FRONTEND-BASELINE.md](../../docs/FRONTEND-BASELINE.md)。
 - 目标：把 12 个上游仓库的后端能力落进基准壳界面。
@@ -60,11 +62,17 @@ codebuddy 自身还有但控制面未接入的能力（来自上游管理端）�
 
 | 能力 | 路由 | UI 状态 |
 | --- | --- | --- |
-| 注册任务入队 | `POST /tasks` | 已有（任务页 TaskRunnerPanel） |
-| 任务列表/详情 | `GET /tasks`、`/tasks/{id}` | 已有 |
-| 取消/重试 | `POST /tasks/{id}/cancel`、`/retry` | 已有 |
-| worker 状态 | `GET /worker` | 已有 |
+| 注册任务入队 | `POST /tasks` | **无 UI**（后端有路由，前端无入口） |
+| 任务列表/详情 | `GET /tasks`、`/tasks/{id}` | **无 UI** |
+| 取消/重试 | `POST /tasks/{id}/cancel`、`/retry` | **无 UI** |
+| worker 状态 | `GET /worker` | **无 UI** |
 | 执行器配置 | `GROK_REGISTER_EXECUTOR_URL`（环境变量） | **无 UI**（执行器未交付，配置走环境变量） |
+
+> 2026-11-04 更正（原表述留档）：上表「UI 状态」列原记「已有（任务页 TaskRunnerPanel）」与三条「已有」。
+> 与代码不符——`/tasks` 页面与 `TaskRunnerPanel` 已随 2026-11-03 清理整体删除，且 `apps/web` 从未接入
+> `/api/grok/*`（全量前端路径抽取无 `/api/grok`），后端只有 `apps/control/app/routers/grok.py:26-74`
+> 的 6 个端点。故统一口径：grok 注册**无界面入口**，与 §1.5 的「不进界面」一致，两套说法不再并存
+> （见 [unification-audit.md](../unification-audit.md) P2-8）。
 
 grok-register 上游自身的能力（控制面未重写）：邮箱渠道选择、代理配置、浏览器引擎、CPA/Grok2API 产物生成、失败截图、连通性检查、重新登录日志。这些按契约文档属「外部执行器职责」，不进控制面。
 
@@ -206,7 +214,7 @@ sub2api 是控制面后端能力最完整但前端完全缺失的一块。
 | 用量汇总/趋势 | `/api/stats/summary`、`/daily` | ① | 仪表盘 + 统计页 | 已有 |
 | 模型目录 | `/api/models`、`/api/status` | ① | 模型页 + 仪表盘 | 已有 |
 | 服务商健康 | `/api/status` | ① | 仪表盘 | 已有 |
-| 注册任务 | `/api/grok/register/tasks` | ① | 任务页 | 已有 |
+| 注册任务 | `/api/grok/register/tasks` | ③ | — | 不进界面（2026-11-04 更正：原记「① / 任务页 / 已有」；任务页已删除且 `apps/web` 无 `/api/grok/*` 入口，后端 6 端点见 `routers/grok.py:26-74`，与 §1.3 口径一致） |
 | **分组管理** | `/api/sub2api/groups` | ② | 新增「配额」页（dock 或更多入口） | 路由完整，前端 0 实现；sub2api 核心能力 |
 | **账号池管理** | `/api/sub2api/accounts`、`/reset` | ② | 配额页·账号池 tab | 与分组同属配额域，不放账号页避免与「控制面账号」混淆 |
 | **流水查询** | `/api/sub2api/ledger` | ② | 配额页·流水 tab | 配额域 |

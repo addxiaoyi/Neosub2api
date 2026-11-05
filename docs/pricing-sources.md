@@ -14,9 +14,15 @@
 | 未定价模型 | 4 |
 | 别名表覆盖 | 16 / 16 个上游模型名，全部有着落（12 个有价 + 4 个显式未定价） |
 
-已定价：`claude-sonnet-4`、`gpt-4o`、`gpt-5`、`glm-5.2`、`glm-5.3`、`GLM-5.3`、`qwen3.8-max`、`kimi-k3`、`grok-4.6`、`minimax-m3`、`deepseek-chat`、`deepseek-v4.1-flash`。
+> **2026-11-04 已更正（上表原文保留作历史）**：2026-11-04 复核后——已定价模型（按 `price_books.model` 精确字符串计）**13**、去掉 `glm-5.3` / `GLM-5.3` 大小写重复后 **12**、价格行 **42**、未定价 **3**；别名表覆盖仍为 16 / 16（**13 个有价 + 3 个显式未定价**）；token_class 仍为 4 种（`hy3` 无 cache_write 报价）。以 `scripts/check-prices.ps1` 2026-11-04 实跑结果为准（价格 42 条、未定价 3 条、PASS）。
 
-未定价：`kimi-k2.7`、`hy3`、`hy3-preview`、`DeepSeek-V4-Flash-Official`。
+已定价：`claude-sonnet-4`、`gpt-4o`、`gpt-5`、`glm-5.2`、`glm-5.3`、`GLM-5.3`、`qwen3.8-max`、`kimi-k3`、`grok-4.6`、`minimax-m3`、`deepseek-chat`、`deepseek-v4.1-flash`。（原表述，2026-11-04 已更正，见下）
+
+> **2026-11-04 已更正**：已定价 13 个——上列 12 个不变，新增 `hy3`：input **0.132** / output **0.528** / cache_read **0.033** USD/MTok（腾讯 TokenHub 国际站美元价目表，`https://www.tencentcloud.com/document/product/1300/78937`，核实日期 2026-11-04，已补入 `config/prices.yaml`；官方未公布 cache_write 报价）。
+
+未定价：`kimi-k2.7`、`hy3`、`hy3-preview`、`DeepSeek-V4-Flash-Official`。（原表述，2026-11-04 已更正，见下）
+
+> **2026-11-04 已更正**：未定价 3 个——`kimi-k2.7`、`hy3-preview`、`DeepSeek-V4-Flash-Official`；`hy3` 已按上文定价移出。三个残留项各自的查证过程与排除理由见 §4 表下更正块。
 
 ## 2. 抓取口径
 
@@ -60,6 +66,15 @@
 | `hy3-preview` | 同上，只有人民币报价；且 preview 与正式版是否同价未说明 | 同上 |
 | `DeepSeek-V4-Flash-Official` | trae 适配器的内部模型标识（`apps/control/app/adapters/trae.py` 的 `DEFAULT_WORK_MODEL`），不是 DeepSeek 官方价目表里的 id；无法证明与 `deepseek-flash` 同价 | [DeepSeek Pricing](https://api-docs.deepseek.com/quick_start/pricing)、`apps/control/app/adapters/trae.py` |
 
+> **2026-11-04 已更正（上表四行原文逐字保留作历史）**：2026-11-04 复核结论——
+>
+> 1. **`hy3` 已定价并移出 unpriced**：按腾讯 TokenHub 国际站美元价目表补入 `config/prices.yaml`——input **0.132** / output **0.528** / cache_read **0.033** USD/MTok（核实日期 2026-11-04）。原行「腾讯云只公布人民币价、没有官方美元价目表」的说法作废；原行所引链接 `cloud.tencent.com/document/product/1759/127342` **不是价目表**——该链接实际是 ADP 套餐计费页，不能作为 token 价出处。
+> 2. **`kimi-k2.7`**：Kimi 官方价目表无此 id，只有 `kimi-k2.7-code` / `kimi-k2.7-code-highspeed`；且 K2 系列 2026-10-31 起对新用户停售、2026 年底下线，取不到可用结算价。（原行「无法确认是否等同 `kimi-k2.7-code`」的查证保留作历史，本条为最新结论。）
+> 3. **`hy3-preview`**：腾讯两个价目表只有 `Hy3` 与 `hy4-preview` 行，预览版无 token 价；新闻稿里的 "approximately USD" 是折算值，不可作结算价。
+> 4. **`DeepSeek-V4-Flash-Official`**：Trae 企业版价目表仅有人民币价 3 / 9 / 0.1 元/百万；美元刊例价只列 `DeepSeek-V4-Flash`，未单列该 id，无法证明同一价。
+>
+> 未定价因此为 3 个，与 §1 更正一致。
+
 处理方式：这些模型只进 `unpriced`，不生成价格行。M3 解析不到价格时按方案 §2.1 的 `usage_missing` 逻辑记 0 并留痕，不会静默套用别的模型价格。
 
 ## 5. 价格随时间变化的处理策略
@@ -101,4 +116,6 @@ pwsh -File scripts/check-prices.ps1 -Strict
 1. **provider 维度**：当前全是 `*` 通配行。若要对不同上游定不同售价/成本，需要补具体 provider 行；否则所有上游共用同一套厂商标价。
 2. **时段价**：DeepSeek 峰谷价、MiniMax/Claude/Kimi 的 TTL 分档、Grok/Qwen 的上下文分档，M3 表结构都没有对应维度。当前取基准档，计费会有偏差。
 3. **模型名归一化**：`deepseek-v4.1-flash`、`deepseek-chat`、`DeepSeek-V4-Flash-Official` 与官方 id 的对应关系需要在路由/计费层显式处理，不能依赖字符串前缀猜测。
-4. **未定价模型**：`kimi-k2.7`、`hy3`、`hy3-preview`、`DeepSeek-V4-Flash-Official` 上线前必须补价，或由业务确认“记 0 留痕”。
+4. **未定价模型**：`kimi-k2.7`、`hy3`、`hy3-preview`、`DeepSeek-V4-Flash-Official` 上线前必须补价，或由业务确认“记 0 留痕”。（原表述，2026-11-04 已更正，见下）
+
+> **2026-11-04 已更正**：未定价现为 `kimi-k2.7`、`hy3-preview`、`DeepSeek-V4-Flash-Official` 三个（`hy3` 已于 2026-11-04 按 TokenHub 国际站价补入），处置口径不变。

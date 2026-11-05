@@ -4,7 +4,7 @@
 
 当前适配器共 14 个，下方总览逐行列出，「状态」列区分**内置直连**（控制面内完成协议对接）与 **sidecar 直通**（控制面只做透明转发，账号池/鉴权/状态都在上游独立进程里）。**新增一家的现行步骤**见 [ADDING-A-PROVIDER.md](ADDING-A-PROVIDER.md)，不要再参考已归档的 `FRONTEND-SKELETON.md`。
 
-「能力位」含义：`chat` = `/v1/chat/completions`；`messages` = `/v1/messages`；`models` = 模型列表；`oauth` = 有 OAuth 账号通道；`checkin` / `credits` = 签到 / 积分刷新（账号页按钮）；`register` = 注册任务；`sidecar` = 上游为独立进程。
+「能力位」含义：`chat` = `/v1/chat/completions`；`messages` = `/v1/messages`；`responses` = `/v1/responses`；`models` = 模型列表；`oauth` = 有 OAuth 账号通道；`checkin` / `credits` = 签到 / 积分刷新（账号页按钮）；`register` = 注册任务；`sidecar` = 上游为独立进程。本表只列核心对话能力位；`embeddings` / `images` / `videos` / `media` / `count_tokens` / `rerank` / `usage` 等扩展端点的真实归属以 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1 为准，核心位与 §1 一致。
 
 许可证风险速览（完整清单与合规 checklist 见 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)）：
 
@@ -18,19 +18,29 @@
 | id | 名称 | 上游 | 协议 | 默认地址 | 能力位 | 状态 | 风险 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `codebuddy` | CodeBuddy | 腾讯 CodeBuddy（addxiaoyi/codebuddy2api） | OpenAI + Anthropic | `http://127.0.0.1:7864` | chat, messages, models, oauth, checkin, credits | 内置直连（经管理端） | safe |
-| `muse` | Muse2API | czg86389-hub/muse2api（协议参考） | OpenAI | `https://api.meta.ai` | chat, models | 内置直连 | safe |
+| `muse` | Muse2API | czg86389-hub/muse2api（协议参考） | OpenAI + Responses（responses 流式透传） | `https://api.meta.ai` | chat, models, responses | 内置直连 | safe |
 | `grok-register` | Grok Register | kaibush/grok-register（协议参考） | 无（注册任务） | — | register | 内置（非推理） | safe |
-| `gptgrok` | GPT/Grok 2API | addxiaoyi/gptGrok2api（协议参考） | OpenAI | `https://chatgpt.com` | chat, models | 内置直连 | safe |
+| `gptgrok` | GPT/Grok 2API | addxiaoyi/gptGrok2api（协议参考） | OpenAI + Anthropic + Responses（messages / responses 流式为合成） | `https://chatgpt.com` | chat, messages, models, responses | 内置直连 | safe |
 | `zcode` | ZCode 2API | addxiaoyi/ZCode2api（协议参考） | OpenAI + Anthropic | `https://zcode.z.ai` | chat, messages, models | 内置直连 | safe |
 | `opencode` | OpenCode 2API | jasonxu114514/opencode2api（协议参考，主仓 clean-room 重写） | OpenAI + Anthropic | `https://opencode.ai/zen` | chat, messages, models | 内置直连 | safe |
-| `sub2api` | Sub2API | Wei-Shaw/sub2api（协议参考，主仓 clean-room 重写） | OpenAI + Anthropic | —（账号自带） | chat, messages, models | 内置直连 | safe |
+| `sub2api` | Sub2API | Wei-Shaw/sub2api（协议参考，主仓 clean-room 重写） | OpenAI + Anthropic + Responses（responses 流式透传） | —（账号自带） | chat, messages, models, responses | 内置直连 | safe |
 | `codar` | Codar (仓内直连) | Codar 私有 API（行为参考 AiXiaoc/codar2api） | OpenAI + Anthropic + Responses | `https://api.claw.speedai.com` | chat, messages, models, responses | 内置直连 | safe |
-| `codar_sidecar` | Codar (codar2api) | AiXiaoc/codar2api（Go sidecar） | OpenAI + Anthropic | `http://127.0.0.1:8801` | chat, messages, models, sidecar | sidecar 直通 | safe |
+| `codar_sidecar` | Codar (codar2api) | AiXiaoc/codar2api（Go sidecar） | OpenAI + Anthropic + Responses（responses 由 sidecar 转发） | `http://127.0.0.1:8801` | chat, messages, models, responses, sidecar | sidecar 直通 | safe |
 | `trae_sidecar` | Trae Solo+Work (trae2api) | JeffHu0912/trae2api | OpenAI | `http://127.0.0.1:7871` | chat, models, oauth, credits, sidecar | sidecar 直通 | safe |
 | `deepseek_sidecar` | DeepSeek (Deepseek2Go) | ColudAI/Deepseek2Go | OpenAI + Anthropic（非标路径） | `http://127.0.0.1:5001` | chat, messages, models, sidecar | sidecar 直通 | **danger** |
-| `qoder_sidecar` | Qoder Switch (PolyForm-NC) | NextAgentX/qoder-trae-workbuddy-switch | OpenAI + Anthropic | `http://127.0.0.1:7873` | chat, messages, models, sidecar | sidecar 直通 | **danger** |
+| `qoder_sidecar` | Qoder Switch (PolyForm-NC) | NextAgentX/qoder-trae-workbuddy-switch | OpenAI + Anthropic + Responses | `http://127.0.0.1:7873` | chat, messages, models, responses, sidecar | sidecar 直通 | **danger** |
 | `qoder` | Qoder（COSY） | Qoder 客户端协议（主仓 clean-room 重写） | OpenAI + Anthropic + Responses | `https://gateway.qoder.com.cn` | chat, messages, models, responses | 内置直连 | safe |
 | `trae` | Trae（Solo / Work） | Trae IDE 客户端协议（主仓 clean-room 重写） | OpenAI | `https://trae-api-cn.mchost.guru` | chat, models | 内置直连 | safe |
+
+> 2026-11-05 已更正（原单元格值逐字留档）：`muse` 一行原为「协议 `OpenAI`、能力位 `chat, models`」；`gptgrok` 一行原为「协议 `OpenAI`、能力位 `chat, models`」；`sub2api` 一行原为「协议 `OpenAI + Anthropic`、能力位 `chat, messages, models`」。三处同因与代码不符：
+> - `muse`：`apps/control/app/adapters/muse.py:63` 声明 `responses=True`、`:225-241` 实现；流式分支（`:230-236`）直接 `reply.iter_bytes()`，上游 `response.*` 事件**原样透传**，不重排不拼接；仍不声明 `messages`（理由见 §2 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) §8）。
+> - `gptgrok`：`apps/control/app/adapters/gptgrok.py:400` 声明 `messages=True, responses=True`（`protocols` 见 `:401`），`:1323` / `:1353` 分别由 `_render_responses` / `_render_anthropic` 把 ChatGPT 帧**合成**为 Responses / Anthropic 帧——**流式也是合成，不是透传**。
+> - `sub2api`：`apps/control/app/adapters/sub2api.py:67` 声明 `responses=True`、`:181` 的 `responses()` 走 `_forward(..., stream=stream)`，路径表 `:23` → `/v1/responses`，流式为**透传**（由账号上游决定）。
+> 误判后果：客户端若按旧表以为 `muse` / `sub2api` 没有 `/v1/responses`、`gptgrok` 没有 `/v1/messages`，会绕开网关直连上游或降级到 chat 兼容层；`gptgrok` 的合成流被误记为不支持时，Anthropic / Responses 客户端会直接放弃该 provider。网关侧真实入口在 `apps/control/app/routers/v1.py:644`（messages）与 `:649`（responses）。核验口径与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 / §3 一致。
+
+> 2026-11-05 已更正（原单元格值逐字留档）：`codar_sidecar` 一行原为「协议 `OpenAI + Anthropic`、能力位 `chat, messages, models, sidecar`」。`apps/control/app/adapters/codar_sidecar.py:30-39` 实际声明 `responses=True`（同时声明 `count_tokens=True`），docstring `:7-9` 已写明「/v1/responses 经契约交叉验证后声明」，`:56-58` 的 `responses()` 与 `:60-62` 的 `count_tokens()` 都是 `forward(...)` —— **sidecar 原样转发，不是控制面合成**（选路时与 `gptgrok` / `qoder` 的「本进程合成」有本质差别）；`protocols` 见 `:40`。故协议列补 `Responses`、能力位列补 `responses`（`count_tokens` 属扩展位，按本表口径不列，端点归属见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。误判后果：客户端会把 `/v1/responses` 当成 501 而绕开该 sidecar 直连 codar2api，或降级到 chat；漏记 `count_tokens` 会让 Anthropic 客户端改走本地估算。**依据当前工作树改动（`git status` 显示 M，未提交），文档按工作区代码写，未入库。**
+
+> 2026-11-04 更正（原单元格值留档）：`qoder_sidecar` 一行原写作协议「OpenAI + Anthropic」、能力位「chat, messages, models, sidecar」，即按「未接 `/v1/responses`」记载，与代码不符——`apps/control/app/adapters/qoder_sidecar.py:32` 声明 `responses: True`、`:55-57` 实现转发，`apps/control/app/routers/v1.py:479-481` 已挂 `/v1/responses` 路由，故协议列改为「OpenAI + Anthropic + Responses」、能力位补 `responses`。
 
 ---
 
@@ -89,7 +99,7 @@
 ## 2. muse — Muse2API
 
 - **上游**：czg86389-hub/muse2api（MIT，协议参考）；仓内自研，直连 Muse 官方 OpenAI 兼容入口。
-- **协议**：仅 OpenAI Chat Completions（无 `/v1/messages`，调用返回 501）。
+- **协议**：OpenAI Chat Completions + OpenAI Responses（responses 流式逐帧透传，`muse.py:225-241`）；**不支持** Anthropic `/v1/messages`，调用返回 501。（2026-11-05 已更正，原句逐字留档：「仅 OpenAI Chat Completions（无 `/v1/messages`，调用返回 501）。」——原句写死「仅」，会让客户端误判 muse 没有 `/v1/responses` 而绕行直连；真实能力位是 `muse.py:62-67` 的 `chat / models / responses`，外加 `images / videos / media` 三个转发端点（归属见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。）
 - **必填配置**：api_key 以 `Authorization: Bearer` 注入；Base URL 默认 `https://api.meta.ai`（公开资料推断，未用真实凭证验证；旧部署可指回 sidecar `http://127.0.0.1:7865`）。
 - **options**：`timeout`（默认 300）、`cookie`（`hatch_sess`）、`extra_keys` / `max_attempts`、`chat_path` / `models_path` / `health_path`。
 - **已知限制**：网页账号（`hatch_sess`）只有浏览器 DOM / Noise-XX WebSocket 对话通道，没有 HTTP 对话端点，本仓不复刻该通道；默认官方入口与鉴权未用真实凭证验证（链路验证走假上游）。
@@ -105,7 +115,7 @@
 ## 4. gptgrok — GPT/Grok 2API
 
 - **上游**：addxiaoyi/gptGrok2api（MIT，协议参考）；仓内自研，直连 ChatGPT Web 与 Grok Web。
-- **协议**：仅 OpenAI Chat Completions。
+- **协议**：OpenAI Chat Completions + Anthropic Messages + OpenAI Responses；`messages` / `responses` 的流式由适配器**合成**（不是透传）。（2026-11-05 已更正，原句逐字留档：「仅 OpenAI Chat Completions。」——原句会让客户端以为没有 Anthropic / Responses 端点而绕行直连或降级到 chat 兼容层；真实声明见 `gptgrok.py:400`，实现见 `:1323`（responses）、`:1353`（messages）。）
 - **必填配置**：Base URL 默认 `https://chatgpt.com`（`grok-*` 模型自动走 `https://grok.com`）；api_key 填 ChatGPT accessToken 或 Grok `sso`。
 - **options**（风控开关）：
   - `proxy`：出口代理 URL，只作用于本 provider 的上游请求；
@@ -140,7 +150,7 @@
 ## 7. sub2api — Sub2API
 
 - **上游**：Wei-Shaw/sub2api 仅作协议参考，本适配器是主仓 clean-room 重写的**订阅配额分发**：分组 → 账号池 → token 配额扣减 → 耗尽 429。不依赖 sub2api 进程；每个账号自带 `upstream_base` + `api_key`。
-- **协议**：OpenAI + Anthropic 双协议，转发目标由账号的 upstream_base 决定。
+- **协议**：OpenAI + Anthropic + Responses 三协议，转发目标由账号的 upstream_base 决定；responses 流式为**透传**（`sub2api.py:181` → `_forward`，路径表 `:23`）。（2026-11-05 已更正，原句逐字留档：「OpenAI + Anthropic 双协议，转发目标由账号的 upstream_base 决定。」——原句漏记 responses，客户端会以为该 provider 只能 chat/messages 而绕行；真实声明见 `sub2api.py:67`。另有 embeddings / images / count_tokens / rerank / videos / usage 转发端点，归属见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1。）
 - **必填配置**：先用 `/api/sub2api/groups` 建分组、`/api/sub2api/accounts` 加账号（见 [API-REFERENCE.md](API-REFERENCE.md) 第 9 节），否则调用返回 503。
 - **options**：`group`（使用的分组 id，默认 `default`）；`timeout`（默认 120）；`proxy`。
 - **分发语义**：账号按 last_used_at 升序 + weight 降序取用；上游 429/5xx 时冷却该账号 60 秒并换号重试（最多 3 次）；额度按 usage 的 token 总数扣到分组与账号两侧；分组额度耗尽或池空返回 429。流式响应边转发边攒 usage，流结束扣减。
@@ -165,7 +175,7 @@
 ## 10. qoder_sidecar — Qoder Switch (PolyForm-NC)
 
 - **上游**：NextAgentX/qoder-trae-workbuddy-switch（Rust Axum gateway，buddy-switch-gateway）。多产品线多地域账号池 + 降级链，账号切换自己管。
-- **协议**：sidecar 暴露 `/v1/chat/completions`、`/v1/models`、`/v1/messages`、`/v1/responses`；控制面适配 chat + messages + models（`/v1/responses` 不在统一网关协议内，未暴露）。
+- **协议**：sidecar 暴露 `/v1/chat/completions`、`/v1/models`、`/v1/messages`、`/v1/responses`；控制面适配 chat + messages + models + responses。（2026-11-04 更正，原句保留作历史：原记「`/v1/responses` 不在统一网关协议内，未暴露」，与代码不符——`adapters/qoder_sidecar.py:32` 已声明 `responses: True`、`:55-57` 已实现转发，`routers/v1.py:479-481` 已挂 `/v1/responses` 路由，带 `responses` 能力位的请求可正常透传到 sidecar。）
 - **必填配置**：sidecar 跑起来（默认 7873，环境变量 `QODER_SIDECAR_BASE`）；凭证在 sidecar 侧。
 - **options**：通用项。
 - **风险**：上游为 **PolyForm Noncommercial 1.0.0**，禁止任何商用（含内部商业项目与托管服务）。作者书面授权前不得商用（详见 THIRD-PARTY-NOTICES.md）。
@@ -182,7 +192,7 @@
 ## 12. codar_sidecar — Codar (codar2api)
 
 - **形态**：sidecar 直通。主仓只做 HTTP 透传；账号登录、令牌续期、签到、代理池全在 codar2api 进程里。
-- **协议**：OpenAI Chat + Anthropic Messages（`/v1/responses` 未声明，调用 501）。
+- **协议**：OpenAI Chat + Anthropic Messages + Responses（responses 与 count_tokens 均由 sidecar 原样转发，不是控制面合成）。（2026-11-05 已更正，原句逐字留档：「OpenAI Chat + Anthropic Messages（`/v1/responses` 未声明，调用 501）。」——原句会让客户端以为该 sidecar 的 `/v1/responses` 必然 501 而绕开直连 codar2api；真实声明见 `codar_sidecar.py:30-39`（`responses=True`、`count_tokens=True`），转发实现见 `:56-58`（`/v1/responses`）与 `:60-62`（`/v1/messages/count_tokens`），`protocols` 见 `:40`。依据当前工作树改动（未提交，`git status` 显示 M），文档按工作区代码写，未入库。）
 - **必填配置**：sidecar 跑起来（默认 8801，环境变量 `CODAR_SIDECAR_BASE`）；`api_key` 填 sidecar 的本地 API Key（`sk-codar-` 前缀）。
 - **实现细节、错误语义与已知限制**：见 [providers/codar_sidecar.md](providers/codar_sidecar.md)；上游契约见 [providers/codar2api.md](providers/codar2api.md)。
 
@@ -226,3 +236,37 @@
 | 8801 | codar2api sidecar |
 
 以上都是**各上游的默认端口**，控制面侧的地址随时可在「服务商」页改（`base_url`）；`providers/` 目录只保留上游参考来源说明（[README.md](../README.md) 与 THIRD-PARTY-NOTICES.md 有完整说明），不是运行依赖——除五个外部进程（codebuddy 管理端、codar / trae / deepseek / qoder 四家 sidecar）需要你自行部署外，其余 provider 均由控制面内置直连上游。
+
+---
+
+## 附：有意不做的取舍（2026-11-04 盘点）
+
+下列 10 类功能**属于有意不做**，依据来自许可证隔离、设计边界或执行器外置，都有仓内出处，不是能力缺口；后续评审按「取舍」对待，不要重复按缺口提出。引用以章节锚点为准，行号仅作辅证。
+
+| # | 功能 | 属于哪家上游 | 不做的依据（文件:行或条款） |
+| --- | --- | --- | --- |
+| 1 | `/v1/responses`、`/v1/systemone`、WARP 出口、匿名工具集注入、WebUI（8081）透传 | opencode2api（jasonxu114514/opencode2api） | **GPL-3.0 只能进程隔离**：`upstreams/upstreams.yaml:54`（license GPL-3.0）、`:62`（「上游代码只能进程隔离（sidecar）接入」）；取舍原文 `docs/providers/opencode2api.md:16,18`（上游确有这两个端点）与 `:109`（不做 Responses、System One、WARP、自动匿名出口轮换）、`docs/design/frontend-integration-plan.md:87-88`（匿名通道 WebUI 与 System One/Responses 不进界面）。注：「匿名工具集注入」为 2026-11-04 盘点项，仓内无独立行号，与本行同因（GPL 隔离） |
+| 2 | 复合路由注册表、多平台价格表、支付/订阅、Gemini `/v1beta` | sub2api（Wei-Shaw/sub2api） | **LGPL-3.0 隔离**：`upstreams/upstreams.yaml:87`（license LGPL-3.0）、`:94`（「只能进程隔离（不链接上游库）」）；取舍原文 `docs/providers/sub2api.md:121`（不做复合路由注册表、多平台价格表、支付/订阅计划、Gemini 原生路径）、`docs/design/frontend-integration-plan.md:124`、`:337` |
+| 3 | 控制面不做 trae 的 OAuth / 积分刷新；不做 `/v1/messages`、`/v1/responses` | trae2api（JeffHu0912/trae2api） | **设计边界 + 上游事实**：`apps/control/app/routers/accounts.py:21-23`（trae_sidecar 声明 oauth/credits，但账号在 sidecar 内部，主仓两个方法一个都没实现）、本文件 §8 trae_sidecar「已知限制」（账号池健康度、积分探测都在 sidecar 侧）、`docs/providers/trae2api.md:110-111`（Trae 上游只有 chat 语义，不提供 messages/responses）、`:139`（OAuth `ExchangeToken` 未接入 `POST /api/auth/start`）；许可证 MIT，非许可证原因（`upstreams/upstreams.yaml:98`） |
+| 4 | PoW 自研求解器 | Deepseek2Go（ColudAI/Deepseek2Go） | **无 LICENSE，商用前必须移除**：`upstreams/upstreams.yaml:109`（license unknown）、`:117`（「仓库内无 LICENSE 文件…默认按 All Rights Reserved 处理，商用禁用」）、本文件 §9 deepseek_sidecar「风险」、`docs/design/frontend-integration-plan.md:146,340` |
+| 5 | sidecar 路径只做 HTTP 代理（不复制上游代码）；`trae` 产品线 501 | qoder-switch（NextAgentX/qoder-trae-workbuddy-switch） | **PolyForm-NC 禁商用**：`apps/control/app/adapters/qoder_sidecar.py:3-5`（「不复制不修改」上游源码、仅作 HTTP 代理）、本文件 §10 qoder_sidecar「风险」；§13 qoder「协议」：`trae` 产品线 501 并指引改用 provider `trae` |
+| 6 | 扫码/短信登录、每日签到、领免费模型、四策略账号调度、非 401 不换号 | codar2api（AiXiaoc/codar2api） | **设计边界**：`docs/providers/codar2api.md:263-264`（登录、签到、免费模型领取、代理池、账号调度与管理面板继续由 sidecar 承担）、`:175`（四策略 `round_robin`/`weighted_round_robin`/`sticky`/`least_connections` 在 sidecar）、`:289`（账号池调度不实现，仅 token 轮换）、本文件 §12 codar_sidecar「形态」；「非 401 不换号」指本仓直连只在 401 时续期换号（`apps/control/app/adapters/codar.py:185-200,219-233`）；许可证 MIT |
+| 7 | 网页 DOM / Noise-XX 对话通道、账号池导入、代理、签到 | muse2api（czg86389-hub/muse2api） | **设计边界**：本文件 §2 muse「已知限制」（网页账号只有浏览器 DOM / Noise-XX WebSocket 通道，本仓不复刻）、`upstreams/upstreams.yaml:40`（同因改为直连官方入口）、`docs/design/frontend-integration-plan.md:55`（账号导入留 sidecar `admin.html`）；许可证 MIT |
+| 8 | 浏览器执行器、邮箱渠道、CPA / Grok2API 产物、GrokIQ 联动 | grok-register（kaibush/grok-register） | **执行器外置**：`docs/providers/grok-register.md:134`（属外部执行器职责）、本文件 §3 grok-register「已知限制」（执行器不随仓交付）、`docs/design/frontend-integration-plan.md:77`（外部执行器职责，不进控制面）；执行器入口为 `GROK_REGISTER_EXECUTOR_URL`；许可证 MIT |
+| 9 | **本项目取舍（非许可证限制）**：本仓不**转发**上游的原生 `/v1/responses`、`/v1/messages`、`/v1/images` 端点（上游确有这些端点：`upstreams/upstreams.yaml:73`「上游另有 responses/messages/images，本仓未接」），改为在网关层提供等价能力——`messages` / `responses` 由适配器在控制面**合成**（`gptgrok.py:400` 声明、`:1323` / `:1353` 实现，流式也是合成），图片输入走 chat 内嵌 `image_url`（`gptgrok.py:57-59`），独立 `/v1/images/generations` 仍不声明（调用 501，见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。上游管理控制台与 iCloud Privacy Mail sidecar 不透传 | gptGrok2api（addxiaoyi/gptGrok2api） | 上游为 **MIT、可入主仓**，未接是本项目自己选的，不是许可证不允许——`upstreams/upstreams.yaml:65`（license MIT）、`:73`（「上游另有 responses/messages/images，本仓未接」）；控制台与 iCloud sidecar 属上游自有面，不透传：`docs/design/frontend-integration-plan.md:97-101`（gptGrok 各项「不进界面」）、`:182`（上游管理控制台结构只借「实时请求」结构）、上游 README 能力概览（分析基线 `0335d62`：管理控制台、iCloud 隐私邮箱 sidecar） |
+| 10 | 只做协议层，不做各家上游 Web UI；各家 Web 面板由控制面自建等价界面 | 全局（12 个上游） | **设计边界**：`docs/design/frontend-integration-plan.md:190`（借法结论：仅 sub2api 三页结构与 gptGrok 实时请求列表可借，其余「能力留在 sidecar 内、或许可证不允许复制」）、`:235`（sidecar 内部能力不进界面）、本文件文首说明（无章节锚点，引用待核；运行态信息一律由管理页「服务商」或 `PATCH /api/providers/{id}` 下发） |
+
+> **第 9 条的原因性质与第 1、2、4、5 条不同**：1/2/4/5 是许可证导致的隔离或禁用（GPL / LGPL / 无 LICENSE / PolyForm-NC），9 是本项目主动选择不接（上游 MIT 允许），两者不可混为一谈。
+
+> **第 9 条补记（2026-11-04，原句保留作历史）**：表中「`/v1/responses`、`/v1/messages`、`/v1/images` 未接」**仅指上游三个端点未接**，这一结论不变；但同日后续修复改变了两项关联现状——
+> ① **工具调用已实现**（不属「未接」）：`apps/control/app/adapters/gptgrok.py` 以提示词注入实现，请求侧拼 `[available tools]`（工具名 / description / parameters schema）与 `[tool call protocol]`（`gptgrok.py:128-142`），模型以行首 `[tool_call] ` + 单行 JSON 回吐，`_ToolCallScanner` 增量解析回标准 OpenAI `tool_calls`（含 `id` / `type: function` / `function.name` / `function.arguments`），流式跨帧拼装、有调用时 `finish_reason=tool_calls`，多轮 tool 消息保留 `tool_call_id`（`[tool result <id>]`）；输出格式是本仓自定 `[tool_call]` JSON，与上游 `<tool_calls>` XML 同机制不同表达，非复刻上游源码；
+> ② **图片按通道分流**：GPT 通道透传 `image_url`（远程 URL 与 base64 data URL 两形态，`gptgrok.py:57-59`），Grok 通道请求体只有文本 transcript、带图显式 400（`gptgrok.py:721-727`）——故「图片不支持」不再成立，未接的只是上游 `/v1/images` 端点。
+> 详见 `docs/providers/gptgrok2api.md` §3 再更正块与 `providers/gptGrok2api/README.md` 对应段。
+
+> **第 9 条措辞更正（2026-11-05，原句逐字留档）**：上表第 9 条原写「`/v1/responses`、`/v1/messages`、`/v1/images` 未接」（同一句见下方 2026-11-04 补记首句）。这句话把两层事实压在了一句话里，读者会直接读成「网关对这三个路径返回 501」。分层事实如下，两层不要混写：
+> ① **上游端点层（上游有没有）**：gptGrok2api 上游**确有**这三个原生端点——`upstreams/upstreams.yaml:73` 写明「上游另有 responses/messages/images，本仓未接」。所以「未接」指的是本仓**不转发**它们，不是「上游不存在」。
+> ② **网关能力位层（网关给不给）**：`messages` / `responses` 在网关**是有的**，由适配器在控制面**合成**（声明 `apps/control/app/adapters/gptgrok.py:400`，实现 `:1323`（responses）/ `:1353`（messages），流式同为合成，不是透传）；图片输入走 chat 内嵌 `image_url`（`:57-59`）。只有**独立**的 `/v1/images/generations` 未声明、调用 501——该端点的 provider 列里没有 gptgrok，见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1。
+> ③ 原 2026-11-04 补记首句「仅指上游三个端点未接，这一结论不变」方向没错，但默认读者能自己分清「端点」与「能力位」；实测读法就是会误读，故由本块的分层写法取代，补记其余内容（工具调用已实现、图片按通道分流）仍然有效。
+> 误判后果：客户端把「未接」当网关 501，会绕开网关直连 ChatGPT Web 或降级到 chat 兼容层——丢鉴权、配额、失败限流与记账；运维会把它当能力缺口，去适配器里重复开位或重复提 issue。与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 / §1.1 / §1.2 已对表，无新矛盾。
+
+> 变更记录（2026-11-05，格式迁移）：附表的 8 处自身行号引用（原行号 3 / 97 / 105 / 157 / 165 / 173 / 181 / 194）已迁移为章节锚点——§2 muse、§3 grok-register、§8 trae_sidecar、§9 deepseek_sidecar、§10 qoder_sidecar、§12 codar_sidecar、§13 qoder；其中原行号 3 指向文首说明、无对应章节，改写为「文首说明」并标注「引用待核」。仅迁移引用形式，未改任何能力位结论，未重排表格。附表导语的声明同步改为「引用以章节锚点为准，行号仅作辅证」。

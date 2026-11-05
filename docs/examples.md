@@ -5,8 +5,10 @@
 | 协议 | 端点 | 支持它的 provider（2026-11 现状） |
 | --- | --- | --- |
 | OpenAI Chat Completions | `POST /v1/chat/completions` | 除 grok_register（只做注册）外的全部 provider |
-| OpenAI Responses | `POST /v1/responses` | 仅 codar、qoder |
+| OpenAI Responses | `POST /v1/responses` | codar、qoder、qoder_sidecar |
 | Anthropic Messages | `POST /v1/messages` | codar、codebuddy、opencode、qoder、sub2api、zcode 及 codar/deepseek/qoder sidecar；trae 系只有 chat |
+
+> 2026-11-04 更正（原表述保留作历史）：Responses 一行原记「仅 codar、qoder」，与实际能力矩阵不符——`apps/control/app/adapters/qoder_sidecar.py:32` 已声明 `"responses": True`、`:55-57` 实现转发、`apps/control/app/routers/v1.py:479-481` 已挂 `/v1/responses`，故补上 `qoder_sidecar`；`codar_sidecar` 仍不声明该能力位（`codar_sidecar.py:8`），维持 501。Messages 一行未变。
 
 前置条件：网关已在 `http://127.0.0.1:8010` 启动，已签发以 `u2a_` 开头的网关密钥。下文用两个环境变量占位：
 
@@ -201,7 +203,9 @@ const resp = await client.chat.completions.create({
 
 ## 2. `/v1/responses`
 
-只有 codar、qoder 实现了 Responses，模型目录由上游 `/models` 决定，因此下面用 `<模型 id>` 占位——先 `GET /v1/models` 取一个真实 id，再替换。裸名写法同理，要求该 id 在聚合目录里只出现一次。
+只有 codar、qoder、qoder_sidecar 实现了 Responses，模型目录由上游 `/models` 决定，因此下面用 `<模型 id>` 占位——先 `GET /v1/models` 取一个真实 id，再替换。裸名写法同理，要求该 id 在聚合目录里只出现一次。
+
+> 2026-11-04 更正（原句保留作历史）：本段原记「只有 codar、qoder 实现了 Responses」，与实际能力矩阵不符——`apps/control/app/adapters/qoder_sidecar.py:32` 声明 `"responses": True`、`:55-57` 实现转发、`apps/control/app/routers/v1.py:479-481` 挂载 `/v1/responses`，故补上 `qoder_sidecar`；`codar_sidecar` 仍不声明该能力位（`codar_sidecar.py:8`），维持 501。
 
 ### 2.1 带前缀：`codar/<模型 id>`
 
@@ -497,5 +501,5 @@ Messages 用 Anthropic 形状：
 
 - 401 先确认密钥放在 `Authorization: Bearer` 或 `x-api-key` 头里，而不是 query 或 `X-Api-Key`（后者是配额读接口用的）。两个头同时带且值不同会得到 `conflicting_auth_headers`，删掉其中一个即可。
 - 404 先跑 `GET /v1/models` 确认 id 拼写与 provider 是否启用，再决定写不写前缀。
-- 501 说明模型解析对了、而是 provider 能力不够，换支持该协议的 provider（responses 目前只有 codar、qoder）。
+- 501 说明模型解析对了、而是 provider 能力不够，换支持该协议的 provider（responses 目前有 codar、qoder、qoder_sidecar；2026-11-04 更正，原记「responses 目前只有 codar、qoder」，证据见 `qoder_sidecar.py:32`、`:55-57`、`routers/v1.py:479-481`）。
 - 客户端报 `baseURL` 重复 `/v1`（404 或 `/v1/v1/...`）：OpenAI SDK 的 `base_url` 要含 `/v1`，Anthropic SDK 的 `base_url` 只到主机端口。

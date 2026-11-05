@@ -110,6 +110,8 @@ Muse 不给百分比（`app.py:1412-1414`）；默认超时 600s（`config.py:10
 需要与正在改 `apps/control/app/` 的会话协调后再动；`__init__.py` 的 `BUILDERS` 不受影响
 （provider 不变）。
 
+（2026-11-05 已更正）：`CAPABILITY_KEYS` 已并入 `embeddings` / `images` / `videos` / `media` / `rerank` / `usage` / `count_tokens` 七个扩展位，`muse` 的 `images` / `videos` / `media` 已改走 `stub_capabilities(...)` 正常参数；扩展位新增在同会话内即可完成，不再按跨会话改动处理。
+
 ## 4. 最小可交付顺序
 
 1. **responses 先行**。路由与能力位都已存在（`v1.py:222-224`、`base.py:6-16`），

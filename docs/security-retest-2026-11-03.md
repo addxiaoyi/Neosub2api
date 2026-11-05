@@ -6,15 +6,24 @@
 
 **总评：未发现未登录/viewer 可绕过角色边界的越权；未发现完整 `u2a_` 密钥出现在响应、日志表或全库任何文本列。确认 1 个需要 admin 权限才能利用的 SSRF 残留窗口（DNS 重绑定），以及 2 个低危权限口径问题。**
 
+> **2026-11-04 已更正（原句保留作历史）**：「2 个低危」是 2026-11-03 当日实测口径，数字不改，但其中 1 项现已失效——**发现 2（`GET /api/logs` viewer 可读全站）已于 2026-11-04 修复**：`_owner()`（`apps/control/app/routers/logs.py:36-40`）对非 admin 收窄、`_assert_key_owned`（`logs.py:43-52`）显式查他人 `key_id` 直接 403、WHERE 注入见 `logs.py:238-246`，详见 §1 发现清单后的更正块。**发现 3（`/api/security/guard` 静态策略暴露）仍成立**：`security.py:93-104` 仍为 `Depends(current_user)` 且返回内容未变。当前真实状态是 2 个低危中 1 个已修复、1 个仍存。这条为什么重要：引用总评时若照读「2 个低危」会重复立项已修复的日志问题；若把数字改成 1 则伪造了当日实测结果。
+
 ## 1. 发现清单（按严重度）
 
 | 严重度 | 发现 | 可利用性判断 | 证据 |
 | --- | --- | --- | --- |
 | 中 | **DNS 重绑定窗口仍存在**：`base_url` 只在保存时解析并校验一次，请求时不再校验 | 需要 admin 权限写入 provider/credential/sub2api 地址，且攻击者能控制域名解析。未登录与 viewer 不能利用。无重定向跟随，不能靠 302 绕过。成功时可让控制面代发请求命中 `169.254.169.254` 或私网 | 保存时 `guard_upstream_url` 解析 1 次；`app/adapters/base.py`、`client.py`、`codebuddy.py`、`opencode.py` 均无第二次调用；`client.py` 未开启 `follow_redirects` |
-| 低 | **viewer 可读取全站请求日志**：`GET /api/logs` 只校验登录，不按 owner 过滤，可显式传他人 `key_id` | 任意 viewer 可直接利用，读到他人 `key_name/provider/model/status/error`；**不含密钥明文** | viewer 传 admin 的 `key_id` 得到 200 且响应含 admin 的 key_name |
+| 低 | **viewer 可读取全站请求日志**：`GET /api/logs` 只校验登录，不按 owner 过滤，可显式传他人 `key_id` | 任意 viewer 可直接利用，读到他人 `key_name/provider/model/status/error`；**不含密钥明文** | viewer 传 admin 的 `key_id` 得到 200 且响应含 admin 的 key_name（原结论，2026-11-04 已更正，见下） |
 | 低 | **`/api/security/guard` 向所有登录用户暴露部署配置**：返回 `allow_private_upstreams` 与固定黑名单 | 任意 viewer 可读，但内容是静态策略，不是真实封禁名单；仅帮助判断私网 SSRF 是否被放开。单独不可利用 | viewer 与 admin 响应完全一致；`blocked_hostnames` 仅 localhost/metadata.google.internal，`blocked_addresses` 仅 `169.254.169.254`/`fd00:ec2::254` |
 | 信息 | viewer 可读 `/api/providers`、`/api/provider-credentials` 的 `base_url`（内部地址/拓扑）与掩码密钥 | 设计口径下允许；无明文密钥；单独不可利用 | 三身份矩阵中 viewer 均 200，响应无完整 `u2a_` |
-| 信息 | viewer 可枚举 `/api/users` 全部用户名与角色 | 低敏信息，可与上面的日志泄露组合做内部定位；不可直接提权 | viewer 200，返回全量用户 |
+| 信息 | viewer 可枚举 `/api/users` 全部用户名与角色 | 低敏信息，可与上面的日志泄露组合做内部定位；不可直接提权 | viewer 200，返回全量用户（原结论，2026-11-04 已更正，见下） |
+
+> **2026-11-04 已更正（原表格两行保留作历史）**：两行均为 2026-11-03 实测结果，2026-11-04 起已过期——
+>
+> 1. **`GET /api/logs`（发现 2，低）**：现按 owner 收窄——`_owner()`（`apps/control/app/routers/logs.py:36-40`）对非 admin 返回本人用户名并注入 WHERE（`logs.py:238-246`），显式传他人 `key_id` 由 `_assert_key_owned`（`logs.py:43-52`）直接 403「无权查看他人密钥的请求日志」；viewer 只见本人行，「可读全站、传他人 key_id 得 200」不成立。
+> 2. **`GET /api/users`（发现 5，信息）**：现为 `Depends(admin_user)`（`apps/control/app/routers/settings.py:958-964`，def 行 959），viewer 请求 403，「可枚举全部用户名与角色」不成立；前端 `settings/page.tsx:926` 的调用也已入 `isAdmin` 门禁（`settings/page.tsx:877-928`）。
+>
+> 这条为什么重要：复测报告常被当作「当前暴露面」直接引用，这两行会让读者以为日志与用户列表仍对 viewer 全量可读，据此重复立项修复，或在别处照抄旧口径。
 
 无高危、无致命项。
 
@@ -30,21 +39,30 @@
 | `/api/health/ready` | 200/503 | 200/503 | 200/503 | 公共探针，503 是就绪语义 |
 | `/api/me` | 401 | 200 | 200 | 一致 |
 | `/api/keys`、`/api/tokens` | 401 | 200 | 200 | viewer 仅见自身，见 §3 |
-| `/api/logs` | 401 | 200 | 200 | ⚠ viewer 可读全站，见发现 2 |
+| `/api/logs` | 401 | 200 | 200 | ⚠ viewer 可读全站，见发现 2（原结论，2026-11-04 已更正，见下） |
 | `/api/quota/policies`、`/api/quota/status`、`/api/quota/alerts` | 401 | 200 | 200 | viewer 仅见自身；显式查他人 403 |
 | `/api/audit-logs`、`/api/security/audit` | 401 | 200 | 200 | viewer 仅见 `actor=自己`；查他人 403 |
 | `/api/security/guard` | 401 | 200 | 200 | 静态策略，见发现 3 |
 | `/api/security/login-failures` | 401 | 200 | 200 | viewer `scope=self` 聚合，无 IP/他人信息 |
-| `/api/accounts`、`/api/accounts/capabilities` | 401 | 200 | 200 | 一致 |
+| `/api/accounts`、`/api/accounts/capabilities` | 401 | 200 | 200 | 一致（原值，2026-11-04 已更正，见下） |
 | `/api/providers`、`/api/provider-credentials` | 401 | 200 | 200 | ⚠ 内部地址对 viewer 可见（设计口径） |
 | `/api/models`、`/api/status` | 401 | 200 | 200 | 一致 |
 | `/api/stats/summary`、`/api/stats/daily` | 401 | 200 | 200 | 一致 |
 | `/api/system/changelog`、`/api/system/versions` | 401 | 200 | 200 | 一致 |
-| `/api/grok/register/tasks`、`/api/grok/register/worker` | 401 | 200 | 200 | 一致 |
-| `/api/users` | 401 | 200 | 200 | ⚠ viewer 可枚举用户 |
+| `/api/grok/register/tasks`、`/api/grok/register/worker` | 401 | 200 | 200 | 一致（原结论，2026-11-04 已更正，见下） |
+| `/api/users` | 401 | 200 | 200 | ⚠ viewer 可枚举用户（原结论，2026-11-04 已更正，见下） |
 | `/api/metrics` | 401 | **403** | 200 | 角色边界正确，403 结构化 |
 | `/api/sub2api/groups`、`/api/sub2api/accounts`、`/api/sub2api/ledger` | 401 | **403** | 200 | 角色边界正确 |
 | `/api/settings/upstream`、`/api/settings/gateway`、`/api/settings/model-map`、`/api/settings/runtime-config`、`/api/settings/runtime-config/export` | 401 | **403** | 200 | 角色边界正确 |
+
+> **2026-11-04 已更正（原表格四行保留作历史）**：状态码为 2026-11-03 实测，2026-11-04 起以下四行的 viewer 列已变——
+>
+> 1. **`/api/grok/register/tasks`（与 worker 同行）**：两个任务读端点现为 `Depends(admin_user)`（`apps/control/app/routers/grok.py:39-41`、`:44-47`，def 行 40、45），viewer 应为 **403** 而非 200；同格的 `/api/grok/register/worker` 仍 `current_user`（`grok.py:72-73`），viewer 200 不变。
+> 2. **`/api/users`**：现为 `Depends(admin_user)`（`settings.py:958-964`，def 行 959），viewer 应为 **403**，「⚠ viewer 可枚举用户」不成立。
+> 3. **`/api/accounts`（与 capabilities 同行）**：三列状态码结论不变（401/200/200），但 viewer 的数据面已收窄——`accounts.py:294-297` 对非 admin 追加 `WHERE owner_user_id = <username>`，viewer 只见自己名下账号（无主 NULL 行不可见），「一致」在数据内容上不再等同 admin 视图；同格 `/api/accounts/capabilities` 未变。
+> 4. **`/api/logs`**：viewer 现只见本人行，显式传他人 `key_id` 由 `_assert_key_owned`（`logs.py:43-52`）403（`_owner` 收窄见 `logs.py:36-40`、`:238-246`），「⚠ viewer 可读全站」不成立。
+>
+> 这条为什么重要：权限矩阵按行引用，旧行会让人以为 viewer 现在仍能 200 拿到 grok 任务与全量用户列表、以为 accounts 返回与 admin 相同的全量数据，或以为日志仍可跨用户读——据此会误判暴露面、重复立项。
 
 ### 2.2 写端点
 
@@ -64,6 +82,8 @@
 | `POST /api/logs/clear` | 401 | **403** | 200 | 正确 |
 
 **越权结论**：没有任何端点允许 viewer 或未登录执行 admin 动作；所有拒绝均为结构化 403（`error.type=permission_denied`、`code=insufficient_role`、`required_role=admin`、`role=viewer`）。标注 ⚠ 的 4 行属于“登录用户可读范围过宽”的数据暴露，不是角色绕过。
+
+> **2026-11-04 已更正（原句保留作历史）**：原句称「标注 ⚠ 的 4 行」，但 2026-11-03 提交版的 §2.1 表内实际只有 3 处 ⚠（`/api/logs` 行、`/api/providers`+`/api/provider-credentials` 行、`/api/users` 行）。按裁决，⚠ 与「2 个低危」都是当日实测口径，数字不改，这里只补记实际标记数，免得复核者按 4 行去数、把某个无 ⚠ 的行当成漏看的暴露面。这条为什么重要：⚠ 行是「登录用户可读范围过宽」的唯一清单，行数对不上会让复核结论失去锚点。
 
 ## 3. 密钥归属与审计自限权（重点改动复测）
 
@@ -91,12 +111,14 @@
 | 响应头 / `X-Request-Id` | 所有响应头不含 key；`X-Request-Id` 仅回显客户端传入值，换 id 不影响鉴权 | 不泄露，无关 |
 | `request_logs` 表 | 最新行 `key_id/key_name` 正确，逐列检查无完整 key | 不泄露 |
 | 全库扫描 | 所有表、所有文本列搜完整 key：0 命中 | 不泄露（`api_keys` 仅存 hash） |
-| `GET /api/logs` | admin 与 viewer 响应均无完整 key；但 viewer 能读到 admin 的 `key_name` | 无密钥泄露，有跨用户元数据暴露 |
+| `GET /api/logs` | admin 与 viewer 响应均无完整 key；但 viewer 能读到 admin 的 `key_name` | 无密钥泄露，有跨用户元数据暴露（原实测，2026-11-04 已更正，见下） |
 | 无效 key 错误 | `x-api-key: u2a_<随机>` → 401，响应不回显该值 | 不泄露 |
 | 双头冲突 | `Authorization` 与 `x-api-key` 同时给不同 key → 401，两者都不回显 | 不泄露 |
 | URL 传 key | `?key_id=<完整 key>` → 400，响应不回显；`X-Api-Key` 与 `key_id` 同传 → 400 | 不泄露 |
 | uvicorn access log | `mask_access_args` 将查询串中的 `u2a_` 主体掩码，保留前缀；`JsonFormatter` 只输出无查询串的 `path`，原消息中的 key 也被 `mask_text` 抹掉；`app/main.py` 仍复用同一函数 | 脱敏链路存在且有效（见 §7 限制：未拿到真实 access log 行） |
 | 建 key 响应 | `POST /api/keys` 一次性返回明文 key | 设计行为，不计泄露 |
+
+> **2026-11-04 已更正（原实测保留作历史）**：`GET /api/logs` 那行「viewer 能读到 admin 的 `key_name`」已不成立——`_owner()`（`logs.py:36-40`）对非 admin 返回本人用户名、admin 才返回 `None`（不收窄），列表查询据此注入收窄条件（`_where` 见 `logs.py:101-111`，过滤子句 `logs.py:116`）；显式传他人 `key_id` 由 `_assert_key_owned`（`logs.py:43-52`）直接 403「无权查看他人密钥的请求日志」。故该通道现为「不泄露（viewer 仅见本人行）」。这条为什么重要：§4 是密钥泄露面的逐通道证据表，照旧读会以为仍存在跨用户元数据通道，要么重复立项，要么误判修复未生效。
 
 ## 5. SSRF 实测
 

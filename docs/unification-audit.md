@@ -42,7 +42,7 @@
 | P2-5 Upstash 测试按钮 | 已修 | 按钮已移除 |
 | P2-6 无调用方方法 | 已修 | OAuth 批量与认领计划已删；`credits` / `reloadState` / `reloadUpstream` 也已从 `api.ts` 删除（2026-11-04 复核） |
 | P2-7 集成方案文档过时 | 未修 | 本轮仅改 `docs/` 的事实性段落，未重写该方案文档 |
-| P2-8 grok 文档自相矛盾 | 部分修 | `frontend-integration-plan.md` 顶部加 `/tasks` 删除注记 |
+| P2-8 grok 文档自相矛盾 | 已修 | 原记「部分修：`frontend-integration-plan.md` 顶部加 `/tasks` 删除注记」；2026-11-04 已按代码统一口径为「无界面入口」，原句留档 |
 | P2-9 页面白名单冲突 | 未修 | 未补批准记录 |
 | P2-10 后端中文文案 | 部分修 | 网关路径有稳定错误码；管理面仍中文硬编码 |
 
@@ -325,7 +325,8 @@
 - **影响**：grok 注册能力的「是否该有页面」无法从文档判定。
 - **建议修法**：明确取舍并在文档写死一条；若不做页面，同时清理 `docs` 中的「任务页已有」表述。
 - **状态（2026-11-03）**：部分处理。任务页已整体删除，「任务页 TaskRunnerPanel」这一前提不再成立；`docs/design/frontend-integration-plan.md` 顶部已加删除注记（另两份设计文档本就标注「仅作存档」），grok 是否单独做页面仍未定论。
-- **改动面**：文档 2 处（本次不改）。
+- **状态（2026-11-04）**：已修。按代码实际状态统一为一套口径——`apps/web` 全量路径抽取无 `/api/grok/*`，后端 `apps/control/app/routers/grok.py:26-74` 有 6 个端点，故结论是**无界面入口**：`frontend-integration-plan.md` §1.3 的「已有（任务页 TaskRunnerPanel）/已有」与 §3 落位表的「① / 任务页 / 已有」均改为「无 UI / 不进界面」并保留原句作历史，与 §1.5「不进界面」一致；`grok` 是否另做页面仍属后续产品决策，本文只固化当前事实。
+- **改动面**：文档 2 处（本次不改）。（2026-11-04 补记：实际改了 3 处——`frontend-integration-plan.md` 顶部状态注记、§1.3 grok 表格、§3 落位表注册任务行。）
 
 ### P2-9 `/quota`、`/pricing` 新增页面与基准红线 L48 冲突，但 L65 又列入清单
 
@@ -590,8 +591,8 @@
 | 文档位置 | 文档说法 | 代码事实 | 结论 |
 | --- | --- | --- | --- |
 | `docs/design/frontend-integration-plan.md:10,12,198-200,299-301` | 只挂载 11 个模块；`tokens.py`、`system.py` 未挂载 | `apps/control/app/main.py:179-181` 已包含并挂载 `tokens`、`system` | **文档过时** |
-| `docs/design/frontend-integration-plan.md:63-65` | grok 注册任务入队「已有（任务页 TaskRunnerPanel）」 | 前端无 `/api/grok/*`；TaskRunnerPanel 调 `/api/task-run`，后端无此路由 | **文档错误**（已在文件顶部加删除注记） |
-| `docs/design/frontend-integration-plan.md:90` | 注册任务不进界面 | 与 L63 自相矛盾 | **文档自相矛盾** |
+| `docs/design/frontend-integration-plan.md:63-65` | grok 注册任务入队「已有（任务页 TaskRunnerPanel）」 | 前端无 `/api/grok/*`；TaskRunnerPanel 调 `/api/task-run`，后端无此路由 | **文档错误**（已在文件顶部加删除注记；2026-11-04 已改写为「无 UI」并保留原句作历史） |
+| `docs/design/frontend-integration-plan.md:90` | 注册任务不进界面 | 与 L63 自相矛盾 | **文档自相矛盾**（2026-11-04 已消解：以本行「不进界面」为准，§1.3 的「已有」表述已改写留档，两处口径统一为「无界面入口」） |
 | `docs/FRONTEND-BASELINE.md:48` | 不得新增页面 | `:60-68` 又把 `/quota`、`/pricing` 列入清单 | **文档自相矛盾**，需批准记录 |
 | `README.md`、`GETTING-STARTED.md`、`FRONTEND-BASELINE.md`、`docs/design/*` | 页面清单与导航仍含 `/tasks` | `/tasks` 页面与相关幽灵端点已整体删除 | **已修**（2026-11-03，页面清单移除、设计文档加删除注记） |
 | `README.md`、`docs/ADDING-A-PROVIDER.md:161`、`docs/FRONTEND-SKELETON.md:100`、`docs/security-audit.md:122`、`docs/ux-review.md:54` | 测试基线写作固定值（README 旧为约 425，其余称「当前基线 250」） | 本次提交实测约 425 passed，且会继续增长；2026-11-04 全量实测 443 passed + 1 skipped + 0 failed + 0 xfailed，收集 444 条 | **已修**（2026-11-03 改写为「以最近一次全量 `pytest` 结果为准」；当前基线以 2026-11-04 实测值为准，量级约 444） |
@@ -622,7 +623,7 @@
 | `/red-packets`、`/claim` 消失 | `FRONTEND-BASELINE.md:68` 明确按业务整条删除，不应再补 |
 | `/providers` 无独立页 | 已并入设置页「服务商」tab，baseline 明确允许 |
 | 网关原样透传上游 4xx/5xx body | 下游协议兼容所需；与管理面错误契约分开看 |
-| grok worker 端点无界面 | 属运维观测，长期不做界面也合理（但需在文档写死） |
+| grok worker 端点无界面 | 属运维观测，长期不做界面也合理（但需在文档写死）；2026-11-04 已在 `frontend-integration-plan.md` §1.3 与落位表写死为「无界面入口」 |
 
 ---
 

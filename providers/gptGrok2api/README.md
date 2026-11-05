@@ -51,7 +51,24 @@ Grok 走 `POST /rest/app-chat/conversations/new`（`sso` Cookie，逐行 JSON，
 - 健康探测端点 `GET /backend-api/me`、`GET /rest/models` 是推断，未实测；
   失败时 `health()` 返回 `connected=false`，可用 `options.health_path` 改探针。
 - `oai-device-id`/`oai-session-id` 派生只保证同凭证稳定，不保证与官方客户端一致。
-- 两家上游都没有原生 function calling：`tools` 不注入，tool 消息降级为 `[tool result]` 文本。
+- 两家上游都没有原生 function calling：`tools` 不注入，tool 消息降级为 `[tool result]` 文本。（原表述，2026-11-04 已更正，见下）
+  （2026-11-04 更正，上句原文保留作历史：原表述把「本仓不做」说成了「上游也没有」。上游在分析基线
+  `0335d62` 已有工具调用实现，源文件 `internal/protocol/tools.go`，做法是提示词注入——把工具清单与
+  `<tool_calls>` XML 输出格式写进请求提示词，再解析模型回吐的调用块，并非 OpenAI 原生 `tools` 字段。
+  正确口径：上游不支持 OpenAI 原生 `tools` 字段，但通过提示词注入实现了等价工具调用能力；本仓尚未复刻
+  该注入逻辑，带 `tools` 的请求当前会被降级（工具定义不注入、tool 消息压成 `[tool result]` 文本，
+  `gptgrok.py:190-192`）。这是**已知缺口**，不是「上游也不支持」。）
+  （2026-11-04 再更正，上段结尾「本仓尚未复刻…属已知缺口」已过时，原文保留作历史：本仓**已实现**
+  提示词注入式工具调用（`apps/control/app/adapters/gptgrok.py`）。注入机制：请求侧拼 `[available tools]`
+  （工具名 / description / parameters schema）与 `[tool call protocol]` 输出协议（`gptgrok.py:128-142`），
+  `tool_choice` 的 `required` 模式附加强制调用指令（`:138-141`）；模型以行首 `[tool_call] ` + 单行 JSON
+  回吐，由 `_ToolCallScanner` 增量解析回标准 OpenAI `tool_calls`（`id` / `type: function` /
+  `function.name` / `function.arguments`，`_tool_call_item` `:235-242`），流式跨帧拼装、有调用时
+  `finish_reason=tool_calls`；多轮 `tool` 消息保留 `tool_call_id`（`[tool result <id>]`，`:389-392`）。
+  与上游的差异：本仓输出格式为自定的 `[tool_call]` + 单行 JSON，与上游 `<tool_calls>` XML 属同机制
+  不同表达，不是复刻上游源码（`gptgrok.py:47` 注释即此意）。图片分流：GPT 通道透传 `image_url`
+  （远程 URL 与 base64 data URL 两形态，`:57-59`）；Grok 通道请求体只有文本 transcript，带图显式 400
+  （`:721-727`）。能力位声明未变，`tools` 不再降级。）
 - 两通道都不返回 `usage`，记账侧按 `usage_missing` 处理。
 
 ## 如何同步上游更新

@@ -67,6 +67,35 @@
 
 `failure_rate_limited` 是窗口内 `status = 429` 且 `error` 含 `failure_rate_limited` 的条数。未登录 401，viewer 403（它暴露按 provider 的失败分布，与 `/api/stats` 同一权限面；免鉴权只留给两个探针）。
 
+> **2026-11-05 已更正（原句保留作历史）**
+>
+> 本段原记「返回 JSON」并把 JSON 示例挂在 `GET /api/metrics` 上；当前该路径返回 **Prometheus 文本**（`text/plain; version=0.0.4`），原 JSON 已迁到 `GET /api/metrics/json`。
+>
+> | 项 | 当前事实 | 代码 |
+> | --- | --- | --- |
+> | 响应类型 | `Response(content=..., media_type=PROMETHEUS_MEDIA_TYPE)`；媒体类型常量 `text/plain; version=0.0.4` 在 `health.py:45`，窗口上下限在 `health.py:43-44` | `health.py:410-427` |
+> | 鉴权 | `metrics_access`：默认仅 `admin`；配置 `UNIFIED_METRICS_TOKEN` 后额外接受 `Authorization: Bearer <token>`（`secrets.compare_digest` 比对，命中即放行）；Bearer 未命中不会跳过登录态校验 | `health.py:143-157` |
+> | 旧 JSON 路径 | `GET /api/metrics/json`，`Depends(admin_user)`，字段与迁移前一致 | `health.py:430-447` |
+> | `window_seconds` | 两个端点共用 `_clamp_window`，夹逼 60–2592000 | `health.py:406-407` |
+> | 抓取副作用 | 渲染前调用 `evaluate_alerts`，评估失败只记日志、不阻断抓取 | `health.py:420-423`、`440-443` |
+>
+> **这条为什么重要**：照旧按 JSON 解析的抓取器/面板会解析失败；以为「除 admin 登录外还有匿名面」或反过来「配了 token 也必须带 Cookie」都会让抓取被 401/403 拦住，最后被误判成服务不可用。
+
+### `GET /api/metrics/json?window_seconds=3600`（管理员）
+
+旧版自定义 JSON 指标，路径从 `/api/metrics` 迁来、字段不变（`health.py:430-447`）。`window_seconds` 同 `/api/metrics`，夹逼 60–2592000（`health.py:406-407`）。
+
+```json
+{
+  "generated_at": 0, "window_seconds": 3600,
+  "requests": {"total": 0, "success": 0, "failed": 0},
+  "providers": [{"provider": "openai", "requests": 0, "success": 0, "failed": 0}],
+  "failure_rate_limited": 0
+}
+```
+
+`failure_rate_limited` 口径不变：窗口内 `status = 429` 且 `error` 含 `failure_rate_limited` 的条数。指标按 `request_logs` 聚合，不新建累加器。鉴权只走 `admin_user`，没有 `UNIFIED_METRICS_TOKEN` 旁路；未登录 401，viewer 403。
+
 ---
 
 ## 1. 网关（`/v1/*`，密钥鉴权）
@@ -108,6 +137,35 @@ OpenAI Chat Completions 协议转发。
    - 多家命中（400 `ambiguous_model`）不受开关影响；若没有任何启用的 provider 支持该能力位，仍返回原有 404 / 501，不会凭空造路由。
 
 **行为变化**：旧实现查不到模型名时会兜底到第一家 chat provider，现在默认**没有兜底**——名字不在聚合目录里就直接 404。依赖「随便写个模型名也能跑」的客户端必须改成 `<provider>/<model>`、带 `x-provider`，或临时设置 `UNIFIED_MODEL_FALLBACK_FIRST=1`。显式指定（`x-provider` 或前缀）的 provider 必须先启用，停用时返回 503 `provider_disabled`，不会静默改走其它 provider。
+
+#### 跨 provider 故障转移（`UNIFIED_FAILOVER_ENABLED`，默认关）
+
+| 项 | 事实 | 代码 |
+| --- | --- | --- |
+| 开关 | `UNIFIED_FAILOVER_ENABLED`，每个请求读环境变量；`1/true/yes/on` 视为开，缺省为关 | `model_resolve.py:54, 67-70` |
+| 尝试次数 | `UNIFIED_FAILOVER_MAX_ATTEMPTS`，默认 2，钳制 1–10；非整数回默认 2 | `model_resolve.py:55-57, 73-79` |
+| 实际取几个候选 | `targets[:failover_max_attempts()]`；关闭时只取 `targets[:1]` | `v1.py:424-426` |
+| 作用范围 | 只作用于「本来就有多个候选」的两条路径：模型目录多命中、`UNIFIED_MODEL_FALLBACK_FIRST` 的兜底候选；显式 `x-provider` 与 `provider/model` 前缀恒单目标、不换家 | `model_resolve.py:14-18, 356-372` |
+| 成功响应头 | 流式与非流式都带 `x-upstream-provider: <最终承接的 provider id>`；失败响应不带 | `v1.py:532, 547` |
+| 每次尝试 | 每次尝试独立写一条 `request_logs`；开关打开且有备选时 `error` 前缀 `[尝试N/M]`；转移另打一条 WARNING 日志（从谁到谁、原因状态码与文案） | `v1.py:376-380, 387-392, 445-479` |
+
+转移判据（`retryable_status()`，`model_resolve.py:82-84`）：
+
+| 上游/网关结果 | 是否换下一个 provider | 依据 |
+| --- | --- | --- |
+| 5xx（501 除外） | 转移 | `model_resolve.py:64, 82-84` |
+| 408 | 转移 | `model_resolve.py:62, 82-84` |
+| 429（上游限流） | 转移 | `model_resolve.py:62, 82-84` |
+| 连接失败 / 读超时 | 转移（客户端层统一归一成 `ProviderError(502)`） | `client.py:206-208, 238-240, 277-279` |
+| 400 / 404 | 不转移：请求本身的问题，换家结果相同 | `model_resolve.py:59-62` |
+| 上游 401 / 403 | 不转移：凭证/权限问题，换家等于拿别人的额度试错 | `model_resolve.py:59-61` |
+| 501 能力位不支持 | 不转移：换家同样不支持 | `model_resolve.py:63-64` |
+| 配额 `429 quota_exceeded`、失败限流 `429 failure_rate_limited`、密钥缺失/无效 `401`、鉴权头冲突 | 不转移：都在准入段（尝试循环之前）返回，根本没进入尝试 | `v1.py:400-409` |
+
+- 只有「已解析出多个目标」时才有备选；单候选时即使开关打开也无事发生（`_transferred` 要求 `index + 1 < total`，`v1.py:383-384`）。
+- 转移后由**最终承接**的 provider 决定 `request_logs.provider` 与 `x-upstream-provider`；按 provider 对账/排障以这两处为准，不要只看请求里写的模型。
+
+**这条为什么重要**：把 401/403/400/404/501 也当成「可转移」，会让客户端误以为重试能绕过上游凭证或能力问题（实际原样失败），还会把配置错误记成上游故障；以为显式 `x-provider` 也会漂移，会让按 provider 记账/排障的人错认承接方。
 
 #### 错误契约
 
@@ -234,7 +292,9 @@ Anthropic Messages 协议转发，鉴权、模型解析、日志、状态码映�
 
 ### `POST /v1/responses`
 
-OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/v1/chat/completions` 一致（含 OpenAI `error` 外壳），能力位换成 `responses`（代码里同走 `_proxy`）。目前只有 `codar` 与 `qoder` 声明了该能力位，其余 provider 返回 501。
+OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/v1/chat/completions` 一致（含 OpenAI `error` 外壳），能力位换成 `responses`（代码里同走 `_proxy`）。目前 `codar`、`qoder`、`qoder_sidecar` 三家声明了该能力位，其余 provider 返回 501（`codar_sidecar` 不声明，仍 501）。
+
+> 2026-11-04 更正（原句保留作历史）：本段原记「目前只有 `codar` 与 `qoder` 声明了该能力位，其余 provider 返回 501」，与代码不符——`apps/control/app/adapters/qoder_sidecar.py:32` 声明 `"responses": True`、`:55-57` 实现转发、`apps/control/app/routers/v1.py:479-481` 已挂 `/v1/responses`，故补上 `qoder_sidecar`。本节其余内容（鉴权、模型解析、错误外壳、501 语义）不变；`codar_sidecar` 仍不声明该能力位（`codar_sidecar.py:8`），返回 501 属实。
 
 ### `GET /v1/models`
 
@@ -248,6 +308,35 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 ```
 
 某 provider 拉模型失败时静默跳过（不报错），所以空列表可能意味着「没有可用 provider」也可能是「上游都不通」。
+
+#### `/v1` 扩展端点（10 条，`/v1` 路由总数 14）
+
+除上文 4 条（`chat/completions`、`messages`、`responses`、`models`）外，另有 10 条扩展路由（装饰器位置 `v1.py:672-720`），鉴权、配额、失败限流、日志与主端点同一套。扩展能力位集合为 `EXTENSION_CAPABILITIES = {embeddings, images, videos, media, count_tokens, rerank}`（`v1.py:44-47`）。
+
+| 方法与路径 | 能力位 | 转发方法 | 说明 |
+| --- | --- | --- | --- |
+| `POST /v1/embeddings` | `embeddings` | `embeddings` | 请求体原样转发 |
+| `POST /v1/images/generations` | `images` | `image_generation` | 请求体原样转发 |
+| `POST /v1/images/edits` | `images` | `image_edit` | 只收 JSON；`multipart/*` → 415 `unsupported_media_type` |
+| `GET /v1/images/tasks/{task_id}` | `images` | `image_task` | 走 `_proxy_get` |
+| `POST /v1/videos` | `videos` | `video_create` | 请求体原样转发 |
+| `GET /v1/videos/{task_id}` | `videos` | `video_task` | 走 `_proxy_get` |
+| `GET /v1/media/{name}` | `media` | `media` | 走 `_proxy_get` |
+| `POST /v1/messages/count_tokens` | `count_tokens` | `count_tokens` | Anthropic 计数端点；错误外壳按路径前缀走 `messages` 协议（`gateway_errors.py:108-112`） |
+| `POST /v1/rerank` | `rerank` | `rerank` | 请求体原样转发 |
+| `GET /v1/usage` | `usage` | `usage` | 查询串原样透传（`v1.py:717-720`） |
+
+行为口径：
+
+- **强制非流式**：扩展 POST 端点丢弃请求体里的 `stream` 并置 `stream=False`（`v1.py:410-412`），既不透传给上游，也不返回 SSE。
+- **请求体**：只接受 JSON；`multipart/*` 返回 415 `unsupported_media_type`，非法 JSON 或非对象返回 400 `invalid_json`（`v1.py:280-296`）。
+- **计费口径**：扩展能力位的空/全零 usage 经 `_usage_for_ledger` 归成 `None`（`v1.py:273-277`），结算仍会写一条 `note=usage_missing`、0 金额的流水（`billing.py:321-323`）；日志侧因此是 `credit_status=usage_missing`、`credit=null`（`logs.py:155-162`），**不是** `billed(0)`。`usage` 不在 `EXTENSION_CAPABILITIES` 内，但 `/v1/usage` 走 GET 代理，同样不采用量。
+- **`_proxy_get`（4 条 GET，`v1.py:584-636`）**：没有 `model` 可解析，按能力位挑 provider（`_pick_capable`，`v1.py:551-581`）：零家支持 501 `capability_unsupported`；多家支持且未带 `x-provider` 400 `ambiguous_provider`；`x-provider` 指向未知/停用 provider 404 `provider_not_found`，指向不支持该能力位的已启用 provider 501。家级能力位为真但适配器没实现读取方法（如只有建视频任务、没有查询）同样 501 `capability_unsupported`（`v1.py:590-597`）。
+- **配额与限流维度**：GET 端点没有 model，`_quota_guard` / `_failure_guard` 按 provider 维度判（model 传空串），model 级配额策略不适用（`v1.py:598-600`）。
+- **落账**：GET 端点无论成功失败都写 `request_logs`（`model=""`、`usage=None`），成功时同样落 `usage_missing` 零金额流水（`v1.py:607-631`）；成功响应只透传上游 `content-type`，**不**带 `x-upstream-provider`（`v1.py:632-636`）。
+- **上游错误**：GET 端点的上游 4xx/5xx 先落日志，再按统一映射出错误壳（`v1.py:616-626`），与 POST 端点一致。
+
+**这条为什么重要**：漏记会让人以为这些能力只能直连上游，从而绕开密钥、配额与请求日志；把扩展端点的空/全零 usage 当成 `billed(0)` 会让账少记一笔「有请求但无法计价」，也让 usage_missing 告警口径失效；把 GET 读取端点当可流式或可计费，会误设客户端超时与对账口径。
 
 ---
 
@@ -273,6 +362,53 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 ### `POST /api/sessions/revoke`（登录）
 
 吊销当前用户的全部会话。返回 `{"ok": true, "relogin_required": true}`。
+
+### `POST /api/auth/register`（公开，受开关控制）
+
+| 项 | 说明 |
+| --- | --- |
+| 开关 | `allow_registration` 关闭 → 403 `注册未开启，请联系管理员`（`auth.py:245-247`） |
+| 用户名 | 3–32 位字母、数字、点、下划线、连字符（`auth.py:249-250`） |
+| 密码 | ≥ 8 字符（`auth.py:251-252`） |
+| 邮箱 | 可选，给了就校验格式（`auth.py:253-255`） |
+| 角色 | 落库固定 `user`（`auth.py:263`；非 admin，管理员权限面不放行） |
+| 冲突 | 用户名或邮箱已存在 → 409，`detail` 区分「邮箱已存在 / 用户名已存在」（`auth.py:266-274`） |
+| 响应 | `{"ok": true, "username": "...", "role": "user"}`，写审计 `register`（`auth.py:279-282`） |
+
+> **2026-11-05 已更正（原句保留作历史；依据当前工作树，未提交）**
+>
+> 上表「角色」与响应示例里的 `role` 原记 `user`；当前注册落库与响应都改为 **`viewer`**（`auth.py:263`、`auth.py:282`），权限行为不变：`admin_user` 只判 `role != "admin"`（`security.py:102-104`），`viewer` 与原先的 `user` 完全等价。历史 `role='user'` 行在启动时幂等映射为 `viewer`，只匹配 `user`、不碰 `admin`（`db.py:317-318`）。
+>
+> **这条为什么重要**：照旧断言 `role == "user"` 的客户端或测试会开始失败；把 `user` 当成第三种权限等级，会误判它与 `viewer` 有差别——实际分界只有 admin 与非 admin。
+
+### `POST /api/auth/refresh`（登录）
+
+续期当前会话：`Depends(current_user)`（`auth.py:286`），Cookie 缺失或无效 401（`auth.py:288-290`）。
+
+- **同表轮换**：先 `DELETE` 当前 token，再在**同一张 `sessions` 表**签发新 token（`auth.py:294-295`）——不引入第二套 token 体系。
+- 旧 token 立即失效，客户端收到响应后必须改用新 Cookie（响应会重种 `u2a_session`，`auth.py:299`）。
+- 写审计 `session_refresh`（`auth.py:296`）；响应 `{ok, username, role, expires_in}`（`auth.py:300-305`）。
+
+### 两步验证（TOTP，`/api/auth/totp/*`，全部登录）
+
+五个端点都 `Depends(current_user)`，未登录 401：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/auth/totp/status` | `{enabled, recovery_codes_left, period}`；`recovery_codes_left` 只数 `used_at IS NULL` 的恢复码（`auth.py:308-325`） |
+| `POST /api/auth/totp/setup` | 生成待确认密钥；返回 `{secret, otpauth_uri, algorithm: "SHA1", digits: 6, period}`；已开启返回 400「请先关闭」，重复调用覆盖 pending；写审计 `totp_setup`（`auth.py:328-351`） |
+| `POST /api/auth/totp/enable` | body `{code}`；必须先 setup 否则 400；用 pending 密钥校验（`auth.py:364-372`）；成功后写 `totp_secret`、`totp_enabled=1`、`totp_last_counter`，签发 8 枚恢复码并**只在此次返回明文**（`auth.py:373-392`） |
+| `POST /api/auth/totp/disable` | body `{password, code}`；必须密码正确 + 验证码有效（`auth.py:406-418`）；密码错给 **400** 而非 401（避免前端 401 拦截器把人踢回登录页，`auth.py:408-410`）；成功后清零 `totp_last_counter` 并删恢复码（`auth.py:419-424`） |
+| `POST /api/auth/totp/verify` | body `{challenge, code?, recovery_code?}`；登录第二因子，成功后删 challenge、签发会话并种 Cookie（`auth.py:449-510`） |
+
+登录侧行为（`auth.py:197-239`）：
+
+- 账号已开 2FA 时，**密码正确也不发 token/Cookie**，只返回 `{"ok": false, "need_totp": true, "challenge": "...", "expires_in": 300}`（`auth.py:223-232`；`CHALLENGE_TTL_SEC = 300` 在 `auth.py:46`）。
+- `POST /api/auth/totp/verify` 用 `challenge` 换会话：不存在或过期 401 并删过期行（`auth.py:454-463`）；账号未开 2FA 400（`auth.py:466-467`）。**失败累计 5 次作废**：第 5 次失败直接删 challenge，之后只能重新登录（`auth.py:469-479`；`CHALLENGE_MAX_ATTEMPTS = 5` 在 `auth.py:47`）。
+- **同窗重放拒绝**：`users.totp_last_counter` 单调递增，命中的 counter `<=` 已记录值即判 `replay`，返回「验证码已使用，请等待下一个时间窗」（`totp.py:49-71`；启用时写初值 `auth.py:379-383`，验证成功推进 `auth.py:500-503`）。校验接受当前窗及前/后各一格（`totp.py:20-23, 60-66`），容差只用于时钟漂移，不放宽重放判定。
+- **恢复码**：一次性、共 8 枚、12 位十六进制（48 bit 熵）、沿用口令哈希参数（PBKDF2），用后置 `used_at` 且并发只允许一条更新成功（`totp.py:24, 83-94`；`auth.py:432-446`）。恢复码登录同样把 `totp_last_counter` 推进到当前窗，避免同窗 TOTP 码再用（`auth.py:481-489`）。
+
+**这条为什么重要**：漏记 `need_totp` 分支，对接方会以为登录成功却拿不到 Cookie，误判成会话 bug；漏记 `totp_last_counter` 与 5 次作废，会以为同一验证码可重复使用、也会低估爆破防护；漏记恢复码一次性，会把「同一枚恢复码反复登录」当成设计行为。
 
 ### `POST /api/auth/start`（管理员）
 
@@ -353,7 +489,9 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 账号来自各 provider 的上游账号池，列表接口顺带同步（每个 provider 30 秒节流，强制刷新用 `/sync`）。
 
-### `GET /api/accounts?provider=&realm=`（登录）
+### `GET /api/accounts?provider=&realm=`（登录，按归属收窄）
+
+权限口径（2026-11-04 收紧）：`admin` 返回全量账号；非 `admin` 只返回 `owner_user_id` 等于自己用户名的行。`accounts` 表同日补 `owner_user_id` 列，`NULL` 表示无主/共享池行，对非 admin 不可见；因此 dashboard 等既有调用方仍是 200，只是数据面收窄，不产生新的 403。
 
 | 查询参数 | 说明 |
 | --- | --- |
@@ -412,6 +550,36 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 ### `POST /api/accounts/checkin-all`（管理员）
 
 仅 codebuddy：全部账号签到。返回 `{total, succeeded, already, skipped, results, ...}` 或带 `message` 的零值结构。
+
+### `POST /api/accounts/import`（管理员）
+
+贴凭证式登记一条账号；`Depends(admin_user)`（`accounts.py:359-360`）。
+
+请求体（`accounts.py:75-82`）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `provider` | string | 必填，必须已注册（`accounts.py:131-136`） |
+| `label` / `name` | string | 二选一，截 64 字符（`accounts.py:165`） |
+| `credential_type` | string | `api_key` / `bearer` / `cookie` / `json` / `env` 五选一（`accounts.py:68, 146-152`） |
+| `credential` | string 或 object | `json` 类型可传对象/数组，其余必须字符串；空值 400；上限 4096 字符（`accounts.py:100-126`） |
+| `base_url` | string | 可选，走与统一凭据库同一道地址守卫（`accounts.py:153-158`） |
+| `note` | string | 截 200 字符（`accounts.py:166`） |
+
+- `json` 凭证先 `json.loads` 语法校验，错误定位到行/列（`accounts.py:111-117`）。
+- `sidecar` / `demo` 账号拒收（前者由 sidecar 自管，后者是种子数据），400 并说明原因（`accounts.py:139-145`）。
+- 凭据写入统一凭据库（`registry.create_credential`，参与转发轮换），账号行进本端 `accounts` 表并标 `imported` + `credential_id`（`accounts.py:369-403`），`owner_user_id` 写当前用户名（`accounts.py:405`）。
+- 响应与 `GET /api/accounts` 单条同构，**凭据不回显明文**（`accounts.py:93-97, 417-420`）；审计 `accounts.import`，detail 只记 `credential_type`（`accounts.py:408-416`）。
+
+### `POST /api/accounts/import/probe`（管理员）
+
+保存前试连通，请求体同上（`accounts.py:423-429`）。临时适配器 = 浅拷贝 + 重建 options，**探测不落库、不改进程内共享实例**（`accounts.py:430-435`）。
+
+- 优先调 `health()`；适配器没有则调 `fetch_models()`；两者都没有则 `status=unsupported`（`accounts.py:436-453`）。
+- 返回 `{status: "ok"|"fail"|"unsupported", connected, message, upstream_status}`；`message` 过 `mask_text` 并截 300 字符（`accounts.py:460-465`）。
+- 探测失败**只报告、不阻断保存**；响应不含凭据明文（`accounts.py:455-459, 463`）。
+
+**这条为什么重要**：漏记会让人以为只能扫码/OAuth 加账号；把 probe 当强校验会误以为探测失败就不能保存（实际只是报告）；以为 probe 会回显凭据会误判泄露面。
 
 ### `PUT /api/accounts/{file}/note`（管理员）
 
@@ -701,7 +869,7 @@ SSRF 加固：建连前先做主机名/字面量红线（内网、环回、链�
 
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/users` | 登录 | `[{"username", "role"}]` |
+| `GET /api/users` | 管理员 | `[{"username", "role"}]`；与本组写操作同一口径（2026-11-04 收紧，此前为登录可读），非 admin 403 `insufficient_role` |
 | `POST /api/users` | 管理员 | 创建。用户名 3–32 字符，密码 ≥6；角色 `admin`/`viewer`（默认 viewer）；重名 409 |
 | `PATCH /api/users/{username}` | 管理员 | 改密码和/或角色；改密码会吊销该用户全部会话；不能把最后一个 admin 降级（400） |
 | `DELETE /api/users/{username}` | 管理员 | 不能删自己、不能删最后一个 admin；删除会吊销其会话 |
@@ -714,6 +882,64 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 - `GET /api/system/versions`：`{"manager": "unified-2api M2", "upstream_connected": false, ...}` 固定结构。
 - `GET /api/system/changelog`：解析根目录 `CHANGELOG.md`，返回 `{available: true, path: "CHANGELOG.md", total, versions: [...], truncated, current}`；`versions` 每项 `{version, date, unreleased, sections: [{title, items: [{level, text}]}]}`（`## 版本` / `### 分类` / `- 条目`）。文件缺失或不可读返回 `available: false` + `error` + 空 `versions`，不 500。
 - `GET /api/system/update-status`：与 `check-update` 同源的固定「无更新」结构 + 面板所需字段：`{available: false, current_version, reason: "本部署不提供在线更新", version, running: false, ok: null, step: "", logs: [], updater_found: false, upstream_dir: "", can_update_upstream: false, in_container, upstream_ref: ""}`。
+
+### 备份与恢复（`/api/system/*`，三个端点均管理员）
+
+路由前缀 `/api/system`（`backup.py:36`）；保留份数 `BACKUP_KEEP = 14`（`backup.py:38`）。
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/system/backups` | `{backups: [{name, size_bytes, created_at, path, has_checksum}], count, dir}`；`path` 过 `mask_text`（`backup.py:164-188`） |
+| `POST /api/system/backup` | 立即备份；跨进程锁；返回 `{ok, name, size_bytes, duration_ms, path, sha256, created_at}`（`backup.py:191-219`） |
+| `POST /api/system/restore` | body `{name, confirm}`；`confirm` 默认 `false`，缺省 400；`name` 必须命中 `ARCHIVE_RE` 白名单（`backup.py:222-234`） |
+
+恢复流程（`backup.py:240-287`）：
+
+1. 取跨进程锁，键 `restore:<name>`；占锁失败 409（`backup.py:241, 69-90`，409 在 83 行）。
+2. `core.load_archive` 校验归档：zip + manifest + 成员 sha256 + `PRAGMA integrity_check`（`backup.py:243`）。
+3. 恢复前**自动给当前库出一份完整快照**，名字随响应返回（`backup.py:261, 298-306`）。
+4. `_replace_with` 用临时文件 + `os.replace` 原子替换（`backup.py:331-345`，`os.replace` 在 339 行）。
+5. `core.selfcheck`；不过则写回字节快照回滚，库不处于半写状态（`backup.py:350-362`）。
+6. 写审计（`backup.py:270-276`）；返回 `{ok, restored, path, pre_restore_backup, pre_restore_path, duration_ms, selfcheck_ok, rows_after}`（`backup.py:278-287`）。
+
+> **2026-11-05 已更正（原句保留作历史；`backup.py` 已不是原句描述的实现，以当前工作树为准）**
+>
+> 第 4、5 步原记「`_replace_with` 用临时文件 + `os.replace` 原子替换（339 行）、`core.selfcheck` 失败写回字节快照」；当前恢复改为 **SQLite 在线备份**：`_apply_archive` 调 `_backup_into` 把归档库逐页备份进活库（`backup.py:382-390`、`341-362`），全程不换文件；`os.replace` 只出现在注释里，用来说明「目标文件被占用时换文件必失败」（`backup.py:344-345`）。写入失败由 `_rollback_db` 反向在线备份回滚（`backup.py:400-407`）。
+>
+> 自检位置也换了：应用**前**先 `_verify_archive` 调 `core.selfcheck` 比对归档库行数（`backup.py:315-325`，调用点在 260）；应用**后**再 `_structure_check`（`backup.py:410-467`：`PRAGMA integrity_check` 434、`foreign_key_check` 435、只增不减行数下限 424-428、admin 至少 1 个 429-433），不过同样回滚。
+>
+> **这条为什么重要**：以为恢复是「换文件」会去查 `os.replace`/临时文件路径，排障时找不到实际代码；以为自检只在事后做，会漏掉应用前的 `selfcheck` 已经把半截归档拦在写入之前。
+>
+> **2026-11-05 已更正（补充：在线恢复的能力边界；上一块保留）**
+>
+> - **应用前失败 → 字节不动**：`load_archive` 归档校验（`backup.py:243`）、`_verify_archive` 里的 `core.selfcheck`（`315-325`，调用点 260）、`_restore_pre_snapshot` 的恢复前归档（`298-306`，调用点 261）、`_snapshot_live` 的回滚快照（`328-338`，调用点 262）都排在 `_apply_archive`（263）之前；任一步失败即中止，活库与它的 `-wal`/`-shm` 一个字节都不动。用例按字节断言：`apps/control/tests/test_backup_api.py:382-416`。
+> - **应用中途失败 → 内容一致，字节不再相同**：`_backup_into`（`341-362`，`src.backup` 在 359，30s 超时在 347）中断，或应用后 `_structure_check`（`410-467`）不过，都走 `_rollback_db` 的反向在线备份 + `_ensure_wal`（`400-407`、`365-379`）。回滚后 integrity / 结构 / 只增表下限都对得上，但库文件字节已不是恢复前的样子；一致性快照（262）之后、回滚之前的并发写会丢失，窗口等于单轮恢复时长（实测 231–390 ms，`tmp/quiesce-probe/results_load56-fix.json`、`results_idle-fix.json`，`tmp/` 已 gitignore）。
+> - **要做到中途也字节级还原，只能回到「停服务 + 换文件」**：CLI 路径 `scripts/restore.sh` → `scripts/backup_core.py` 仍是这一套（`backup_core.py:618-657` 留存现场、`712-725` 回滚），脚本头也仍写「恢复前必须停掉 control 服务」（`restore.sh:4`）。这是在线备份的固有取舍，不是缺陷。
+> - **自检口径能抓**：归档与清单不一致（行数漂移在应用前的 `selfcheck` 就拦）、缺表/多表（`441-450`）、表集合层面的 schema 漂移、半截恢复（`APPEND_ONLY_TABLES` 行数低于 manifest，`424-428` 与 `312`）、库结构损坏（`PRAGMA integrity_check`，434）、外键违规（435）、admin 账号缺失（`429-433`）、演示残留（`436-437`、`453`）。
+> - **自检口径抓不住**：行数相同的内容级篡改（`_structure_check` 只比行数下限，不比内容）、非只增表在恢复窗口内的并发增删（只有 `APPEND_ONLY_TABLES` 有下限）、归档生成时就已缺失的历史数据、列级与索引级的 schema 漂移（`_structure_check` 不比对 `sqlite_master.sql`）。
+> - **这条为什么重要**：把「回滚」读成「恢复原状」会让人以为回滚后文件字节与恢复前一致，从而跳过恢复后备份；把「应用前失败」与「应用中途失败」混为一谈，会在中途失败后拿旧库指纹做字节比对，把正常的在线回滚判成数据损坏。
+
+- 锁文件 `backup.lock`、`LOCK_STALE_SEC = 600`（`backup.py:39-40`）：备份/恢复是秒级操作，占锁超 10 分钟视为进程已崩溃可回收。
+- 归档名不是任意路径：只接受 `ARCHIVE_RE` 命中的文件名，路径穿越/自定义目录直接 400（`backup.py:233-234`）。
+
+**校验实现位置（2026-11-05 补记）**
+
+上表第 2 步的四道校验全部实现在 `scripts/backup_core.py`；API 层只调 `load_archive` 并采用其返回值，没有第二套平行校验。逐项落点：
+
+| 校验 | 实现 | 行为 |
+| --- | --- | --- |
+| zip 可读 / 成员损坏 | `extract_zip`（`backup_core.py:505-514`） | `testzip()` 命中损坏成员直接拒（507-509） |
+| 成员路径穿越 | `extract_zip`（`backup_core.py:505-514`）、`member_path`（`backup_core.py:517-522`） | 解压目标必须落在 staging 目录内，越界即拒（513、521-522） |
+| `manifest.json` 缺失 | `load_archive`（`backup_core.py:576-578`） | 直接拒，不猜测、不降级 |
+| manifest 结构 / 版本 | `validate_manifest`（`backup_core.py:552-564`） | 字段类型与 `manifest_version` 校验，高于本工具版本即拒 |
+| 成员尺寸 + sha256 | `verify_members`（`backup_core.py:525-549`） | 库成员与 files 列表逐项比对 size/sha256（537-539、546-547） |
+| 备份创建时的库完整性 | `load_archive`（`backup_core.py:580-583`） | manifest 记录的 `integrity_check` 必须是 `ok` |
+| 解出库的完整性 | `load_archive`（`backup_core.py:585-588`）、`database_stats`（`backup_core.py:127-131`） | 对解出的 `unified.db` 再跑一次 `PRAGMA integrity_check` |
+| 归档 `.sha256` 旁注 | `archive_digest`（`backup_core.py:491-502`） | 旁注存在则强校验，缺失返回 `None`：API 调 `load_archive` 未传 `require_sidecar=True`（`backup.py:243`），所以缺失旁注不阻断恢复；CLI 需显式 `--require-sidecar` 才强制（`backup_core.py:804-806`、`restore.sh:48,87`） |
+
+**这条为什么重要**：以为 API 层只做「文件名白名单」就敢恢复任意归档，会漏掉成员篡改、路径穿越、库损坏这三类拒绝；以为 `.sha256` 旁注是硬门槛，会把没有旁注的合法归档当成必坏件。
+
+**这条为什么重要**：漏记 `confirm` 会让人以为误调一次就覆盖生产库；漏记「恢复前快照 + selfcheck 回滚」会把恢复当成不可逆操作而不敢用；漏记文件名白名单会以为能指定任意 zip/路径；漏记 409 会把并发触发的锁误报成 500 故障。
 
 ---
 
@@ -1009,11 +1235,19 @@ cost_micro = (tokens × price_micro_per_1m + 500000) // 1000000
 | 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
 | `POST /api/grok/register/tasks` | 管理员 | 入队 |
-| `GET /api/grok/register/tasks?limit=50` | 登录 | 列表（limit 夹逼 1–200，按 id 倒序） |
-| `GET /api/grok/register/tasks/{task_id}` | 登录 | 详情，404 不存在 |
+| `GET /api/grok/register/tasks?limit=50` | 管理员 | 列表（limit 夹逼 1–200，按 id 倒序） |
+| `GET /api/grok/register/tasks/{task_id}` | 管理员 | 详情，404 不存在；非 admin 403 `insufficient_role` |
 | `POST /api/grok/register/tasks/{task_id}/cancel` | 管理员 | 取消；仅 `queued`/`running` 可取消，否则 409 |
 | `POST /api/grok/register/tasks/{task_id}/retry` | 管理员 | 重试；仅 `failed`/`cancelled` 可重试（attempts 归零重新入队），否则 409 |
 | `GET /api/grok/register/worker` | 登录 | 队列与并发状态 |
+
+> **2026-11-05 已更正（原句保留作历史）**
+>
+> 上表 `GET /api/grok/register/worker` 原记「登录」，当前事实是 **admin-only**：路由注释写明队列状态只给 GrokRegisterTasks 用、仅 admin，处理函数为 `Depends(admin_user)`（`grok.py:72-76`）；viewer 在进入处理逻辑前 403 `insufficient_role`。前端消费方本身也只在管理员下渲染：`ProvidersSection.tsx:25` import、`:66` `isAdmin`、`:721` `p.id === 'grok-register' && isAdmin && <GrokRegisterTasks />`。
+>
+> **这条为什么重要**：按旧文档给 viewer 放行，对接会直接吃 403 并误判成接口故障；反过来若照旧口径保持登录可读，会把队列与执行器状态暴露给非管理员。
+
+读侧权限口径（2026-11-04 收紧）：两个 `GET /api/grok/register/tasks*` 与写侧同为 `admin`，非 admin 在查库前 403 `insufficient_role`。原因是任务对象按 `grok_tasks` 表原样回显，含 `proxy`（常带代理口令）、`payload_json`、`result_json`；前端对这两个读端点零调用，收紧不影响既有页面。
 
 `POST .../tasks` 请求体：
 

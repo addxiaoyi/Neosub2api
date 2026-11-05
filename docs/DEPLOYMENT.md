@@ -102,6 +102,10 @@ docker compose start control
 
 恢复 = 停 control，用备份文件覆盖 `./data/unified.db`（如目录里有 `unified.db-wal`、`unified.db-shm` 一并删除），再启动。会话、密钥、日志都在库文件里，恢复即全量还原。
 
+**（2026-11-05 已更正）**
+
+这条手工停机覆盖路径仍然可用，没有被废掉：容器里没有可用恢复 API，或库已经坏到在线快照都出不来时，停 control → 覆盖 `data/unified.db`（连同 `-wal` / `-shm`）→ 启 control，仍是最稳的兜底。但控制面正常运行时的日常恢复请改用 `POST /api/system/restore`（SQLite 在线备份，不停服，自动留恢复前归档，能力边界见 [BACKUP.md](BACKUP.md) 的「恢复：管理界面（HTTP）」）。**这条为什么重要**：以为新实现把手工路径废了，会在没有 API 的环境里卡死；反过来在服务运行中照这条覆盖文件，Windows 上会被打开句柄挡住，Linux 上会留下新旧混杂的 WAL。
+
 ## 6. 升级
 
 1. 备份 `./data/unified.db`（见上）。

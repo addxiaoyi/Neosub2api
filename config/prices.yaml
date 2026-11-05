@@ -8,14 +8,14 @@
 #    作为 M3 定价基准，不声称等于上游结算价。M3 解析时 "*" 是通配行（见方案 §3.1）。
 # 2. price_per_mtok 用字符串保留原始小数位；price_micro_per_1m = price_per_mtok × 1_000_000（整数）。
 # 3. effective_from 是"本仓首次确认该价格的抓取时间"，不是厂商公告的调价时间；
-#    全部种子行统一为 2026-11-02 00:00:00 +08:00。后续改价只追加新行，不修改旧行。
+#    首版种子行统一为 2026-11-02 00:00:00 +08:00，后续补价行用各自首次确认日。
 # 4. reasoning 不单独建行：方案 §2.1 规定缺省回落到 output 价。
 # 5. 上下文分档 / 峰谷价 / 缓存写入 TTL 无法用单行表达，取基准档并在 note 注明差异。
 
 version: 1
 currency: USD
 unit: per_1m_tokens
-captured_at: "2026-11-02"
+captured_at: "2026-11-04"
 default_effective_from: 1793548800
 
 prices:
@@ -326,6 +326,34 @@ prices:
     source: "https://platform.minimax.io/docs/guides/pricing-paygo"
     note: "≤512k 输入、标准档缓存读取价；>512k 为 0.12。"
 
+  # ---------- 腾讯混元 Hy3（TokenHub 调用参数 hy3） ----------
+  - provider: "*"
+    model: hy3
+    token_class: input
+    price_per_mtok: "0.132"
+    price_micro_per_1m: 132000
+    effective_from: 1793721600
+    source: "https://www.tencentcloud.com/document/product/1300/78937"
+    note: "TokenHub 国际站美元价目表 Hy3 行（新加坡/硅谷同价）；人民币对照表为 1 元/百万。首次确认 2026-11-04。"
+
+  - provider: "*"
+    model: hy3
+    token_class: output
+    price_per_mtok: "0.528"
+    price_micro_per_1m: 528000
+    effective_from: 1793721600
+    source: "https://www.tencentcloud.com/document/product/1300/78937"
+    note: "TokenHub 国际站美元价目表 Hy3 行；人民币对照表为 4 元/百万。"
+
+  - provider: "*"
+    model: hy3
+    token_class: cache_read
+    price_per_mtok: "0.033"
+    price_micro_per_1m: 33000
+    effective_from: 1793721600
+    source: "https://www.tencentcloud.com/document/product/1300/78937"
+    note: "TokenHub 国际站美元价目表缓存命中价；人民币对照表为 0.25 元/百万，官方未公布 cache_write 报价。"
+
   # ---------- DeepSeek（deepseek-chat 旧名） ----------
   - provider: "*"
     model: deepseek-chat
@@ -385,24 +413,18 @@ prices:
 unpriced:
   - provider: "*"
     model: kimi-k2.7
-    reason: "官方价目表只有 kimi-k2.7-code（0.95/4.00，缓存 0.19）与 kimi-k2.6，没有 kimi-k2.7 这一条目；无法确认 codebuddy 的 kimi-k2.7 是否等同 kimi-k2.7-code。"
+    reason: "官方价目表（2026-11-04 复核）K2 系列只有 kimi-k2.7-code（0.95/4.00，缓存 0.19）、kimi-k2.7-code-highspeed（1.90/8.00，0.38）与 kimi-k2.6，没有 kimi-k2.7 这一条目；无法确认 codebuddy 的 kimi-k2.7 是否等同 kimi-k2.7-code。官方同时公告 2026-10-31 起 K2 系列不再对新用户开放、2026 年底前全部下线。"
     source: "https://platform.kimi.ai/docs/pricing/chat"
-    checked_at: "2026-11-02"
-
-  - provider: "*"
-    model: hy3
-    reason: "腾讯云只公布人民币价（输入 1.2 元、输出 4 元、缓存命中 0.4 元/百万），未公布官方美元价目表；OpenRouter 的美元价属第三方市场报价，不作为厂商标价。"
-    source: "https://cloud.tencent.com/document/product/1759/127342"
-    checked_at: "2026-11-02"
+    checked_at: "2026-11-04"
 
   - provider: "*"
     model: hy3-preview
-    reason: "同上，腾讯官方仅人民币报价，无官方美元价；且 preview 与正式版价格是否一致未说明。"
-    source: "https://cloud.tencent.com/document/product/1759/127342"
-    checked_at: "2026-11-02"
+    reason: "腾讯官方价目表（中/国际站，2026-11-04 复核）只有 Hy3 与 Hy4 preview 行，没有 hy3-preview 这一行；腾讯云产品页只给分档人民币价（混元 Hy3 preview 低段档位 输入<16k：1.2/4/0.4 元），无官方美元价目表条目。"
+    source: "https://www.tencentcloud.com/document/product/1300/78937"
+    checked_at: "2026-11-04"
 
   - provider: "*"
     model: DeepSeek-V4-Flash-Official
-    reason: "这是 trae 适配器的内部模型标识（apps/control/app/adapters/trae.py 的 DEFAULT_WORK_MODEL），不是 DeepSeek 官方价目表里的模型 id；无法证明与 deepseek-flash 同价。"
-    source: "apps/control/app/adapters/trae.py"
-    checked_at: "2026-11-02"
+    reason: "trae 侧的模型标识（docs.trae.cn 子智能体文档中 DeepSeek-V4-Flash 正式版对应的调用值，也是 apps/control/app/adapters/trae.py 的 DEFAULT_WORK_MODEL）。Trae 国际站美元刊例价表只列 DeepSeek-V4-Flash 一行、未单列该 id；Trae 企业版价目表有 DeepSeek-V4-Flash 正式版（3/9/0.1 元/百万，2026-08-25 起）但只有人民币价。两处都无法直接确认为该 id 的美元结算价。"
+    source: "https://docs.trae.cn/enterprise_billing-items"
+    checked_at: "2026-11-04"
