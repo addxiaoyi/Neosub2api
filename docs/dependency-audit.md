@@ -13,7 +13,7 @@
 
 ### 1.1 前端 apps/web（npm audit，2026-11-04 实跑）
 
-metadata：total 19 = critical 1 + high 4 + moderate 14（moderate 按要求不列入）；依赖总数 555。
+metadata：total 19 = critical 1 + high 4 + moderate 14（moderate 不计入高危，14 行的处置见 1.3）；依赖总数 555。
 
 | 包 | 安装版本 | 级别 | 漏洞（GHSA / CVE，来自 audit 返回） | 非破坏性修复路径 |
 | --- | --- | --- | --- | --- |
@@ -31,6 +31,7 @@ metadata：total 19 = critical 1 + high 4 + moderate 14（moderate 按要求不�
 ### 1.2 后端 apps/control（pip-audit 2.10.1，2026-11-04 实跑）
 
 清单输入：`requirements.txt`（fastapi==0.115.6 / uvicorn[standard]==0.34.0 / httpx==0.28.1 / PyYAML==6.0.3）+ `requirements-dev.txt`（pytest>=8.0 / pytest-asyncio>=0.23）。仓内**无 pyproject.toml**（全仓 glob 无匹配），故只按 requirements 解析。
+[体检当时的清单快照，原文保留] 当前已对齐 fastapi==0.162.0 / starlette==1.3.1，且 `requirements.txt` 已改为全钉编译产物，见第 5 节。
 
 - 漏洞总数报「14 known vulnerabilities in 1 package」：14 条是 **7 个唯一漏洞 × 2**（同一 PYSEC 各出现两次，一条带 GHSA 别名、一条带 CVE 别名）。
 - 唯一有漏洞的包是 **starlette 0.41.3**（fastapi==0.115.6 的传递依赖；pip-audit 解析到 0.41.3 说明 fastapi 0.115.6 对 starlette 有 `<0.42.0` 上界约束）。fastapi / uvicorn / httpx / PyYAML 及其余 20 个解析出的传递包 **0 漏洞**。
@@ -50,10 +51,28 @@ metadata：total 19 = critical 1 + high 4 + moderate 14（moderate 按要求不�
 
 1. `pip install --dry-run "fastapi==0.115.6" "starlette==1.3.1"` → **ResolutionImpossible**：当前钉版下 starlette 无任何可用修复版本（三个 HIGH 的最低修复要求 0.49.1 / 1.1.0 / 1.3.1，全部越过 `<0.42.0` 上界）。
 2. `pip install --dry-run "fastapi" "starlette==1.3.1"` → 解析成功，**Would install fastapi-0.162.0 starlette-1.3.1**。
-3. 结论：**已升级并回归**（2026-11-04 更新）。已按上述解析路径把 `fastapi` 升到 0.162.0 并显式钉 `starlette==1.3.1`，全量 `pytest tests/ -q` 结果 611 passed / 1 skipped / 0 failed（171.42s，唯一 skip 为 Windows POSIX 权限位），三个 HIGH 全部消除。
+3. 结论：**已升级并回归**（2026-11-04 更新）。已按上述解析路径把 `fastapi` 升到 0.162.0 并显式钉 `starlette==1.3.1`，全量 `pytest tests/ -q` 结果 611 passed / 1 skipped / 0 failed（171.42s，唯一 skip 为 Windows POSIX 权限位），三个 HIGH 全部消除。锁文件同样钉 `starlette==1.3.1`，与本结论对齐。
    历史风险评估（保留供追溯）：原结论为**无非破坏性修复路径**——要修 3 个 HIGH 必须连带 fastapi 0.115.6 → 0.162.0（跨越约 46 个 0.x minor，FastAPI 0.x 不保证向后兼容），需完整回归 `/v1/*` 与 `/api/*` 全部路由，当时按要求不执行。
 
 > `pip list --outdated` 未采用：它只比对已安装环境的版本、不给漏洞与修复版本信息；且体检要求装在临时环境，比对目标本身不存在。能力可用的 `pip-audit` 为准。
+
+### 1.3 前端 14 个 moderate：接受并留档（2026-11-04 处置）
+
+**14 行不是 14 个漏洞**：实为 **1 个真实 advisory + 13 行 `via` 级联**。真实项是 `minimatch` 的 **GHSA-g3hv-75wg-m249**（glob 模式被放大时的 DoS，CVSS:4.0，仅可用性影响，无机密性/完整性风险）；其余 13 行是各自父包在 audit 里指向 minimatch 的 `via` 级联计数，不构成独立漏洞。影响面：14 行全部 dev-only（eslint / @typescript-eslint / tailwind 构建链），只在构建期执行；npm audit 的生产依赖面（production 口径 192 包）0 漏洞；运行镜像只 `COPY out/`，静态产物不含该代码路径。
+
+**为什么不可修（三条路径均实证阻断，可安全升级数 = 0）：**
+
+1. **沿现有大版本升级**：minimatch v3 线末版 3.1.5、v10 线末版 10.2.6，均仍在受影响范围；修复起点是 11.0.1，对 3.x / 10.x 没有回移版本。
+2. **等链头上游迁版**：eslint 10 的依赖声明仍是 `minimatch ^10.2.6`，未迁到 ≥11，升级链头没有出口。
+3. **硬钉 minimatch@11**：`@eslint/eslintrc` 源码用 `import minimatch from "minimatch"` 的 default import，而 v11 是纯 ESM、无 default 导出，eslint 启动期直接 SyntaxError（只读评估实测结论）。
+
+**接受理由**：dev-only 且仅构建期执行，产物与运行镜像零暴露；该 DoS 需要攻击者控制 glob pattern，而 pattern 全部来自手写的 eslint 配置文件，无外部输入通路；CVSS 4.0 只影响可用性；生产依赖 0 漏洞。综合判定为可接受的残留风险，按「接受并留档」处置，不改 `package.json`、`package-lock.json` 与 `Dockerfile`。
+
+**复查触发条件**（满足任一即重新评估）：
+
+- `@eslint/eslintrc` 移除 default import（改为命名导入或 ESM 兼容引用），硬钉 11 的启动期阻断消失；
+- 任一上游（eslint / eslint-config-next / `@typescript-eslint/*`）把 minimatch 提到 ≥11；
+- npm audit 为 minimatch 报出 ≤10 线的修复版本（出现回移）。
 
 ---
 
@@ -106,9 +125,35 @@ MIT 177 ・ Apache-2.0 16 ・ ISC 15 ・ LGPL-3.0-or-later 10 ・ `Apache-2.0 AN
 
 ## 4. 本次未覆盖的范围
 
-- **未升级、未修改** `package-lock.json` / `package.json` / `requirements*.txt` 及任何代码；未执行 git 写操作。
+- **未升级、未修改** `package-lock.json` / `package.json` / `requirements*.txt` 及任何代码；未执行 git 写操作。（该表述对应体检当时；2026-11-04 后续收口把 `requirements*.txt` 改为编译锁文件，见第 5 节，`package.json` / `package-lock.json` 至今原样。）
 - moderate / low 未列入主表：前端 14 个 moderate、后端 starlette 4 个 moderate + 1 个 low 已在第 1 节列出明细但不计入高危数量。
 - 未扫描 `.runtime/python`（本地嵌套 Python 运行时，git 未跟踪）与 `apps/web/node_modules` 内**已安装但不在 lock 解析面**的包；npm/pip 审计均基于清单解析。
 - 未做许可证的传递性法律判断（如 LGPL 在具体分发形态下的合规方案），结论以文件证据为准。
 - 11 家上游 sidecar 镜像内部的依赖与许可证未扫（不在主仓分发物内，按 `upstreams/README.md` 由部署方自担）。
 - CVE/GHSA 详情以外未抓取任何网页内容；所有版本号、漏洞编号、修复版本均来自 npm audit / pip-audit / OSV API / pip 解析器本次实跑输出。
+
+---
+
+## 5. Python 锁文件与再生成方式（2026-11-04 补）
+
+`apps/control` 的依赖清单从「直接依赖钉版 + 传递依赖每次构建重新解析」改为 pip-tools 路线的 `.in` 源清单 + 全钉锁文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| `requirements.in` | 源清单，手工维护：5 个直接依赖（fastapi / starlette / uvicorn[standard] / httpx / PyYAML），保留原注释与顺序 |
+| `requirements.txt` | 编译产物，23 个包全钉，`pip install -r` 直接消费 |
+| `requirements-dev.in` | 源清单：`-r requirements.in` + pytest / pytest-asyncio |
+| `requirements-dev.txt` | 编译产物，29 个包全钉（运行时 23 + pytest 链 6） |
+
+**再生成命令**（必须按目标平台编译；在 Windows 本机直接 `pip-compile` / `uv pip compile` 会漏掉 `uvloop` 的 `sys_platform != 'win32'` marker 并多带 Windows-only 的 `colorama`）：
+
+```bash
+uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements.in -o apps/control/requirements.txt
+uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements-dev.in -o apps/control/requirements-dev.txt
+```
+
+- 编译环境：uv 0.13.7，目标 Python 3.11 / `x86_64-unknown-linux-gnu`（对齐 `apps/control/Dockerfile` 的 `python:3.11-slim`），生成日期 2026-11-04；`--no-strip-markers` 用于保留环境标记，否则 uv 会按目标平台把 marker 求值后剥掉。
+- 关键行：`uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'`；`colorama` 因目标平台为 linux 未进入锁文件，没有任何 Windows-only 包被无条件锁定。
+- 验证（全部 `pip install --dry-run`，未往任何运行环境安装）：本机 Python 3.11.9 对 prod / dev 两份锁解析成功；`python:3.12-slim` 容器（对齐 CI 的 3.12 口径）同样解析成功；`python:3.11-slim` 容器确认 `uvloop-0.23.0` 正常纳入、`Would install` 全量列出 23 / 29 个包且无报错。
+- `Dockerfile` 与 CI 不改：`pip install -r requirements.txt` 对全钉文件无感知；CI 的 pip 缓存 key 已按 `requirements*.txt` 内容变化自动失效（`.github/workflows/ci.yml:23`）。
+- 改动仅限 `.in` 源清单与两份锁文件；`package.json` / `package-lock.json` / Dockerfile 未动，未执行任何 git 写操作。

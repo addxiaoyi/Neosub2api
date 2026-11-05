@@ -3,7 +3,7 @@
 > 复核基线：**2026-11-03**。11 家上游全部完成复核，无「未复核」项。
 > 复核方式：GitHub REST API `repos/{owner}/{repo}` 取 `license.spdx_id`，再取 `contents/LICENSE` 原文首屏人工比对（含 copyright 行）。证据逐家列在第 2 节。
 > 主仓许可证：根目录 [LICENSE](LICENSE) 为 MIT，署名为 `addxiaoyi2048`。
-> 依赖清单（第 8、9 节）复核基线：**2026-11-04**，取值来自 `apps/control/requirements.txt` + 本机 site-packages 的 `METADATA`，以及 `apps/web/package-lock.json` + `node_modules/<pkg>/package.json` 的 `license` 字段，全部为实读，未凭印象填写。
+> 依赖清单（第 8、9 节）复核基线：**2026-11-04**，Python 版本取自 `apps/control/requirements.txt`（`uv pip compile` 编译产物，生成信息见 8.1）、许可证取自各包 `METADATA`；前端取值来自 `apps/web/package-lock.json` + `node_modules/<pkg>/package.json` 的 `license` 字段，全部为实读，未凭印象填写。
 > 可执行边界、自检命令与违规处置：见 [docs/compliance.md](docs/compliance.md)。
 
 ## 0. 三种接触方式
@@ -161,7 +161,7 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 
 **取值方式（实读，非记忆）：**
 
-- Python：读本机 site-packages 里 `<pkg>-<ver>.dist-info/METADATA` 的 `License-Expression` / `License` / `Classifier`；直接依赖版本对齐 `apps/control/requirements.txt`。依赖随运行镜像分发，证据是 `apps/control/Dockerfile:12-13`（`pip install -r requirements.txt` 于 `python:3.11-slim`）。
+- Python：**版本**取自 `apps/control/requirements.txt` 编译产物（23 包全钉），生成命令 `uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements.in -o apps/control/requirements.txt`（uv 0.13.7，生成日期 2026-11-04，编译环境 Python 3.11 / linux x86_64，对齐运行镜像 `python:3.11-slim`）；**许可证字段**读各包 `METADATA` 的 `License-Expression` / `License` / `Classifier`。依赖随运行镜像分发，证据是 `apps/control/Dockerfile:12-13`（`pip install -r requirements.txt` 于 `python:3.11-slim`）。
 - 前端：读 `apps/web/package-lock.json` 与 `node_modules/<pkg>/package.json` 的 `license` 字段。产物是静态导出（`next.config.ts` 的 `output: 'export'`），运行镜像只含 `out/` 静态文件，见第 9 节。
 
 ### 8.1 Python（`apps/control`）
@@ -190,12 +190,14 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 | httptools | 0.9.0 | MIT | `License-Expression: MIT`（`uvicorn[standard]`） |
 | watchfiles | 1.3.0 | MIT | `License` + `Classifier`（`uvicorn[standard]`） |
 | websockets | 17.4 | BSD-3-Clause | `License-Expression: BSD-3-Clause`（`uvicorn[standard]`） |
-| uvloop | 未锁定；PyPI 最新 0.23.0 | MIT | 本机（Windows）未安装，读不到本地 `METADATA`，改用 PyPI JSON `info.license = "MIT License"`；该包 `Classifier` 同时列了 Apache 与 MIT 两条，按 `license` 字段取 MIT。仅 `sys_platform != 'win32'` 时由 `uvicorn[standard]` 装入，Linux 运行镜像内存在 |
+| uvloop | 0.23.0（锁文件钉版；此前为「未锁定」，2026-11-04 收口） | MIT | 锁文件行：`uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'`。本机（Windows）未安装，读不到本地 `METADATA`，许可证沿用 PyPI JSON `info.license = "MIT License"`；该包 `Classifier` 同时列了 Apache 与 MIT 两条，按 `license` 字段取 MIT。仅非 win32 平台由 `uvicorn[standard]` 装入，Linux 运行镜像内存在 |
+
+本表 23 行与锁文件的 23 个包一一对应，2026-11-04 按锁逐行核对无遗漏、无多列。
 
 两点必须知道的边界：
 
-- **本仓没有 Python 锁文件**。`requirements.txt` 只钉 5 个直接依赖，上表传递依赖版本是本机 site-packages 实测值，容器构建时 `pip` 可能解析到同主版本的其他小版本（许可证字段基本不变，版本可能有差异）。
-- `colorama 0.4.6` 只在 Windows 安装（`uvicorn[standard]` 的 `sys_platform == 'win32'` 标记），Linux 运行镜像内没有；其元数据只有 `Classifier: License :: OSI Approved :: BSD License`，**没有**可判读的 SPDX 字段，故标 `BSD`（未细到 `-3-Clause`），不推测。
+- **本仓没有 Python 锁文件**（体检当时的旧状态，止于 2026-11-04）。`requirements.txt` 原先只钉 5 个直接依赖，上表传递依赖版本是本机 site-packages 实测值，容器构建时 `pip` 可能解析到同主版本的其他小版本（许可证字段基本不变，版本可能有差异）。**当前状态（2026-11-04 起）**：`requirements.txt` 已改为 `uv pip compile` 全钉编译产物（23 包），上表版本即锁文件版本，容器构建不再有解析漂移；再生成方式见 `docs/dependency-audit.md` 第 5 节。
+- `colorama 0.4.6` **不在锁文件内**（2026-11-04 编译目标为 linux x86_64，`uvicorn[standard]` 的 `sys_platform == 'win32'` 依赖不纳入），即由本仓锁文件安装时 Windows 开发机与 Linux 运行镜像都不装它；`uvicorn` 源码无 `colorama` 导入（本地 site-packages 全量检索 0 命中），不装不影响导入。其元数据只有 `Classifier: License :: OSI Approved :: BSD License`，**没有**可判读的 SPDX 字段，故标 `BSD`（未细到 `-3-Clause`），不推测。
 
 ### 8.2 前端（`apps/web`）
 
