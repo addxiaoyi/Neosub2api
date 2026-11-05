@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from ..api_utils import mask_text
 from .base import ProviderError, parse_vendor_error
 
 logger = logging.getLogger("unified.upstream")
@@ -208,7 +209,7 @@ class UnifiedApiClient:
         try:
             if resp.status_code >= 400:
                 # 完整响应体只进服务端日志；对外只给解析后的厂商 code/描述（掩码后）与状态码
-                logger.warning("上游 %s%s 返回 %s：%s", self.base_url, path, resp.status_code, resp.text[:200])
+                logger.warning("上游 %s%s 返回 %s：%s", self.base_url, path, resp.status_code, mask_text(resp.text[:200]))
                 code, vendor_message = parse_vendor_error(resp.text)
                 raise ProviderError(
                     resp.status_code,
@@ -279,8 +280,10 @@ class UnifiedApiClient:
 
         # 429 的 Retry-After 要原样带回调用方，否则限流节奏只能靠猜
         passthrough = {"content-type": response.headers.get("content-type", "text/event-stream")}
-        if response.headers.get("retry-after"):
-            passthrough["retry-after"] = response.headers["retry-after"]
+        for name in ("retry-after", "location", "etag", "vary", "cache-control"):
+            value = response.headers.get(name)
+            if value:
+                passthrough[name] = value
 
         if stream:
             return UpstreamReply(

@@ -18,8 +18,23 @@ from pydantic import BaseModel
 from ..adapters.base import ProviderError
 from ..api_utils import mask_secret, mask_text, now, parse_bool
 from ..db import get_json_setting, put_settings, set_json_setting
+from ..model_resolve import (
+    DEFAULT_FAILOVER_ATTEMPTS,
+    DEFAULT_FAILOVER_ENABLED,
+    FAILOVER_ATTEMPTS_ENV,
+    FAILOVER_CONFIG_KEY,
+    FAILOVER_ENABLED_ENV,
+    MAX_FAILOVER_ATTEMPTS,
+    MIN_FAILOVER_ATTEMPTS,
+    failover_enabled,
+    failover_env_locked,
+    failover_max_attempts,
+    failover_sources,
+    load_stored_failover,
+    stored_failover,
+)
 from ..net_guard import BLOCKED_ADDRESSES, BLOCKED_HOSTNAMES
-from ..security import admin_user, audit_event, current_user, hash_password, revoke_user_sessions, verify_password
+from ..security import admin_user, audit_event, hash_password, revoke_user_sessions, verify_password
 
 logger = logging.getLogger("unified.settings")
 
@@ -29,6 +44,12 @@ async def _settings_lifespan(app):
     """数据库里的运行参数在启动时覆盖 env 默认值；读库失败只告警，不阻塞启动。"""
     try:
         _apply_stored_runtime(app)
+        # 故障转移配置也在这里装进 model_resolve 的内存副本；之后请求只读内存
+        conn = app.state.db.connect()
+        try:
+            load_stored_failover(conn)
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001 - 配置读失败不能打挂控制面
         logger.warning("读取数据库运行参数失败，全部沿用环境变量默认值", exc_info=True)
     yield
@@ -169,8 +190,13 @@ RUNTIME_ITEMS: tuple[RuntimeItem, ...] = (
     RuntimeItem("model_fallback_first", "bool"),
     RuntimeItem("sse_max_seconds", "int", 1, 86400),
     RuntimeItem("session_ttl_sec", "int", 60, 2592000),
+    # 自助注册默认关；不在设置页铺开关，管理员可通过 runtime-config API / 导入开启
+    RuntimeItem("allow_registration", "bool", ui=False),
     # 已有入口在「服务商」分组，这里只参与导出/导入，不重复放开关
     RuntimeItem("allow_anonymous_gateway", "bool", ui=False, store="gateway"),
+    # 健康检测的两个旋钮同样由「服务商」分组开关驱动，这里只负责持久化与导出/导入
+    RuntimeItem("health_check_enabled", "bool", ui=False),
+    RuntimeItem("health_check_interval_sec", "int", 60, 86400, ui=False),
 )
 RUNTIME_BY_KEY = {item.key: item for item in RUNTIME_ITEMS}
 
@@ -438,6 +464,155 @@ def import_runtime_config(
     return result
 
 
+# ===== 跨 provider 故障转移：env 强制覆盖 > settings 表配置 > 默认值 =====
+
+_FAILOVER_MARK = re.compile(r"\[尝试(\d+)/(\d+)\]")
+_FAILOVER_STATS_SCAN = 5000
+
+
+def _failover_stats(conn) -> dict[str, Any]:
+    """只读统计：从 request_logs.error 的 `[尝试N/M]` 标记推算是否发生过转移。
+
+    数据来源就是网关已落库的尝试记录（N<M 表示该次失败后确实换了下家），
+    不新造表、不改日志写入路径。最多回看最近 5000 条尝试记录。
+    """
+    rows = conn.execute(
+        "SELECT ts, error FROM request_logs WHERE error LIKE ? ORDER BY id DESC LIMIT ?",
+        ("%[尝试%", _FAILOVER_STATS_SCAN),
+    ).fetchall()
+    cutoff = int(time.time()) - 86400
+    transferred = 0
+    recent = 0
+    last_at: int | None = None
+    for row in rows:
+        match = _FAILOVER_MARK.search(row["error"] or "")
+        if not match:
+            continue
+        if int(match.group(1)) < int(match.group(2)):
+            transferred += 1
+        if int(row["ts"]) >= cutoff:
+            recent += 1
+        if last_at is None or int(row["ts"]) > last_at:
+            last_at = int(row["ts"])
+    return {
+        "attempt_rows": len(rows),
+        "transferred_rows": transferred,
+        "attempt_rows_24h": recent,
+        "last_attempt_at": last_at,
+        "scanned_rows": len(rows),
+        "source": "request_logs.error 的 [尝试N/M] 标记",
+    }
+
+
+def _failover_payload(request: Request) -> dict[str, Any]:
+    locked = failover_env_locked()
+    conn = request.app.state.db.connect()
+    try:
+        stats = _failover_stats(conn)
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "enabled": failover_enabled(),
+        "max_attempts": failover_max_attempts(),
+        "defaults": {"enabled": DEFAULT_FAILOVER_ENABLED, "max_attempts": DEFAULT_FAILOVER_ATTEMPTS},
+        "limits": {"min_attempts": MIN_FAILOVER_ATTEMPTS, "max_attempts": MAX_FAILOVER_ATTEMPTS},
+        "source": failover_sources(),
+        "stored": stored_failover(),
+        "env": {
+            "enabled_var": FAILOVER_ENABLED_ENV,
+            "max_attempts_var": FAILOVER_ATTEMPTS_ENV,
+            "enabled_locked": locked["enabled"],
+            "max_attempts_locked": locked["max_attempts"],
+        },
+        "stats": stats,
+    }
+
+
+@router.get("/settings/failover")
+def get_failover_config(request: Request, user: dict = Depends(admin_user)):
+    return _failover_payload(request)
+
+
+@router.post("/settings/failover")
+def save_failover_config(
+    body: dict[str, Any],
+    request: Request,
+    user: dict = Depends(admin_user),
+):
+    """写持久化配置；env 已锁定的字段仍可保存，但生效值由 env 决定（响应里标明来源）。"""
+    if not isinstance(body, dict) or not body:
+        return _bad_request([{"key": "", "reason": "empty_payload", "message": "没有可写入的配置项"}])
+    clean: dict[str, bool | int] = {}
+    errors: list[dict[str, Any]] = []
+    for key, raw in body.items():
+        name = str(key).strip()
+        if name == "enabled":
+            if isinstance(raw, bool):
+                clean[name] = raw
+            else:
+                errors.append(
+                    {"key": name, "value": raw, "reason": "invalid_boolean", "message": "enabled 必须是布尔值"}
+                )
+        elif name == "max_attempts":
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                errors.append(
+                    {
+                        "key": name,
+                        "value": raw,
+                        "reason": "not_an_integer",
+                        "message": "max_attempts 必须是整数",
+                    }
+                )
+            elif not MIN_FAILOVER_ATTEMPTS <= raw <= MAX_FAILOVER_ATTEMPTS:
+                errors.append(
+                    {
+                        "key": name,
+                        "value": raw,
+                        "reason": "out_of_range",
+                        "message": f"max_attempts 必须在 {MIN_FAILOVER_ATTEMPTS}..{MAX_FAILOVER_ATTEMPTS} 之间",
+                        "min": MIN_FAILOVER_ATTEMPTS,
+                        "max": MAX_FAILOVER_ATTEMPTS,
+                    }
+                )
+            else:
+                clean[name] = raw
+        else:
+            errors.append(
+                {"key": name, "value": raw, "reason": "unknown_key", "message": f"未知配置项：{name}"}
+            )
+    if errors:
+        return _bad_request(errors)
+
+    app = request.app
+    conn = app.state.db.connect()
+    try:
+        stored = get_json_setting(conn, FAILOVER_CONFIG_KEY, {})
+        merged = dict(stored) if isinstance(stored, dict) else {}
+        merged.update(clean)
+        put_settings(conn, {FAILOVER_CONFIG_KEY: json.dumps(merged, ensure_ascii=False)})
+        conn.commit()
+        # 落库后立刻刷新内存副本：下一次请求就按新值走，无需重启
+        load_stored_failover(conn)
+        audit_event(
+            conn,
+            user["username"],
+            "settings.failover",
+            ",".join(sorted(clean)),
+            json.dumps(clean, ensure_ascii=False),
+            request.client.host if request.client else "",
+        )
+    except Exception:  # noqa: BLE001 - 写失败整体回滚，别留半套配置
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    payload = _failover_payload(request)
+    payload["saved"] = sorted(clean)
+    return payload
+
+
 def _read_config(request: Request, *, reveal: bool = False) -> dict[str, Any]:
     """读上游配置。
 
@@ -628,6 +803,305 @@ def save_model_map(
     finally:
         conn.close()
     return mapping
+
+
+# ===== 模型映射批量导入/导出 =====
+
+MODEL_MAP_KEY = "model_map"
+MODEL_MAP_SNAPSHOT_KEY = "model_map_snapshot"
+MODEL_MAP_EXPORT_KIND = "unified-2api-model-map"
+MODEL_MAP_MODES = ("merge", "overwrite")
+MODEL_MAP_MAX_ENTRIES = 5000
+
+
+def _model_map_bad(
+    errors: list[dict[str, Any]],
+    results: list[dict[str, Any]] | None = None,
+    message: str = "模型映射导入校验失败",
+) -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": {"type": "invalid_model_map", "message": message, "errors": errors},
+            "results": results or [],
+        },
+        status_code=400,
+    )
+
+
+def _declared_model_ids(request: Request, pid: str) -> set[str]:
+    """静态声明的模型 id；只用于能离线判定的一类 provider，不触发上游请求。"""
+    try:
+        adapter = request.app.state.registry.get(pid)
+        items = adapter.declared_models()
+    except Exception:  # noqa: BLE001 - 声明表异常时放弃该层校验，不让导入整体失败
+        return set()
+    return {str(item.get("id")) for item in items if isinstance(item, dict) and item.get("id")}
+
+
+def _check_model_entry(
+    request: Request,
+    alias: str,
+    target: str,
+    providers: dict[str, dict[str, Any]],
+    declared: dict[str, set[str]],
+) -> tuple[str, str] | None:
+    """返回 (reason, message) 表示不合法；None 表示通过。"""
+    if "/" not in target:
+        # 裸模型名可能是另一条别名或上游目录里的模型，离线无法判定，交给运行期解析
+        return None
+    pid, model = target.split("/", 1)
+    if not pid or not model:
+        return "invalid_target", f"{alias} 的目标 {target} 不是「provider/model」形式"
+    if pid not in providers:
+        return "unknown_provider", f"{alias} 指向未知 provider：{pid}"
+    if pid not in declared:
+        declared[pid] = _declared_model_ids(request, pid)
+    known = declared[pid]
+    if known and model not in known:
+        return "unknown_model", f"{alias} 指向 {pid} 未声明的模型：{model}"
+    return None
+
+
+@router.get("/settings/model-map/export")
+def export_model_map(request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        mapping = get_json_setting(conn, MODEL_MAP_KEY, {})
+    finally:
+        conn.close()
+    if not isinstance(mapping, dict):
+        mapping = {}
+    filename = f"model-map-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    return JSONResponse(
+        {
+            "kind": MODEL_MAP_EXPORT_KIND,
+            "version": 1,
+            "exported_at": now(),
+            "mappings": mapping,
+        },
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/settings/model-map/import")
+async def import_model_map(request: Request, user: dict = Depends(admin_user)):
+    try:
+        body = await request.json()
+    except ValueError:
+        return _model_map_bad(
+            [{"alias": "", "reason": "invalid_shape", "message": "请求体不是合法 JSON"}]
+        )
+    if not isinstance(body, dict):
+        return _model_map_bad(
+            [{"alias": "", "reason": "invalid_shape", "message": "导入内容必须是 JSON 对象"}]
+        )
+    mode = body.get("mode", "merge")
+    if mode not in MODEL_MAP_MODES:
+        return _model_map_bad(
+            [
+                {
+                    "alias": "",
+                    "reason": "invalid_mode",
+                    "message": f"mode 只支持 merge / overwrite，实际是 {mode!r}",
+                }
+            ]
+        )
+    raw = body.get("mappings")
+    if not isinstance(raw, dict) or not raw:
+        return _model_map_bad(
+            [{"alias": "", "reason": "invalid_shape", "message": "mappings 必须是非空对象"}]
+        )
+    if len(raw) > MODEL_MAP_MAX_ENTRIES:
+        return _model_map_bad(
+            [
+                {
+                    "alias": "",
+                    "reason": "too_many_entries",
+                    "message": f"一次最多导入 {MODEL_MAP_MAX_ENTRIES} 条，实际 {len(raw)} 条",
+                }
+            ]
+        )
+
+    providers = {item["id"]: item for item in request.app.state.registry.list_public()}
+    declared: dict[str, set[str]] = {}
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key, value in raw.items():
+        alias = str(key).strip()
+        target = value.strip() if isinstance(value, str) else ""
+        entry: dict[str, Any] = {
+            "alias": alias,
+            "target": target,
+            "status": "skipped",
+            "action": "unchanged",
+            "previous": None,
+        }
+        reason: tuple[str, str] | None = None
+        if not alias:
+            reason = ("empty_alias", "别名为空")
+        elif alias in seen:
+            reason = ("duplicate_alias", f"别名 {alias} 在导入内容里重复")
+        elif not isinstance(value, str):
+            reason = ("invalid_target", f"{alias} 的目标必须是字符串，实际是 {type(value).__name__}")
+        elif not target:
+            reason = ("empty_target", f"{alias} 的目标为空")
+        else:
+            reason = _check_model_entry(request, alias, target, providers, declared)
+        if reason is not None:
+            entry.update(status="failed", action=None, reason=reason[0], message=reason[1])
+        entries.append(entry)
+        seen.add(alias)
+
+    failed = [entry for entry in entries if entry["status"] == "failed"]
+    if failed:
+        # 有任何一条非法就整体拒绝：不允许「写进去一半、只报成功」的静默部分成功
+        for entry in entries:
+            if entry["status"] != "failed":
+                entry["reason"] = "aborted_by_invalid_entries"
+                entry["message"] = "本次导入因存在非法条目而未写入"
+        return _model_map_bad(
+            [
+                {
+                    "alias": item["alias"],
+                    "target": item["target"],
+                    "reason": item["reason"],
+                    "message": item["message"],
+                }
+                for item in failed
+            ],
+            [item for item in entries],
+        )
+
+    clean = {entry["alias"]: entry["target"] for entry in entries}
+    conn = request.app.state.db.connect()
+    try:
+        current = get_json_setting(conn, MODEL_MAP_KEY, {})
+        if not isinstance(current, dict):
+            current = {}
+        if mode == "merge":
+            merged = dict(current)
+        else:
+            merged = {}
+        for entry in entries:
+            alias = entry["alias"]
+            target = entry["target"]
+            old = current.get(alias)
+            entry["previous"] = old
+            if mode == "merge" and old == target:
+                entry.update(status="skipped", action="unchanged", reason="unchanged", message="值与现有映射相同")
+                continue
+            merged[alias] = target
+            entry.update(
+                status="applied",
+                action="added" if old is None else "updated",
+                reason=None,
+                message=None,
+            )
+        if mode == "overwrite":
+            for alias, old in current.items():
+                if alias in clean:
+                    continue
+                entries.append(
+                    {
+                        "alias": alias,
+                        "target": old,
+                        "status": "applied",
+                        "action": "removed",
+                        "previous": old,
+                        "reason": None,
+                        "message": "覆盖模式下未出现在导入内容里，已移除",
+                    }
+                )
+
+        changed = merged != current
+        if changed:
+            snapshot = {
+                "taken_at": now(),
+                "mode": mode,
+                "actor": user["username"],
+                "before": current,
+                "after": merged,
+            }
+            try:
+                put_settings(
+                    conn,
+                    {
+                        MODEL_MAP_KEY: json.dumps(merged, ensure_ascii=False),
+                        MODEL_MAP_SNAPSHOT_KEY: json.dumps(snapshot, ensure_ascii=False),
+                    },
+                )
+                conn.commit()
+            except Exception:  # noqa: BLE001 - 写失败整体回滚，旧映射保持不动
+                conn.rollback()
+                logger.exception("模型映射导入写入失败，已回滚")
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": {
+                            "type": "write_failed",
+                            "message": "写入数据库失败，本次导入已整体回滚",
+                            "errors": [],
+                        },
+                        "results": entries,
+                    },
+                    status_code=500,
+                )
+    finally:
+        conn.close()
+
+    if changed:
+        conn = request.app.state.db.connect()
+        try:
+            audit_event(
+                conn,
+                user["username"],
+                "settings.model_map.import",
+                f"mode={mode},entries={len(raw)},changed="
+                + str(sum(1 for item in entries if item.get("action") in {"added", "updated", "removed"})),
+                json.dumps(clean, ensure_ascii=False),
+                request.client.host if request.client else "",
+            )
+        finally:
+            conn.close()
+
+    applied = sum(1 for item in entries if item["status"] == "applied")
+    skipped = sum(1 for item in entries if item["status"] == "skipped")
+    removed = sum(1 for item in entries if item.get("action") == "removed")
+    return {
+        "ok": True,
+        "mode": mode,
+        "changed": changed,
+        "snapshot_taken": changed,
+        "total": len(raw),
+        "applied": applied,
+        "skipped": skipped,
+        "removed": removed,
+        "failed": 0,
+        "results": entries,
+    }
+
+
+@router.post("/settings/model-map/rollback")
+def rollback_model_map(request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        snapshot = get_json_setting(conn, MODEL_MAP_SNAPSHOT_KEY, None)
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("before"), dict):
+            raise HTTPException(400, "没有可回滚的模型映射快照")
+        before = {str(key): str(value) for key, value in snapshot["before"].items()}
+        set_json_setting(conn, MODEL_MAP_KEY, before)
+        audit_event(
+            conn,
+            user["username"],
+            "settings.model_map.rollback",
+            "model_map",
+            json.dumps(before, ensure_ascii=False),
+            request.client.host if request.client else "",
+        )
+    finally:
+        conn.close()
+    return {"ok": True, "restored": before, "snapshot_taken_at": snapshot.get("taken_at")}
 
 
 # ===== Upstash 连通性测试：只读 PING 探测，不写任何数据 =====
@@ -954,7 +1428,7 @@ def _check_role(role: str) -> str:
 
 
 @router.get("/users")
-def list_users(request: Request, user: dict = Depends(current_user)):
+def list_users(request: Request, user: dict = Depends(admin_user)):
     conn = request.app.state.db.connect()
     try:
         rows = conn.execute("SELECT username, role FROM users ORDER BY created_at").fetchall()

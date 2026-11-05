@@ -8,11 +8,16 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
+import sys
 import tempfile
+import threading
 from contextlib import asynccontextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterator
 
 import httpx
 import pytest
@@ -80,7 +85,88 @@ CAP_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "oauth": ("all", ("start_login", "poll_login")),
     "checkin": ("all", ("checkin_all", "account_action")),
     "credits": ("all", ("refresh_credits",)),
+    # 扩展位与主链路同口径：声明 True 必须有真实覆写
+    "embeddings": ("any", ("embeddings",)),
+    "images": ("all", ("image_generation", "image_edit")),
+    "videos": ("any", ("video_create",)),
+    "media": ("any", ("media",)),
+    "rerank": ("any", ("rerank",)),
+    "usage": ("any", ("usage",)),
+    "count_tokens": ("any", ("count_tokens",)),
 }
+
+# 扩展位（与 base.CAPABILITY_KEYS 的主链路位并列，声明散落在各 adapter 的 capabilities 里）
+EXTENSION_CAPS = frozenset({"embeddings", "images", "videos", "media", "rerank", "usage", "count_tokens"})
+
+# 扩展位全是透传端点：覆写方法体必须真有上游外呼，空壳覆写不算实现。
+# sidecar 型 adapter 的扩展位（如 codar_sidecar 的 count_tokens）属于「经 sidecar 转发、
+# 本进程不实现业务逻辑」的合法形态，判据是方法体里有 forward/_forward/_send 调用，
+# 而不是要求本地重写一遍算法。
+UPSTREAM_CALL_MARKERS = (".forward(", "_forward(", "_send(")
+
+# 读端点：images/videos 位同时放行 POST 创建与 GET 查询（routers/v1.py 的 _proxy_get）
+READ_ENDPOINTS: dict[str, str] = {"images": "image_task", "videos": "video_task"}
+# 上游只注册创建、没有查询端点的合法情形：必须显式登记，并单独用网关行为测试背书 501
+READ_ENDPOINT_EXEMPT: dict[tuple[str, str, str], str] = {
+    ("sub2api", "images", "image_task"): "上游只注册 POST /v1/images/generations，无任务查询端点",
+    ("sub2api", "videos", "video_task"): "上游只注册 POST /v1/videos（gateway.go:107-109），无任务查询端点",
+}
+
+# 扩展位转发路径的静态锚点：(provider, 方法) -> (匹配方式, 期望路径)
+# exact = 能从方法体解出完整路径；prefix = 路径由常量 + 变量拼接，只校验前缀常量
+EXTENSION_STATIC_PATHS: dict[tuple[str, str], tuple[str, str]] = {
+    ("muse", "image_generation"): ("exact", "/v1/images/generations"),
+    ("muse", "image_edit"): ("exact", "/v1/images/edits"),
+    ("muse", "video_create"): ("exact", "/v1/videos"),
+    ("muse", "media"): ("prefix", "/v1/media"),
+    ("muse", "image_task"): ("prefix", "/v1/images/tasks"),
+    ("muse", "video_task"): ("prefix", "/v1/videos"),
+    ("sub2api", "embeddings"): ("exact", "/v1/embeddings"),
+    ("sub2api", "image_generation"): ("exact", "/v1/images/generations"),
+    ("sub2api", "image_edit"): ("exact", "/v1/images/edits"),
+    ("sub2api", "video_create"): ("exact", "/v1/videos"),
+    ("sub2api", "rerank"): ("exact", "/v1/rerank"),
+    ("sub2api", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
+    ("sub2api", "usage"): ("prefix", "/v1/usage"),
+    ("codar_sidecar", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
+}
+
+# 静态规则确实覆盖不到、只由桩上游实测覆盖的方法；当前没有，出现时必须在这里写明原因，
+# 覆盖率测试会逼着新方法二选一（补锚点或登记豁免），不允许静默漏检
+STATIC_PATH_EXEMPT: dict[tuple[str, str], str] = {}
+
+
+def _has_upstream_call(adapter: Any, name: str) -> bool:
+    impl = getattr(type(adapter), name, None)
+    if impl is None:
+        return False
+    try:
+        source = inspect.getsource(impl)
+    except (OSError, TypeError):
+        return False
+    return any(marker in source for marker in UPSTREAM_CALL_MARKERS)
+
+
+def _path_evidence(adapter: Any, name: str) -> set[str]:
+    """静态收集方法体里的上游路径：字面量、模块级 *_PATH 常量、_FORWARD_PATHS 键映射。"""
+    impl = getattr(type(adapter), name, None)
+    if impl is None:
+        return set()
+    try:
+        source = inspect.getsource(impl)
+    except (OSError, TypeError):
+        return set()
+    module = sys.modules.get(type(adapter).__module__)
+    evidence = set(re.findall(r'"(/v1[^"]*)"', source))
+    for const in re.findall(r"\b([A-Z][A-Z0-9_]*_PATH)\b", source):
+        value = getattr(module, const, None) if module else None
+        if isinstance(value, str):
+            evidence.add(value)
+    table = getattr(module, "_FORWARD_PATHS", {}) if module else {}
+    for key in re.findall(r'_forward\(\s*"([^"]+)"', source):
+        if key in table:
+            evidence.add(table[key])
+    return evidence
 
 
 def _declared_pairs() -> list[pytest.ParameterSet]:
@@ -156,6 +242,204 @@ def test_declared_capabilities_have_real_method_bodies(pid: str, cap: str) -> No
         assert not missing, f"{pid} 声明 {cap}=True，但未覆写: {sorted(missing)}"
     else:
         assert not missing == set(names), f"{pid} 声明 {cap}=True，但方法全部未覆写: {sorted(missing)}"
+    if cap in EXTENSION_CAPS and mode == "all":
+        hollow = {name for name in names if _real_method(adapter, name) and not _has_upstream_call(adapter, name)}
+        assert not hollow, f"{pid} 声明 {cap}=True，但覆写没有真实外呼: {sorted(hollow)}"
+    elif cap in EXTENSION_CAPS:
+        assert any(_has_upstream_call(adapter, name) for name in names), (
+            f"{pid} 声明 {cap}=True，但没有任何真实外呼的覆写"
+        )
+
+
+# ---------- 1b. sidecar 转发型扩展位：允许本进程只转发，但必须是真外呼 ----------
+
+
+def test_sidecar_forwarded_extension_cap_counts_as_real_implementation() -> None:
+    # codar_sidecar 的 count_tokens 业务在 sidecar 进程里，主仓只做 HTTP 透传；
+    # 这类「本进程不实现」不是缺陷，判据落到真实转发调用上
+    adapter = ADAPTERS["codar_sidecar"]
+    assert adapter.spec.status == "sidecar"
+    assert adapter.spec.capabilities["count_tokens"] is True
+    assert _real_method(adapter, "count_tokens")
+    assert _has_upstream_call(adapter, "count_tokens")
+
+
+# ---------- 1c. 读端点：能力位 ⇔ 真转发 / 501 兜底 ----------
+
+
+def test_extension_read_endpoint_static_truth() -> None:
+    problems: list[str] = []
+    for pid, adapter in sorted(ADAPTERS.items()):
+        for cap, read_method in READ_ENDPOINTS.items():
+            if adapter.spec.capabilities.get(cap) is not True:
+                continue
+            implemented = _real_method(adapter, read_method)
+            exempt = (pid, cap, read_method) in READ_ENDPOINT_EXEMPT
+            if implemented and not _has_upstream_call(adapter, read_method):
+                problems.append(f"{pid}.{read_method}: 有覆写但没有真实外呼")
+            if not implemented and not exempt:
+                problems.append(f"{pid}.{read_method}: 声明 {cap}=True 但读端点无实现，也未登记 501 豁免")
+            if implemented and exempt:
+                problems.append(f"{pid}.{read_method}: 已有真实实现，却仍登记为 501 豁免")
+    assert not problems, problems
+
+
+_EXT_READ_HITS: list[tuple[str, str]] = []
+
+
+class _ExtReadHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args: Any) -> None:
+        pass
+
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        _EXT_READ_HITS.append(("GET", self.path))
+        if self.path.startswith("/v1/images/tasks/"):
+            self._json(200, {"id": self.path.rsplit("/", 1)[-1], "status": "succeeded"})
+        elif self.path.startswith("/v1/videos/"):
+            self._json(200, {"id": self.path.rsplit("/", 1)[-1], "status": "succeeded"})
+        elif self.path.startswith("/v1/media/"):
+            raw = b"\x89PNG-stub-bytes"
+            self.send_response(200)
+            self.send_header("content-type", "image/png")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        else:
+            self._json(404, {"error": {"message": f"stub 未实现 {self.path}"}})
+
+
+@pytest.fixture(scope="module")
+def ext_read_stub() -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ExtReadHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _provider_get(anon: httpx.Client, key: str, provider: str, path: str) -> httpx.Response:
+    return anon.get(path, headers={"authorization": f"Bearer {key}", "x-provider": provider})
+
+
+def test_extension_read_endpoints_forward_or_501(
+    anon: httpx.Client, admin: httpx.Client, bearer_key: str, ext_read_stub: str
+) -> None:
+    # muse 两个读端点都有真实覆写：必须真转发，不能空响应
+    before = next(p for p in admin.get("/api/providers").json() if p["id"] == "muse")
+    patched = admin.patch(
+        "/api/providers/muse",
+        json={"enabled": True, "base_url": ext_read_stub, "api_key": "muse-read-key"},
+    )
+    assert patched.status_code == 200, patched.text
+    try:
+        _EXT_READ_HITS.clear()
+        for path in ("/v1/images/tasks/it-9", "/v1/videos/vt-9"):
+            reply = _provider_get(anon, bearer_key, "muse", path)
+            assert reply.status_code == 200, f"{path} {reply.status_code} {reply.text}"
+            assert reply.json()["status"] == "succeeded"
+            assert _EXT_READ_HITS[-1] == ("GET", path)
+    finally:
+        restored = admin.patch(
+            "/api/providers/muse",
+            json={
+                "enabled": bool(before["enabled"]),
+                "base_url": before["base_url"],
+                "api_key": "***" if before["has_api_key"] else "",
+            },
+        )
+        assert restored.status_code == 200, restored.text
+
+    # sub2api 只有创建没有查询：读端点必须 501 capability_unsupported，不许 500/空响应
+    gid = "g-read-truth"
+    group = admin.post("/api/sub2api/groups", json={"id": gid, "name": "read-endpoint-truth"})
+    assert group.status_code == 200, group.text
+    account = admin.post(
+        "/api/sub2api/accounts",
+        json={"group_id": gid, "name": "a-read", "upstream_base": ext_read_stub, "api_key": "stub-key"},
+    )
+    assert account.status_code == 200, account.text
+    before = next(p for p in admin.get("/api/providers").json() if p["id"] == "sub2api")
+    patched = admin.patch("/api/providers/sub2api", json={"enabled": True, "options": {"group": gid}})
+    assert patched.status_code == 200, patched.text
+    try:
+        for path in ("/v1/images/tasks/it-9", "/v1/videos/vt-9"):
+            reply = _provider_get(anon, bearer_key, "sub2api", path)
+            assert reply.status_code == 501, f"{path} {reply.status_code} {reply.text}"
+            error = reply.json()["error"]
+            assert error["code"] == "capability_unsupported"
+            assert error["provider"] == "sub2api"
+            assert error["message"]
+    finally:
+        restored = admin.patch(
+            "/api/providers/sub2api",
+            json={
+                "enabled": bool(before["enabled"]),
+                "options": {"group": str((before.get("options") or {}).get("group", "default"))},
+            },
+        )
+        assert restored.status_code == 200, restored.text
+        listed = admin.get("/api/sub2api/accounts", params={"group_id": gid})
+        if listed.status_code == 200:
+            for row in listed.json():
+                admin.delete(f"/api/sub2api/accounts/{row.get('id')}")
+        admin.delete(f"/api/sub2api/groups/{gid}")
+
+
+# ---------- 1d. 转发路径静态锚点（对不上表就红，覆盖不到必须显式登记） ----------
+
+
+@pytest.mark.parametrize(
+    "pid,method,mode,expected",
+    [
+        pytest.param(pid, method, mode, expected, id=f"{pid}-{method}")
+        for (pid, method), (mode, expected) in sorted(EXTENSION_STATIC_PATHS.items())
+    ],
+)
+def test_extension_forward_path_static_anchor(pid: str, method: str, mode: str, expected: str) -> None:
+    evidence = _path_evidence(ADAPTERS[pid], method)
+    if mode == "exact":
+        assert expected in evidence, f"{pid}.{method} 路径证据 {sorted(evidence)} 不含 {expected}"
+    else:
+        assert any(item == expected or item.startswith(expected) for item in evidence), (
+            f"{pid}.{method} 拼接路径前缀 {sorted(evidence)} 与 {expected} 不符"
+        )
+
+
+def test_extension_forward_path_coverage_is_explicit() -> None:
+    uncovered: list[str] = []
+    for pid, adapter in sorted(ADAPTERS.items()):
+        for cap, (_, names) in CAP_RULES.items():
+            if cap not in EXTENSION_CAPS or adapter.spec.capabilities.get(cap) is not True:
+                continue
+            for name in names:
+                if (
+                    _real_method(adapter, name)
+                    and (pid, name) not in EXTENSION_STATIC_PATHS
+                    and (pid, name) not in STATIC_PATH_EXEMPT
+                ):
+                    uncovered.append(f"{pid}.{name}")
+            read = READ_ENDPOINTS.get(cap)
+            if (
+                read
+                and _real_method(adapter, read)
+                and (pid, read) not in EXTENSION_STATIC_PATHS
+                and (pid, read) not in STATIC_PATH_EXEMPT
+            ):
+                uncovered.append(f"{pid}.{read}")
+    assert not uncovered, (
+        f"以下扩展位方法没有静态路径锚点：{uncovered}；要么补 EXTENSION_STATIC_PATHS，"
+        "要么在 STATIC_PATH_EXEMPT 写明只由桩上游实测覆盖"
+    )
 
 
 # ---------- 2. _implements() 判据可靠性（基类默认实现不得误判为已实现） ----------
@@ -316,6 +600,8 @@ FORWARD_CASES = [
     pytest.param("trae_sidecar", "chat_completion", _chat_payload(), False, "/v1/chat/completions", False, id="trae-sidecar-chat"),
     pytest.param("qoder_sidecar", "messages", _messages_payload(stream=True), True, "/v1/messages", False, id="qoder-sidecar-messages-stream"),
     pytest.param("qoder_sidecar", "responses", _responses_payload(), False, "/v1/responses", False, id="qoder-sidecar-responses"),
+    pytest.param("codar_sidecar", "responses", _responses_payload(), False, "/v1/responses", False, id="codar-sidecar-responses"),
+    pytest.param("muse", "responses", _responses_payload(), False, "/v1/responses", False, id="muse-responses"),
 ]
 
 
@@ -330,7 +616,7 @@ async def test_protocol_forwards_hit_correct_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _fresh(pid)
-    if pid in ("codar", "opencode"):
+    if pid in ("codar", "opencode", "muse"):
         adapter.configure(api_key="test-key-123")
     recorded: list[httpx.Request] = []
     reply_body = (
@@ -348,16 +634,24 @@ async def test_protocol_forwards_hit_correct_paths(
         assert request.headers.get("anthropic-version") == ANTHROPIC_VERSION
     if pid == "opencode" and anthropic_header:
         assert request.headers.get("x-api-key") == "test-key-123"
+    if pid == "muse":
+        assert request.headers.get("authorization") == "Bearer test-key-123"
 
 
-# ---------- 8. sub2api：路径表静态锚点（真实转发已有 test_adapters_real 覆盖） ----------
+# ---------- 8. sub2api：路径表静态锚点（真实转发另有 section 13 网关实测） ----------
 
 
 def test_sub2api_forward_path_table_is_protocol_correct() -> None:
     import app.adapters.sub2api as sub2api_module
 
     source = Path(sub2api_module.__file__).read_text(encoding="utf-8")
-    assert '"/v1/chat/completions" if capability == "chat" else "/v1/messages"' in source
+    for capability, path in (
+        ("chat", "/v1/chat/completions"),
+        ("messages", "/v1/messages"),
+        ("responses", "/v1/responses"),
+    ):
+        assert f'"{capability}": "{path}"' in source, f"缺 {capability} -> {path}"
+    assert "_FORWARD_PATHS[capability]" in source
 
 
 # ---------- 9. qoder messages：Anthropic 形状与完整 SSE 事件序列 ----------
@@ -469,3 +763,211 @@ def test_account_capability_bits_match_actual_overrides() -> None:
             if bool(ops[op]) != real:
                 problems.append(f"{pid}.{op}: ops={ops[op]} 真实={real}")
     assert not problems, problems
+
+
+# ---------- 13. /v1/responses 三家网关实测：非流式 200 形状 + 流式 response.* 事件序列 ----------
+
+
+def _responses_req(
+    anon: httpx.Client,
+    key: str,
+    model: str,
+    provider: str,
+    *,
+    stream: bool = False,
+) -> httpx.Response:
+    return anon.post(
+        "/v1/responses",
+        headers={"authorization": f"Bearer {key}", "x-provider": provider},
+        json={"model": model, "input": "ping", "stream": stream},
+    )
+
+
+def _responses_stream_raw(anon: httpx.Client, key: str, model: str, provider: str) -> str:
+    with anon.stream(
+        "POST",
+        "/v1/responses",
+        headers={"authorization": f"Bearer {key}", "x-provider": provider},
+        json={"model": model, "input": "ping", "stream": True},
+    ) as stream:
+        raw = "".join(stream.iter_text())
+        assert stream.status_code == 200, f"{stream.status_code} {raw}"
+    return raw
+
+
+def _assert_plain_responses(body: dict[str, Any], model: str) -> None:
+    assert body["object"] == "response"
+    assert body["id"] == "resp_fake"
+    assert body["model"] == model
+    text = body["output"][0]["content"][0]["text"]
+    assert text == f"[fake] responses model={model}"
+
+
+def _assert_response_events(raw: str) -> None:
+    events = [line[7:] for line in raw.splitlines() if line.startswith("event: ")]
+    assert events == ["response.created", "response.output_text.delta", "response.completed"]
+    assert '"type": "response.completed"' in raw
+
+
+@pytest.fixture(scope="module")
+def bearer_key(admin: httpx.Client) -> str:
+    created = admin.post("/api/keys", json={"name": "capability-truth-responses"})
+    assert created.status_code == 200, created.text
+    return str(created.json()["key"])
+
+
+@pytest.fixture(scope="module")
+def codar_sidecar_on_fake(admin: httpx.Client, fake_base: str):
+    before = next(p for p in admin.get("/api/providers").json() if p["id"] == "codar_sidecar")
+    patched = admin.patch(
+        "/api/providers/codar_sidecar",
+        json={"enabled": True, "base_url": fake_base, "api_key": "sidecar-fake-key"},
+    )
+    assert patched.status_code == 200, patched.text
+    try:
+        yield
+    finally:
+        restored = admin.patch(
+            "/api/providers/codar_sidecar",
+            json={
+                "enabled": bool(before["enabled"]),
+                "base_url": before["base_url"],
+                "api_key": "***" if before["has_api_key"] else "",
+            },
+        )
+        assert restored.status_code == 200, restored.text
+
+
+@pytest.fixture(scope="module")
+def muse_on_fake(admin: httpx.Client, fake_base: str):
+    before = next(p for p in admin.get("/api/providers").json() if p["id"] == "muse")
+    patched = admin.patch(
+        "/api/providers/muse",
+        json={"enabled": True, "base_url": fake_base, "api_key": "tok-muse-fake"},
+    )
+    assert patched.status_code == 200, patched.text
+    try:
+        yield
+    finally:
+        restored = admin.patch(
+            "/api/providers/muse",
+            json={
+                "enabled": bool(before["enabled"]),
+                "base_url": before["base_url"],
+                "api_key": "***" if before["has_api_key"] else "",
+            },
+        )
+        assert restored.status_code == 200, restored.text
+
+
+@pytest.fixture
+def sub2api_on_fake(admin: httpx.Client, fake_base: str):
+    gid = "g-resp-truth"
+    group = admin.post("/api/sub2api/groups", json={"id": gid, "name": "responses-capability"})
+    assert group.status_code == 200, group.text
+    account = admin.post(
+        "/api/sub2api/accounts",
+        json={"group_id": gid, "name": "a-resp", "upstream_base": fake_base, "api_key": "sub-fake-key"},
+    )
+    assert account.status_code == 200, account.text
+    before = next(p for p in admin.get("/api/providers").json() if p["id"] == "sub2api")
+    patched = admin.patch(
+        "/api/providers/sub2api",
+        json={"enabled": True, "options": {"group": gid}},
+    )
+    assert patched.status_code == 200, patched.text
+    try:
+        yield
+    finally:
+        restored = admin.patch(
+            "/api/providers/sub2api",
+            json={
+                "enabled": bool(before["enabled"]),
+                "options": {"group": str((before.get("options") or {}).get("group", "default"))},
+            },
+        )
+        assert restored.status_code == 200, restored.text
+        listed = admin.get("/api/sub2api/accounts", params={"group_id": gid})
+        if listed.status_code == 200:
+            for row in listed.json():
+                admin.delete(f"/api/sub2api/accounts/{row.get('id')}")
+        admin.delete(f"/api/sub2api/groups/{gid}")
+
+
+def test_sub2api_responses_gateway_plain_and_stream(anon, bearer_key, sub2api_on_fake) -> None:
+    plain = _responses_req(anon, bearer_key, "fake-chat-1", "sub2api")
+    assert plain.status_code == 200, plain.text
+    _assert_plain_responses(plain.json(), "fake-chat-1")
+    _assert_response_events(_responses_stream_raw(anon, bearer_key, "fake-chat-1", "sub2api"))
+
+
+def test_codar_sidecar_responses_gateway_plain_and_stream(anon, bearer_key, codar_sidecar_on_fake) -> None:
+    plain = _responses_req(anon, bearer_key, "fake-chat-1", "codar_sidecar")
+    assert plain.status_code == 200, plain.text
+    _assert_plain_responses(plain.json(), "fake-chat-1")
+    _assert_response_events(_responses_stream_raw(anon, bearer_key, "fake-chat-1", "codar_sidecar"))
+
+
+def test_muse_responses_gateway_plain_and_stream(anon, bearer_key, muse_on_fake) -> None:
+    plain = _responses_req(anon, bearer_key, "muse-spark", "muse")
+    assert plain.status_code == 200, plain.text
+    _assert_plain_responses(plain.json(), "muse-spark")
+    _assert_response_events(_responses_stream_raw(anon, bearer_key, "muse-spark", "muse"))
+
+
+# ---------- 14. /v1/responses 回归：未声明的家仍 501 + OpenAI 错误壳 ----------
+
+
+async def test_undeclared_responses_adapters_still_raise_501() -> None:
+    problems: list[str] = []
+    for pid, adapter in sorted(ADAPTERS.items()):
+        if adapter.spec.capabilities.get("responses"):
+            continue
+        fresh = _fresh(pid)
+        try:
+            await fresh.responses(_responses_payload(), stream=False)
+        except ProviderError as exc:
+            if exc.status_code != 501:
+                problems.append(f"{pid}: status={exc.status_code}")
+        else:
+            problems.append(f"{pid}: 未声明却没有抛 501")
+    assert not problems, problems
+
+
+def test_responses_capability_gate_501_openai_shell(anon, bearer_key) -> None:
+    # codebuddy 未声明 responses：能力位门槛先于上游调用，壳必须是 OpenAI 形状
+    r = _responses_req(anon, bearer_key, "fake-chat-1", "codebuddy")
+    assert r.status_code == 501, f"{r.status_code} {r.text}"
+    body = r.json()
+    assert "type" not in body, "OpenAI 协议错误壳不得带顶层 type"
+    error = body["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "capability_unsupported"
+    assert error["provider"] == "codebuddy"
+    assert body["detail"]
+
+
+def test_responses_upstream_401_openai_shell(anon, bearer_key, codar_sidecar_on_fake) -> None:
+    r = _responses_req(anon, bearer_key, "err-401", "codar_sidecar")
+    assert r.status_code == 401, f"{r.status_code} {r.text}"
+    body = r.json()
+    assert "type" not in body
+    error = body["error"]
+    assert error["type"] == "authentication_error"
+    assert error["code"] == "upstream_auth_failed"
+    assert error["provider"] == "codar_sidecar"
+    assert error["upstream_status"] == 401
+    assert body["detail"]
+
+
+def test_responses_upstream_503_maps_provider_unavailable(anon, bearer_key, codar_sidecar_on_fake) -> None:
+    # 既有映射：上游 503 → OpenAI 壳 code=provider_unavailable / type=api_error，不新造错误码
+    r = _responses_req(anon, bearer_key, "err-503", "codar_sidecar")
+    assert r.status_code == 503, f"{r.status_code} {r.text}"
+    body = r.json()
+    assert "type" not in body
+    error = body["error"]
+    assert error["code"] == "provider_unavailable"
+    assert error["type"] == "api_error"
+    assert error["upstream_status"] == 503
+    assert body["detail"]

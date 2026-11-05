@@ -5,17 +5,24 @@ Anthropic Messages 转发、SSE 直通、可重试状态码换 key。不依赖 o
 """
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
 
+from ..api_utils import exc_summary, safe_url
 from ..config import Settings
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
 
+logger = logging.getLogger("unified.upstream")
+
 # 请求级错误不重试，换 key/出口也改变不了结果
 REQUEST_ERRORS = {400, 413, 422}
 RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
+# 只有鉴权类失败才值得改走匿名通道：网络/5xx 换不换凭证结果一样
+AUTH_ERRORS = {401, 403}
+NO_KEY_MESSAGE = "OpenCode 未配置上游密钥（服务商页填写 api_key 或 options.extra_keys）"
 # 网络层错误与可重试状态码走同一套换 key 退避；连接失败/超时不是密钥问题也是出口问题
 NETWORK_ERRORS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectTimeout)
 
@@ -75,11 +82,14 @@ class OpenCodeAdapter(ProviderAdapter):
             extra_headers=headers,
         )
 
-    async def _request(self, method: str, path: str, payload: dict[str, Any] | None, *, stream: bool, anthropic: bool):
-        keys = self._keys()
+    async def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None, *, stream: bool, anthropic: bool, anonymous: bool = False
+    ):
+        # 匿名通道只给模型发现用：上游 /v1/models 实测不带凭证也返回 200，换 key 对它没意义
+        keys = [""] if anonymous else self._keys()
         if not keys:
-            raise ProviderError(503, "OpenCode 未配置上游密钥（服务商页填写 api_key 或 options.extra_keys）")
-        attempts = self._attempts(len(keys))
+            raise ProviderError(503, NO_KEY_MESSAGE)
+        attempts = 1 if anonymous else self._attempts(len(keys))
         last: Any = None
         # 记录最后一次连接错误的原文，重试耗尽后如实抛给调用方，不伪造空响应
         network_error: ProviderError | None = None
@@ -96,7 +106,7 @@ class OpenCodeAdapter(ProviderAdapter):
                 if exc.status_code in REQUEST_ERRORS:
                     raise
             except NETWORK_ERRORS as exc:
-                last = network_error = ProviderError(502, f"上游连接失败（{self.base_url}）：{exc!r}")
+                last = network_error = ProviderError(502, f"上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
             else:
                 if reply.status_code < 400 or reply.status_code not in RETRYABLE:
                     return reply
@@ -117,10 +127,30 @@ class OpenCodeAdapter(ProviderAdapter):
             raise last
         return last
 
+    async def _discover(self, path: str) -> dict[str, Any]:
+        """模型发现与健康探测：设计入口带本地 key，被拒或没配时改走匿名通道。
+
+        上游 /v1/models 匿名直连实测 200（docs/providers/opencode2api.md §4 的匿名请求
+        不保证成功），发现类请求不该被密钥状态挡住；推理调用不走这条兜底。
+        """
+        keys = self._keys()
+        if keys:
+            try:
+                return await self._request("GET", path, None, stream=False, anthropic=False)
+            except ProviderError as exc:
+                if exc.status_code not in AUTH_ERRORS:
+                    raise
+                logger.warning("OpenCode 模型发现带密钥被拒（%s），改走匿名通道", exc.message)
+        try:
+            return await self._request("GET", path, None, stream=False, anthropic=False, anonymous=True)
+        except ProviderError as exc:
+            # 匿名也被拒时，缺密钥的场景仍报那句可操作提示，而不是丢一个上游 401
+            if not keys and exc.status_code in AUTH_ERRORS:
+                raise ProviderError(503, NO_KEY_MESSAGE) from exc
+            raise
+
     async def fetch_models(self) -> list[dict[str, Any]]:
-        data = await self._request(
-            "GET", f"{self._tier_prefix()}/v1/models", None, stream=False, anthropic=False
-        )
+        data = await self._discover(f"{self._tier_prefix()}/v1/models")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []
@@ -128,7 +158,7 @@ class OpenCodeAdapter(ProviderAdapter):
 
     async def health(self) -> dict[str, Any]:
         try:
-            data = await self._request("GET", f"{self._tier_prefix()}/v1/models", None, stream=False, anthropic=False)
+            data = await self._discover(f"{self._tier_prefix()}/v1/models")
         except ProviderError as exc:
             return {"connected": False, "error": exc.message}
         items = data.get("data") if isinstance(data, dict) else []

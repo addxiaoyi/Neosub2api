@@ -91,7 +91,7 @@ def _sse_objects(chunk: bytes) -> Iterator[dict[str, Any]]:
 
 
 def usage_in_chunk(chunk: bytes) -> dict[str, Any] | None:
-    """一个 SSE 分片里的 usage：OpenAI 放顶层，Anthropic 放 message.usage / 顶层。
+    """一个 SSE 分片里的 usage：Chat 放顶层，Anthropic 放 message.usage，Responses 挂 response.usage。
 
     必须先解析 JSON 再判断，不能靠正文里出现 "usage" 字样猜。
     """
@@ -101,6 +101,10 @@ def usage_in_chunk(chunk: bytes) -> dict[str, Any] | None:
         if not isinstance(usage, dict) or not usage:
             message = data.get("message")
             usage = message.get("usage") if isinstance(message, dict) else None
+        if not (isinstance(usage, dict) and usage):
+            # Responses 协议的 usage 在 response 对象下（response.completed 等事件）
+            response = data.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
         if isinstance(usage, dict) and usage:
             # Anthropic 把 input_tokens 放 message_start、output_tokens 放 message_delta，合并才完整
             found = {**(found or {}), **usage}

@@ -16,6 +16,13 @@ CAPABILITY_KEYS = (
     "credits",
     "register",
     "sidecar",
+    "embeddings",
+    "images",
+    "videos",
+    "media",
+    "rerank",
+    "usage",
+    "count_tokens",
 )
 
 
@@ -239,4 +246,5 @@ class ProviderAdapter(ABC):
 
 
 def stub_capabilities(**overrides: bool) -> dict[str, bool]:
+    """走本函数的 provider 输出 CAPABILITY_KEYS 全量 16 键；手写 dict 的 sidecar 只输出自己声明的子集，故 /api/providers 的 capabilities 不保证键集合一致，消费方须按真值读、不能按全集假设。"""
     return _caps(**overrides)

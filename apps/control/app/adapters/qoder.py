@@ -375,6 +375,71 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+def _anthropic_image_url(block: dict[str, Any]) -> str:
+    """Anthropic image block → OpenAI image_url 字符串；base64 与远程 url 两种 source。"""
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return ""
+    if source.get("type") == "base64":
+        data = str(source.get("data") or "")
+        return f"data:{source.get('media_type') or 'image/png'};base64,{data}" if data else ""
+    if source.get("type") == "url":
+        return str(source.get("url") or "")
+    return ""
+
+
+def _tool_result_text(block: dict[str, Any]) -> str:
+    inner = block.get("content")
+    if isinstance(inner, list):
+        for part in inner:
+            if isinstance(part, dict) and part.get("type") == "image":
+                raise ProviderError(400, "tool_result 中的图片无法转换（OpenAI 协议的 tool 消息不支持图片）")
+    return _content_text(inner)
+
+
+def _tool_use_call(block: dict[str, Any]) -> dict[str, Any]:
+    """Anthropic tool_use 块 → OpenAI tool_calls 项。"""
+    return {
+        "id": str(block.get("id") or f"call_{uuid.uuid4().hex[:16]}"),
+        "type": "function",
+        "function": {
+            "name": str(block.get("name") or ""),
+            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+        },
+    }
+
+
+def _tool_call_to_tool_use(call: dict[str, Any]) -> dict[str, Any]:
+    """OpenAI tool_calls 项 → Anthropic tool_use 块；arguments 非法 JSON 时保原文不丢数据。"""
+    fn = call.get("function") or {}
+    raw = str(fn.get("arguments") or "").strip()
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        parsed = {"_raw": raw}
+    return {
+        "type": "tool_use",
+        "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex[:16]}"),
+        "name": str(fn.get("name") or ""),
+        "input": parsed,
+    }
+
+
+def _tool_call_to_function_item(call: dict[str, Any]) -> dict[str, Any]:
+    """OpenAI tool_calls 项 → Responses function_call output item。"""
+    fn = call.get("function") or {}
+    return {
+        "id": f"fc_{uuid.uuid4().hex[:24]}",
+        "type": "function_call",
+        "call_id": str(call.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
+        "name": str(fn.get("name") or ""),
+        "arguments": str(fn.get("arguments") or ""),
+        "status": "completed",
+    }
+
+
 class QoderAdapter(ProviderAdapter):
     spec = ProviderSpec(
         id="qoder",
@@ -575,7 +640,16 @@ class QoderAdapter(ProviderAdapter):
             role = str(item.get("role") or "user")
             if role == "developer":
                 role = "system"
-            message: dict[str, Any] = {"role": role, "content": _content_text(item.get("content"))}
+            content = item.get("content")
+            # COSY 请求体没有图片通道（model_config.is_vl 固定 false），静默丢图改为显式拒绝
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") in ("image_url", "input_image", "image"):
+                        raise ProviderError(
+                            400,
+                            "Qoder COSY 产品线不支持图片输入；请移除图片，或改用支持图片直通的 workbuddy 产品线（模型前缀 workbuddy/）",
+                        )
+            message: dict[str, Any] = {"role": role, "content": _content_text(content)}
             if isinstance(item.get("tool_calls"), list):
                 message["tool_calls"] = item["tool_calls"]
             if item.get("tool_call_id"):
@@ -806,7 +880,59 @@ class QoderAdapter(ProviderAdapter):
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "user")
-            messages.append({"role": role, "content": _content_text(item.get("content"))})
+            content = item.get("content")
+            if isinstance(content, str):
+                messages.append({"role": role, "content": content})
+                continue
+            if not isinstance(content, list):
+                content = []
+            if role == "assistant":
+                texts: list[str] = []
+                calls: list[dict[str, Any]] = []
+                for block in content:
+                    if isinstance(block, str):
+                        texts.append(block)
+                    elif isinstance(block, dict):
+                        if block.get("type") == "text":
+                            texts.append(str(block.get("text") or ""))
+                        elif block.get("type") == "tool_use":
+                            calls.append(_tool_use_call(block))
+                message: dict[str, Any] = {"role": "assistant", "content": "".join(texts)}
+                if calls:
+                    message["tool_calls"] = calls
+                messages.append(message)
+                continue
+            texts = []
+            images: list[dict[str, Any]] = []
+            tool_messages: list[dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, str):
+                    texts.append(block)
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "text":
+                    texts.append(str(block.get("text") or ""))
+                elif kind == "tool_result":
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": str(block.get("tool_use_id") or ""),
+                        "content": _tool_result_text(block),
+                    })
+                elif kind in ("image", "image_url", "input_image"):
+                    url = _anthropic_image_url(block)
+                    if not url:
+                        raise ProviderError(400, "图片 source 无法识别（支持 base64 与 url 两种形态）")
+                    images.append({"type": "image_url", "image_url": {"url": url}})
+            messages.extend(tool_messages)
+            if tool_messages and not texts and not images:
+                continue  # 纯 tool_result 轮次由 tool 消息承载，不再补空 user 消息
+            if images:
+                parts = ([{"type": "text", "text": "".join(texts)}] if texts else []) + images
+                messages.append({"role": role, "content": parts})
+            else:
+                messages.append({"role": role, "content": "".join(texts)})
         out: dict[str, Any] = {
             "model": payload.get("model"),
             "messages": messages,
@@ -818,27 +944,52 @@ class QoderAdapter(ProviderAdapter):
             out["temperature"] = payload["temperature"]
         if payload.get("stop_sequences"):
             out["stop"] = payload["stop_sequences"]
+        tools = payload.get("tools")
+        if isinstance(tools, list) and tools:
+            mapped = []
+            for tool in tools:
+                if not isinstance(tool, dict) or not tool.get("name"):
+                    continue
+                schema = tool.get("input_schema") or tool.get("parameters")
+                mapped.append({
+                    "type": "function",
+                    "function": {
+                        "name": str(tool["name"]),
+                        "description": str(tool.get("description") or ""),
+                        "parameters": schema if isinstance(schema, dict) else {"type": "object", "properties": {}},
+                    },
+                })
+            if mapped:
+                out["tools"] = mapped
         return out
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         openai_payload = self._anthropic_to_openai({**payload, "stream": stream})
         region, model = self._region(str(openai_payload.get("model") or ""))
         product, model = self._product(model)
-        if product != "qoder":
+        if product not in ("qoder", "workbuddy"):
             raise ProviderError(501, f"Qoder 的 {product} 产品线不支持 Anthropic 协议")
-        reply, _ = await self._open_upstream(model, region, openai_payload)
+        if product == "workbuddy":
+            # workbuddy 是 OpenAI 直通：统一向上游要 SSE，聚合与渲染仍在本侧完成
+            reply = await self._workbuddy({**openai_payload, "stream": True}, region, model)
+        else:
+            reply, _ = await self._open_upstream(model, region, openai_payload)
         if stream:
             return _Reply(200, stream=self._render_anthropic(reply, model), content_type="text/event-stream")
         data = await self._collect(reply, model)
-        text = data["choices"][0]["message"].get("content") or ""
+        message = data["choices"][0]["message"]
+        text = message.get("content") or ""
+        tool_calls = [call for call in (message.get("tool_calls") or []) if isinstance(call, dict)]
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+        content.extend(_tool_call_to_tool_use(call) for call in tool_calls)
         usage = data.get("usage") or {}
         body = {
             "id": f"msg_{uuid.uuid4().hex[:20]}",
             "type": "message",
             "role": "assistant",
             "model": model,
-            "content": [{"type": "text", "text": text}] if text else [],
-            "stop_reason": "end_turn",
+            "content": content,
+            "stop_reason": "tool_use" if tool_calls else "end_turn",
             "stop_sequence": None,
             "usage": {
                 "input_tokens": int(usage.get("prompt_tokens") or 0),
@@ -861,11 +1012,12 @@ class QoderAdapter(ProviderAdapter):
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
         })
-        yield event("content_block_start", {
-            "type": "content_block_start", "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
         usage: dict[str, Any] = {}
+        # 块按需开启：Anthropic 要求 content block 严格串行，切类型先关上一块再开新块
+        block_index = -1
+        block_kind = ""
+        next_index = 0
+        tool_blocks: dict[int, int] = {}
         try:
             async for obj in self._chunks(reply):
                 if obj.get("usage"):
@@ -874,18 +1026,65 @@ class QoderAdapter(ProviderAdapter):
                     if not isinstance(choice, dict):
                         continue
                     delta = choice.get("delta") or {}
-                    text = delta.get("content") if isinstance(delta, dict) else None
+                    if not isinstance(delta, dict):
+                        continue
+                    text = delta.get("content")
                     if isinstance(text, str) and text:
+                        if block_kind != "text":
+                            if block_kind:
+                                yield event("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                            block_index = next_index
+                            next_index += 1
+                            block_kind = "text"
+                            yield event("content_block_start", {
+                                "type": "content_block_start", "index": block_index,
+                                "content_block": {"type": "text", "text": ""},
+                            })
                         yield event("content_block_delta", {
-                            "type": "content_block_delta", "index": 0,
+                            "type": "content_block_delta", "index": block_index,
                             "delta": {"type": "text_delta", "text": text},
                         })
+                    for call in delta.get("tool_calls") or []:
+                        if not isinstance(call, dict):
+                            continue
+                        idx = int(call.get("index") or 0)
+                        fn = call.get("function") or {}
+                        if idx not in tool_blocks:
+                            if block_kind:
+                                yield event("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                            block_index = next_index
+                            next_index += 1
+                            tool_blocks[idx] = block_index
+                            block_kind = "tool"
+                            yield event("content_block_start", {
+                                "type": "content_block_start", "index": block_index,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex[:16]}"),
+                                    "name": str(fn.get("name") or ""),
+                                    "input": {},
+                                },
+                            })
+                        arguments = fn.get("arguments")
+                        if arguments and block_index == tool_blocks[idx]:
+                            yield event("content_block_delta", {
+                                "type": "content_block_delta", "index": block_index,
+                                "delta": {"type": "input_json_delta", "partial_json": str(arguments)},
+                            })
         finally:
             await reply.aclose()
-        yield event("content_block_stop", {"type": "content_block_stop", "index": 0})
+        if block_kind:
+            yield event("content_block_stop", {"type": "content_block_stop", "index": block_index})
+        else:
+            # 全程无输出也保留一个空文本块，与既有空内容行为一致
+            yield event("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            })
+            yield event("content_block_stop", {"type": "content_block_stop", "index": 0})
         yield event("message_delta", {
             "type": "message_delta",
-            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "delta": {"stop_reason": "tool_use" if tool_blocks else "end_turn", "stop_sequence": None},
             "usage": {
                 "input_tokens": int(usage.get("prompt_tokens") or 0),
                 "output_tokens": int(usage.get("completion_tokens") or 0),
@@ -909,8 +1108,69 @@ class QoderAdapter(ProviderAdapter):
                 if isinstance(item, str):
                     messages.append({"role": "user", "content": item})
                 elif isinstance(item, dict):
+                    kind = item.get("type")
+                    if kind == "function_call":
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": str(item.get("call_id") or f"call_{uuid.uuid4().hex[:16]}"),
+                                "type": "function",
+                                "function": {
+                                    "name": str(item.get("name") or ""),
+                                    "arguments": str(item.get("arguments") or ""),
+                                },
+                            }],
+                        })
+                        continue
+                    if kind == "function_call_output":
+                        inner = item.get("output")
+                        if isinstance(inner, str):
+                            text = inner
+                        elif isinstance(inner, list):
+                            text = _content_text(inner)
+                        elif inner is None:
+                            text = ""
+                        else:
+                            text = json.dumps(inner, ensure_ascii=False)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": str(item.get("call_id") or ""),
+                            "content": text,
+                        })
+                        continue
                     role = str(item.get("role") or "user")
-                    messages.append({"role": role, "content": _content_text(item.get("content"))})
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        messages.append({"role": role, "content": content})
+                        continue
+                    if not isinstance(content, list):
+                        messages.append({"role": role, "content": _content_text(content)})
+                        continue
+                    texts: list[str] = []
+                    images: list[dict[str, Any]] = []
+                    for part in content:
+                        if isinstance(part, str):
+                            texts.append(part)
+                            continue
+                        if not isinstance(part, dict):
+                            continue
+                        ptype = part.get("type")
+                        if ptype in ("input_text", "output_text", "text"):
+                            texts.append(str(part.get("text") or ""))
+                        elif ptype in ("input_image", "image_url"):
+                            url = part.get("image_url")
+                            if isinstance(url, dict):
+                                url = url.get("url")
+                            url = str(url or "")
+                            if not url:
+                                raise ProviderError(400, "图片缺少 image_url，无法透传")
+                            images.append({"type": "image_url", "image_url": {"url": url}})
+                    if images:
+                        parts = ([{"type": "text", "text": "".join(texts)}] if texts else []) + images
+                        messages.append({"role": role, "content": parts})
+                    else:
+                        messages.append({"role": role, "content": "".join(texts)})
         out: dict[str, Any] = {
             "model": payload.get("model"),
             "messages": messages,
@@ -921,6 +1181,24 @@ class QoderAdapter(ProviderAdapter):
             out["max_tokens"] = limit
         if payload.get("temperature") is not None:
             out["temperature"] = payload["temperature"]
+        tools = payload.get("tools")
+        if isinstance(tools, list) and tools:
+            mapped = []
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                # Responses 的 function 工具是扁平形状（name/parameters 同级），OpenAI 聊天要嵌套
+                if "function" not in tool and tool.get("name") and tool.get("type") in (None, "function"):
+                    fn = {
+                        key: tool[key]
+                        for key in ("name", "description", "parameters", "strict")
+                        if tool.get(key) is not None
+                    }
+                    mapped.append({"type": "function", "function": fn})
+                else:
+                    mapped.append(tool)
+            if mapped:
+                out["tools"] = mapped
         return out
 
     async def responses(self, payload: dict[str, Any], *, stream: bool):
@@ -935,21 +1213,25 @@ class QoderAdapter(ProviderAdapter):
         if stream:
             return _Reply(200, stream=self._render_responses(reply, model), content_type="text/event-stream")
         data = await self._collect(reply, model)
-        text = data["choices"][0]["message"].get("content") or ""
+        message = data["choices"][0]["message"]
+        text = message.get("content") or ""
+        tool_calls = [call for call in (message.get("tool_calls") or []) if isinstance(call, dict)]
         usage = data.get("usage") or {}
+        output: list[dict[str, Any]] = [{
+            "id": f"msg_{uuid.uuid4().hex[:20]}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }]
+        output.extend(_tool_call_to_function_item(call) for call in tool_calls)
         body = {
             "id": f"resp_{uuid.uuid4().hex[:20]}",
             "object": "response",
             "created_at": int(time.time()),
             "status": "completed",
             "model": model,
-            "output": [{
-                "id": f"msg_{uuid.uuid4().hex[:20]}",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }],
+            "output": output,
             "usage": {
                 "input_tokens": int(usage.get("prompt_tokens") or 0),
                 "output_tokens": int(usage.get("completion_tokens") or 0),
@@ -978,6 +1260,9 @@ class QoderAdapter(ProviderAdapter):
         })
         usage: dict[str, Any] = {}
         full: list[str] = []
+        # function_call 输出项按 OpenAI tool_calls.index 建，与 message 项（index 0）并列
+        fc_items: dict[int, dict[str, Any]] = {}
+        fc_order: list[int] = []
         try:
             async for obj in self._chunks(reply):
                 if obj.get("usage"):
@@ -986,27 +1271,73 @@ class QoderAdapter(ProviderAdapter):
                     if not isinstance(choice, dict):
                         continue
                     delta = choice.get("delta") or {}
-                    text = delta.get("content") if isinstance(delta, dict) else None
+                    if not isinstance(delta, dict):
+                        continue
+                    text = delta.get("content")
                     if isinstance(text, str) and text:
                         full.append(text)
                         yield event("response.output_text.delta", {
                             "type": "response.output_text.delta", "item_id": item_id,
                             "output_index": 0, "content_index": 0, "delta": text,
                         })
+                    for call in delta.get("tool_calls") or []:
+                        if not isinstance(call, dict):
+                            continue
+                        idx = int(call.get("index") or 0)
+                        fn = call.get("function") or {}
+                        args = str(fn.get("arguments") or "")
+                        item = fc_items.get(idx)
+                        if item is None:
+                            item = {
+                                "id": f"fc_{uuid.uuid4().hex[:24]}",
+                                "type": "function_call",
+                                "call_id": str(call.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
+                                "name": str(fn.get("name") or ""),
+                                "arguments": "",
+                                "status": "in_progress",
+                            }
+                            fc_items[idx] = item
+                            fc_order.append(idx)
+                            yield event("response.output_item.added", {
+                                "type": "response.output_item.added",
+                                "output_index": fc_order.index(idx) + 1,
+                                "item": dict(item),
+                            })
+                        if args:
+                            item["arguments"] += args
+                            yield event("response.function_call_arguments.delta", {
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": item["id"],
+                                "output_index": fc_order.index(idx) + 1,
+                                "delta": args,
+                            })
         finally:
             await reply.aclose()
         yield event("response.output_text.done", {
             "type": "response.output_text.done", "item_id": item_id,
             "output_index": 0, "content_index": 0, "text": "".join(full),
         })
+        for position, idx in enumerate(fc_order, start=1):
+            item = fc_items[idx]
+            yield event("response.function_call_arguments.done", {
+                "type": "response.function_call_arguments.done",
+                "item_id": item["id"], "output_index": position,
+                "name": item["name"], "arguments": item["arguments"],
+            })
+            yield event("response.output_item.done", {
+                "type": "response.output_item.done", "output_index": position,
+                "item": {**item, "status": "completed"},
+            })
+        output: list[dict[str, Any]] = [{
+            "id": item_id, "type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "".join(full), "annotations": []}],
+        }]
+        output.extend({**fc_items[idx], "status": "completed"} for idx in fc_order)
         yield event("response.completed", {
             "type": "response.completed",
             "response": {
                 "id": resp_id, "object": "response", "status": "completed", "model": model,
-                "output": [{
-                    "id": item_id, "type": "message", "role": "assistant", "status": "completed",
-                    "content": [{"type": "output_text", "text": "".join(full), "annotations": []}],
-                }],
+                "output": output,
                 "usage": {
                     "input_tokens": int(usage.get("prompt_tokens") or 0),
                     "output_tokens": int(usage.get("completion_tokens") or 0),

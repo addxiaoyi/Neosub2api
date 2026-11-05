@@ -344,8 +344,12 @@ class ImportTests(_DbCase, unittest.TestCase):
             counted = conn.execute("SELECT COUNT(*) AS n FROM price_books").fetchone()["n"]
             leaked = conn.execute(
                 "SELECT COUNT(*) AS n FROM price_books WHERE model IN "
-                "('kimi-k2.7','hy3','hy3-preview','DeepSeek-V4-Flash-Official')"
+                "('kimi-k2.7','hy3-preview','DeepSeek-V4-Flash-Official')"
             ).fetchone()["n"]
+            hy3_classes = sorted(
+                row["token_class"]
+                for row in conn.execute("SELECT token_class FROM price_books WHERE model = 'hy3'")
+            )
         finally:
             conn.close()
         self.assertGreaterEqual(first["total"], 30, "种子价应有 30 条以上")
@@ -355,8 +359,12 @@ class ImportTests(_DbCase, unittest.TestCase):
         self.assertEqual(counted, first["total"])
         self.assertEqual(leaked, 0, "未定价模型不许编价入库")
         self.assertEqual(
+            hy3_classes, ["cache_read", "input", "output"],
+            "hy3 补了官方美元价，应入 input/output/cache_read 三行",
+        )
+        self.assertEqual(
             sorted(first["unpriced"]),
-            sorted(["kimi-k2.7", "hy3", "hy3-preview", "DeepSeek-V4-Flash-Official"]),
+            sorted(["kimi-k2.7", "hy3-preview", "DeepSeek-V4-Flash-Official"]),
         )
 
     def test_dry_run_writes_nothing(self):
@@ -557,3 +565,40 @@ def test_unpriced_model_request_is_flagged(anon: httpx.Client, billing_key: str,
     assert row["billed_micro"] == 0
     assert row["estimated"] == 1
     assert row["note"].startswith("unpriced:")
+
+
+@pytest.mark.usage
+def test_priced_hy3_request_is_billed_nonzero(
+    admin: httpx.Client, anon: httpx.Client, billing_key: str, db_path: str
+):
+    """hy3 已录官方美元价：真实导入 prices.yaml → 网关结算 → credit_status=billed 且金额非零。"""
+    imported = admin.post("/api/pricing/import")
+    assert imported.status_code == 200, f"{imported.status_code} {imported.text}"
+    assert "hy3" not in imported.json()["unpriced"], "hy3 补价后不该还挂在 unpriced"
+
+    before = _max_ledger_id(db_path)
+    r = anon.post(
+        "/v1/chat/completions",
+        headers=_gateway_headers(billing_key),
+        json={"model": "hy3", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 200, f"{r.status_code} {r.text}"
+    row = _wait_ledger(db_path, before)
+    assert row["model"] == "hy3"
+    assert row["note"] == "", f"三类 token 都有价，note 不该留标记：{row['note']}"
+    assert row["estimated"] == 0
+    # 假上游固定 usage 11/7：输入 0.132、输出 0.528 美元/百万 →
+    # (11×132000+500000)//1e6 = 1，(7×528000+500000)//1e6 = 4，合计 5 micro-USD
+    assert row["billed_micro"] == 5, f"应结算 5 micro-USD，实际 {row['billed_micro']}"
+
+    deadline = time.time() + 5.0
+    item: dict | None = None
+    while time.time() < deadline and item is None:
+        got = admin.get("/api/logs", params={"model": "hy3", "limit": 50})
+        assert got.status_code == 200, got.text
+        item = next((entry for entry in got.json()["items"] if entry["model"] == "hy3"), None)
+        if item is None:
+            time.sleep(0.2)
+    assert item is not None, "/api/logs 在 5s 内没出现 hy3 的记录"
+    assert item["credit_status"] == "billed", f"已配价模型应为 billed：{item['credit_status']}"
+    assert item["credit"] == row["billed_micro"] > 0

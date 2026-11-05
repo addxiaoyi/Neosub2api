@@ -16,14 +16,23 @@ from typing import Any
 
 import httpx
 
+from ..api_utils import exc_summary, safe_url
 from ..config import Settings
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
 from .stream_util import Reply
 
 CHAT_PATH = "/v1/chat/completions"
+RESPONSES_PATH = "/v1/responses"
 MODELS_PATH = "/v1/models"
+IMAGES_GENERATIONS_PATH = "/v1/images/generations"
+IMAGES_EDITS_PATH = "/v1/images/edits"
+IMAGES_TASKS_PATH = "/v1/images/tasks"
+VIDEOS_PATH = "/v1/videos"
+MEDIA_PATH = "/v1/media"
 DEFAULT_MODELS = ("muse-spark", "muse-image", "muse-video")
+# 上游建视频任务的默认等待是 600s，客户端超时必须更长（muse2api-protocols.md §5）
+VIDEO_TIMEOUT = 660.0
 
 RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
 REQUEST_ERRORS = {400, 413, 422}
@@ -46,10 +55,18 @@ class MuseAdapter(ProviderAdapter):
         license="本仓自研（MIT）",
         runtime="主仓内置（直连 Muse 官方 OpenAI 兼容入口）",
         status="implemented",
-        description="直连 Muse 官方 OpenAI 兼容 API，chat 流式逐帧直通，支持多 key 轮换。",
+        description="直连 Muse 官方 OpenAI 兼容 API，chat 与 responses 流式逐帧直通，"
+        "images / videos / media 透传，支持多 key 轮换。",
         default_base_url="https://api.meta.ai",
-        capabilities=stub_capabilities(chat=True, models=True),
-        protocols=("openai.chat.completions",),
+        capabilities=stub_capabilities(
+            chat=True,
+            models=True,
+            responses=True,
+            images=True,
+            videos=True,
+            media=True,
+        ),
+        protocols=("openai.chat.completions", "openai.responses"),
         readiness="needs_config",
         requires=(
             "官方 OpenAI 兼容入口的 api_key（网页 hatch_sess 账号没有 HTTP 对话端点）",
@@ -132,7 +149,14 @@ class MuseAdapter(ProviderAdapter):
             return raw.decode("utf-8", "ignore")
         return (reply.body or b"").decode("utf-8", "ignore")
 
-    async def _send(self, path: str, payload: dict[str, Any] | None, *, stream: bool):
+    async def _send(
+        self,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        stream: bool,
+        timeout: float | None = None,
+    ):
         keys = self._keys()
         if not keys:
             raise ProviderError(503, "Muse 未配置凭证（服务商页 api_key 或 options.extra_keys）")
@@ -140,7 +164,7 @@ class MuseAdapter(ProviderAdapter):
         last: ProviderError | None = None
         for attempt in range(attempts):
             token = keys[attempt % len(keys)]
-            client = self._client(token, stream=stream)
+            client = self._client(token, stream=stream, timeout=timeout)
             try:
                 reply = await client.forward(
                     path,
@@ -156,7 +180,7 @@ class MuseAdapter(ProviderAdapter):
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             except httpx.HTTPError as exc:
-                last = ProviderError(502, f"Muse 上游连接失败（{self.base_url}）：{exc!r}")
+                last = ProviderError(502, f"Muse 上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             if reply.status_code < 400:
@@ -198,6 +222,42 @@ class MuseAdapter(ProviderAdapter):
             body=reply.body,
             content_type=reply.headers.get("content-type", "application/json"),
         )
+
+    async def responses(self, payload: dict[str, Any], *, stream: bool):
+        # 官方入口确有 /v1/responses：promptfoo Meta Model API 文档列明 api.meta.ai/v1 同时提供 /responses、/chat/completions、/messages（2026-11-04 核实）
+        model = str(payload.get("model") or DEFAULT_MODELS[0])
+        body = {**payload, "model": model, "stream": stream}
+        reply = await self._send(RESPONSES_PATH, body, stream=stream)
+        if stream:
+            # 上游已是 OpenAI response.* 事件：逐 chunk 直通，不重排、不拼接
+            return Reply(
+                reply.status_code,
+                stream=reply.iter_bytes(),
+                content_type=reply.headers.get("content-type", "text/event-stream"),
+            )
+        return Reply(
+            reply.status_code,
+            body=reply.body,
+            content_type=reply.headers.get("content-type", "application/json"),
+        )
+
+    async def image_generation(self, payload: dict[str, Any], *, stream: bool):
+        return await self._send(IMAGES_GENERATIONS_PATH, payload, stream=stream)
+
+    async def image_edit(self, payload: dict[str, Any], *, stream: bool):
+        return await self._send(IMAGES_EDITS_PATH, payload, stream=stream)
+
+    async def image_task(self, task_id: str):
+        return await self._send(f"{IMAGES_TASKS_PATH}/{task_id}", None, stream=False)
+
+    async def video_create(self, payload: dict[str, Any], *, stream: bool):
+        return await self._send(VIDEOS_PATH, payload, stream=stream, timeout=VIDEO_TIMEOUT)
+
+    async def video_task(self, task_id: str):
+        return await self._send(f"{VIDEOS_PATH}/{task_id}", None, stream=False)
+
+    async def media(self, name: str):
+        return await self._send(f"{MEDIA_PATH}/{name}", None, stream=False)
 
     def declared_models(self) -> list[dict[str, Any]]:
         extra = self.options.get("models")

@@ -18,6 +18,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from ..api_utils import exc_summary, safe_url
 from ..config import Settings
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
@@ -247,7 +248,7 @@ class ZCodeAdapter(ProviderAdapter):
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             except httpx.HTTPError as exc:
-                last = ProviderError(502, f"ZCode 上游连接失败（{self.base_url}）：{exc!r}")
+                last = ProviderError(502, f"ZCode 上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             if reply.status_code < 400:

@@ -15,6 +15,19 @@ from .sub2api_store import QuotaStore, build_store
 
 MAX_ACCOUNT_ATTEMPTS = 3
 ACCOUNT_RETRY_STATUS = {429, 500, 502, 503, 504}
+# 上游根路径即对外协议端点，透传不改写（docs/providers/sub2api.md:14-19；
+# rerank/videos/usage 见上游源码副本 backend/internal/server/routes/gateway.go:80/108/72）
+_FORWARD_PATHS = {
+    "chat": "/v1/chat/completions",
+    "messages": "/v1/messages",
+    "responses": "/v1/responses",
+    "embeddings": "/v1/embeddings",
+    "images_generations": "/v1/images/generations",
+    "images_edits": "/v1/images/edits",
+    "count_tokens": "/v1/messages/count_tokens",
+    "rerank": "/v1/rerank",
+    "videos": "/v1/videos",
+}
 
 
 class _MeteredReply:
@@ -48,8 +61,19 @@ class Sub2ApiAdapter(ProviderAdapter):
         status="implemented",
         description="重写的订阅额度分发：分组、账号池、token 配额扣减，额度耗尽返回 429。",
         default_base_url="",
-        capabilities=stub_capabilities(chat=True, messages=True, models=True),
-        protocols=("openai.chat.completions", "anthropic.messages"),
+        capabilities=stub_capabilities(
+            chat=True,
+            messages=True,
+            models=True,
+            responses=True,
+            embeddings=True,
+            images=True,
+            count_tokens=True,
+            rerank=True,
+            videos=True,
+            usage=True,
+        ),
+        protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
         risk_level="warn",
         risk_note="上游 sub2api 为 LGPL-3.0，只能进程隔离；"
         "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
@@ -71,15 +95,22 @@ class Sub2ApiAdapter(ProviderAdapter):
     def _group_id(self) -> str:
         return str(self.options.get("group") or "default").strip() or "default"
 
-    def _client(self, account: dict[str, Any]) -> UnifiedApiClient:
+    def _client(
+        self,
+        account: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+        authenticated: bool = True,
+    ) -> UnifiedApiClient:
         base = str(account.get("upstream_base") or self.base_url or "").rstrip("/")
         if not base:
             raise ProviderError(503, f"sub2api 账号 {account['id']} 未配置 upstream_base，且 provider 未设 base_url")
         return UnifiedApiClient(
             base,
-            api_key=str(account.get("api_key") or self.api_key or ""),
+            api_key=str(account.get("api_key") or self.api_key or "") if authenticated else "",
             timeout=float(self.options.get("timeout") or 120.0),
             proxy=str(self.options.get("proxy") or ""),
+            extra_headers=headers,
         )
 
     def _charge(
@@ -128,7 +159,7 @@ class Sub2ApiAdapter(ProviderAdapter):
                 )
                 raise
             client = self._client(account)
-            path = "/v1/chat/completions" if capability == "chat" else "/v1/messages"
+            path = _FORWARD_PATHS[capability]
             replied = await client.forward(path, payload, stream=stream)
             if replied.status_code not in ACCOUNT_RETRY_STATUS:
                 break
@@ -154,6 +185,59 @@ class Sub2ApiAdapter(ProviderAdapter):
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         return await self._forward("messages", payload, stream=stream)
+
+    async def responses(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("responses", payload, stream=stream)
+
+    async def embeddings(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("embeddings", payload, stream=stream)
+
+    async def image_generation(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("images_generations", payload, stream=stream)
+
+    async def image_edit(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("images_edits", payload, stream=stream)
+
+    async def count_tokens(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("count_tokens", payload, stream=stream)
+
+    async def rerank(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("rerank", payload, stream=stream)
+
+    async def video_create(self, payload: dict[str, Any], *, stream: bool):
+        return await self._forward("videos", payload, stream=stream)
+
+    async def compat_forward(
+        self,
+        method: str,
+        path: str,
+        *,
+        raw: bytes = b"",
+        headers: dict[str, str] | None = None,
+        stream: bool = False,
+        authenticated: bool = True,
+    ):
+        """客户端兼容面原样透传（Claude Code / Antigravity / Sora）。
+
+        路径与方法逐条对应上游 backend/internal/server/routes/gateway.go:158-163、
+        :166-181、:184-196、:208-219；请求体、查询串与附加头不改写，响应状态码/流由路由层直出。
+        签名媒体走上游免鉴权路径，不发账号凭据。
+        """
+        group_id = self._group_id()
+        self._store.require_group(group_id)
+        account = self._pick(group_id)
+        forwarded = dict(headers or {})
+        accept = forwarded.get("accept") or ("text/event-stream" if stream else "application/json")
+        client = self._client(account, headers=forwarded, authenticated=authenticated)
+        return await client.forward(path, None, stream=stream, method=method, raw=raw, accept=accept)
+
+    async def usage(self, query: str = ""):
+        # 读聚合用量不产生 token 消耗，不走分组配额扣减；日期过滤原样透传
+        group_id = self._group_id()
+        self._store.require_group(group_id)
+        account = self._pick(group_id)
+        path = "/v1/usage" + (f"?{query}" if query else "")
+        return await self._client(account).forward(path, None, stream=False, method="GET", raw=b"")
 
     async def fetch_models(self) -> list[dict[str, Any]]:
         groups = self._store.list_groups()

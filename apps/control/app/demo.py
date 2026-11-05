@@ -268,11 +268,15 @@ class DemoAdapter(OpenAICompatAdapter):
             "页面上的日志/用量/金额都来自真实网关请求，但模型能力不代表任何真实厂商。"
         ),
         default_base_url="http://127.0.0.1:0",
-        capabilities=stub_capabilities(chat=True, models=True),
-        protocols=("openai.chat.completions",),
+        capabilities=stub_capabilities(chat=True, messages=True, models=True),
+        protocols=("openai.chat.completions", "anthropic.messages"),
         readiness="ready",
     )
     catalog_mode = "upstream"
+
+    async def messages(self, payload: dict[str, Any], *, stream: bool):
+        # 假上游 /v1/messages 流式与非流式都实现（scripts/fake_upstream.py），原样转发
+        return await self._client().forward("/v1/messages", payload, stream=stream)
 
 
 class DemoRuntime:
