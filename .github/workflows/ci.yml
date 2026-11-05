@@ -47,16 +47,15 @@ jobs:
           set -euo pipefail
           python -m pytest tests/ -v -rs | tee pytest.log
 
-      - name: 零 skip 断言（出现 SKIPPED 即失败）
+      # 不能整条禁 skip：test_hardening.py::test_db_file_is_owner_only 是 [env] 环境性跳过
+      # （Windows 无 POSIX 权限位，Linux 上真跑）。门禁改由脚本精确判定：
+      # 每条 SKIPPED 原因必须带 [env]，条数必须等于本平台声明数（Linux=0 / Windows=1）。
+      - name: 零 skip 门（只放行 [env] 环境性跳过，条数精确）
         working-directory: apps/control
         run: |
           set -euo pipefail
-          if grep -qE 'SKIPPED|[0-9]+ skipped' pytest.log; then
-            grep -E 'SKIPPED|[0-9]+ skipped' pytest.log | head -20 || true
-            echo "::error::零 skip 门失败：pytest.log 出现 SKIPPED，CI 不接受任何跳过（假绿）"
-            exit 1
-          fi
-          echo "零 skip 门通过：pytest.log 无 SKIPPED"
+          python ../../scripts/check_no_bad_skip.py --selftest
+          python ../../scripts/check_no_bad_skip.py pytest.log
 
       - name: Compile-check
         working-directory: apps/control

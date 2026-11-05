@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 import uuid
 
 import httpx
@@ -95,7 +96,10 @@ def test_weak_admin_password_is_warned(caplog) -> None:
     assert sum("偏弱" in record.getMessage() for record in caplog.records) == 2
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows 不支持 POSIX 权限位")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="[env] Windows 文件系统没有 POSIX 权限位，0600/0700 只能在不含 win32 的平台上验证",
+)
 def test_db_file_is_owner_only(tmp_path) -> None:
     """S-05：库文件（上游 key / session token）不应对同机其他用户可读。"""
     from app.db import Database
