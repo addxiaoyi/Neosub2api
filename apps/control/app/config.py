@@ -60,6 +60,32 @@ def clamp_health_interval(raw: Any) -> int:
     return max(HEALTH_INTERVAL_MIN, min(HEALTH_INTERVAL_MAX, value))
 
 
+BACKUP_REMOTE_INTERVAL_MIN = 3600
+BACKUP_REMOTE_INTERVAL_MAX = 604800
+BACKUP_REMOTE_INTERVAL_DEFAULT = 86400
+BACKUP_REMOTE_KEEP_MIN = 1
+BACKUP_REMOTE_KEEP_MAX = 90
+BACKUP_REMOTE_KEEP_DEFAULT = 14
+
+
+def clamp_backup_remote_interval(raw: Any) -> int:
+    """远端备份间隔：非法值回落 86400，越界钳到 1 小时..7 天。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return BACKUP_REMOTE_INTERVAL_DEFAULT
+    return max(BACKUP_REMOTE_INTERVAL_MIN, min(BACKUP_REMOTE_INTERVAL_MAX, value))
+
+
+def clamp_backup_remote_keep(raw: Any) -> int:
+    """远端保留份数：非法值回落 14，越界钳到 1..90。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return BACKUP_REMOTE_KEEP_DEFAULT
+    return max(BACKUP_REMOTE_KEEP_MIN, min(BACKUP_REMOTE_KEEP_MAX, value))
+
+
 def _admin_password(data_dir: Path) -> tuple[str, str]:
     """管理员口令：环境变量 > data/admin-password.txt > 首次随机生成并落盘。
 
@@ -153,6 +179,11 @@ class Settings:
     update_max_bytes: int = UPDATE_MAX_BYTES_DEFAULT
     # 裸机部署的服务名：Windows 用 sc、Linux 用 systemctl restart；留空 = 容器外不可自动更新
     service_name: str = ""
+    # 远端备份：默认全关 —— 不开开关、不配连接就不产生任何外呼
+    backup_remote_enabled: bool = False
+    backup_remote_interval_sec: int = BACKUP_REMOTE_INTERVAL_DEFAULT
+    backup_remote_auto_upload: bool = False
+    backup_remote_keep: int = BACKUP_REMOTE_KEEP_DEFAULT
 
 
 def load_settings() -> Settings:
@@ -228,6 +259,14 @@ def load_settings() -> Settings:
             1024, int(os.getenv("UNIFIED_UPDATE_MAX_BYTES", str(UPDATE_MAX_BYTES_DEFAULT)))
         ),
         service_name=os.getenv("UNIFIED_SERVICE_NAME", "").strip(),
+        backup_remote_enabled=_bool("UNIFIED_BACKUP_REMOTE_ENABLED", False),
+        backup_remote_interval_sec=clamp_backup_remote_interval(
+            os.getenv("UNIFIED_BACKUP_REMOTE_INTERVAL_SEC", str(BACKUP_REMOTE_INTERVAL_DEFAULT))
+        ),
+        backup_remote_auto_upload=_bool("UNIFIED_BACKUP_REMOTE_AUTO_UPLOAD", False),
+        backup_remote_keep=clamp_backup_remote_keep(
+            os.getenv("UNIFIED_BACKUP_REMOTE_KEEP", str(BACKUP_REMOTE_KEEP_DEFAULT))
+        ),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

@@ -30,6 +30,7 @@ from .routers import (
     accounts,
     auth,
     backup,
+    backup_remote,
     grok,
     health,
     keys,
@@ -51,6 +52,8 @@ from .routers import (
     v1,
 )
 from .security import hash_password, verify_password
+from .services.backup_remote import BackupRemoteService
+from .services.backup_schedule import BackupScheduleService
 from .services.grok_register import GrokRegisterService
 from .services.provider_health import ProviderHealthService
 from .services.update_boot import arm_confirm, reconcile
@@ -154,6 +157,9 @@ def create_app() -> FastAPI:
     grok_service = GrokRegisterService(settings)
     # 健康检测与 grok 队列同一机制：lifespan 里 start/stop 的 asyncio 周期任务
     health_service = ProviderHealthService(settings, db, registry)
+    # 远端备份同样走 lifespan 启停的周期任务；默认关闭时不产生任何外呼
+    backup_remote_service = BackupRemoteService(settings, db)
+    backup_schedule = BackupScheduleService(settings, db, backup_remote_service)
     # 演示模式：默认关闭；开启时先校验回环地址，再起进程内假上游并注册 demo provider
     demo_runtime = demo.install(settings, db, registry) if settings.demo_mode else None
     # 在线更新：feed 负责探测与验签，executor 负责换目录；默认关闭时两块都不发请求
@@ -166,12 +172,14 @@ def create_app() -> FastAPI:
             await demo_runtime.seed()
         grok_service.start()
         health_service.start()
+        backup_schedule.start()
         if boot.get("pending"):
             # 新版本已经在这个进程里跑起来了，自证健康后删 pending、收尾任务
             arm_confirm(settings)
         try:
             yield
         finally:
+            await backup_schedule.stop()
             await health_service.stop()
             await grok_service.stop()
             if demo_runtime is not None:
@@ -191,6 +199,8 @@ def create_app() -> FastAPI:
     app.state.registry = registry
     app.state.grok_service = grok_service
     app.state.health_service = health_service
+    app.state.backup_remote = backup_remote_service
+    app.state.backup_schedule = backup_schedule
     app.state.demo = demo_runtime
     app.state.update_boot = boot
     app.state.update_feed = update_feed
@@ -309,7 +319,7 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
     for module in (health, auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
-                   sub2api, pricing, quota, grok, update, system, backup, v1, logs, prompts, security_router, qoder_sessions):
+                   sub2api, pricing, quota, grok, update, system, backup, backup_remote, v1, logs, prompts, security_router, qoder_sessions):
         app.include_router(module.router)
 
     @app.get("/healthz")

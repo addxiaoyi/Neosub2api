@@ -179,6 +179,73 @@ class RestoreIn(BaseModel):
     confirm: bool = False
 
 
+def restore_archive(
+    request: Request,
+    username: str,
+    *,
+    name: str,
+    archive: Path,
+    action: str = "backup.restore",
+    target: str | None = None,
+    detail_extra: str = "",
+) -> dict[str, Any]:
+    """完整本地恢复链；调用方必须先持有 `_busy_guard`，这里不再抢锁。
+
+    本地恢复与远端恢复共用这一段：加载校验 → 归档自检 → 恢复前快照 →
+    在线换库 → 结构自检，失败从一致性快照回滚。
+    """
+    settings = request.app.state.settings
+    core = core_module()
+    directory = _backup_dir(settings)
+    started = time.perf_counter()
+    try:
+        db_file, manifest, staging = core.load_archive(archive)
+    except (
+        core.BackupError,
+        sqlite3.Error,
+        OSError,
+        ValueError,
+        KeyError,
+        zipfile.BadZipFile,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"备份不可用，已中止恢复：{exc}"
+        ) from exc
+
+    original = Path(settings.db_path)
+    rollback_dir = Path(tempfile.mkdtemp(prefix="u2a-rollback-"))
+    try:
+        _verify_archive(core, db_file, manifest)
+        pre_snapshot = _restore_pre_snapshot(core, settings, directory, username)
+        rollback_file = _snapshot_live(core, original, rollback_dir)
+        _apply_archive(core, db_file, original, rollback_file, manifest)
+        _reapply_runtime(request)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(rollback_dir, ignore_errors=True)
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    ledger = f"{detail_extra} " if detail_extra else ""
+    _audit(
+        request,
+        username,
+        action,
+        target or name,
+        f"{ledger}result=ok snapshot={pre_snapshot.name} duration={duration_ms}ms",
+    )
+    return {
+        "ok": True,
+        "restored": name,
+        "path": mask_text(str(original)),
+        "pre_restore_backup": pre_snapshot.name,
+        "pre_restore_path": mask_text(str(pre_snapshot)),
+        "duration_ms": duration_ms,
+        "selfcheck_ok": True,
+        "rows_after": manifest.get("tables", {}),
+    }
+
+
 @router.post("/restore")
 def restore_backup(request: Request, payload: RestoreIn, user=Depends(admin_user)):
     settings = request.app.state.settings
@@ -192,54 +259,13 @@ def restore_backup(request: Request, payload: RestoreIn, user=Depends(admin_user
     if not archive.is_file():
         raise HTTPException(status_code=400, detail=f"备份不存在：{payload.name}")
 
-    started = time.perf_counter()
     with _busy_guard(directory, f"restore:{payload.name}"):
-        try:
-            db_file, manifest, staging = core.load_archive(archive)
-        except (
-            core.BackupError,
-            sqlite3.Error,
-            OSError,
-            ValueError,
-            KeyError,
-            zipfile.BadZipFile,
-            json.JSONDecodeError,
-        ) as exc:
-            raise HTTPException(
-                status_code=400, detail=f"备份不可用，已中止恢复：{exc}"
-            ) from exc
-
-        original = Path(settings.db_path)
-        rollback_dir = Path(tempfile.mkdtemp(prefix="u2a-rollback-"))
-        try:
-            _verify_archive(core, db_file, manifest)
-            pre_snapshot = _restore_pre_snapshot(core, settings, directory, user["username"])
-            rollback_file = _snapshot_live(core, original, rollback_dir)
-            _apply_archive(core, db_file, original, rollback_file, manifest)
-            _reapply_runtime(request)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-            shutil.rmtree(rollback_dir, ignore_errors=True)
-
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        _audit(
+        return restore_archive(
             request,
             user["username"],
-            "backup.restore",
-            payload.name,
-            f"snapshot={pre_snapshot.name} duration={duration_ms}ms",
+            name=payload.name,
+            archive=archive,
         )
-
-    return {
-        "ok": True,
-        "restored": payload.name,
-        "path": mask_text(str(original)),
-        "pre_restore_backup": pre_snapshot.name,
-        "pre_restore_path": mask_text(str(pre_snapshot)),
-        "duration_ms": duration_ms,
-        "selfcheck_ok": True,
-        "rows_after": manifest.get("tables", {}),
-    }
 
 
 def _reapply_runtime(request: Request) -> None:
