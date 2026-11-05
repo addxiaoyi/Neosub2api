@@ -52,6 +52,16 @@ def _port_free(port: int) -> bool:
     return True
 
 
+def _free_port() -> int:
+    """绑定 0 端口，由内核分配一个此刻没被占用的端口（固定端口被占不该让用例静默消失）。"""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
 def _wait_up(url: str, timeout: float = 15.0, proc: subprocess.Popen | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:

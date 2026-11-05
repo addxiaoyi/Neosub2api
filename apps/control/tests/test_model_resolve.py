@@ -22,12 +22,11 @@ from app.model_resolve import (
     ModelResolutionError,
     resolve_model,
 )
-from tests.conftest import CONTROL, FAKE_PORT, PY, _port_free, _wait_up
+from tests.conftest import CONTROL, FAKE_PORT, PY, _free_port, _wait_up
 
 pytestmark = pytest.mark.gateway
 
 CATALOG_MODEL = "fake-chat-1"
-FALLBACK_PORT = int(os.getenv("UNIFIED_TEST_FALLBACK_PORT", "8062"))
 
 
 @pytest.fixture(scope="module")
@@ -404,8 +403,7 @@ async def test_alias_cycle_does_not_disturb_hint_order(stub_db: Database) -> Non
 
 @pytest.fixture(scope="module")
 def fallback_gateway(_bring_up_services, tmp_path_factory):
-    if not _port_free(FALLBACK_PORT):
-        pytest.skip(f"端口 {FALLBACK_PORT} 已被占用")
+    port = _free_port()
     data_dir = tmp_path_factory.mktemp("fallback-data")
     env = os.environ.copy()
     env.update(
@@ -424,16 +422,16 @@ def fallback_gateway(_bring_up_services, tmp_path_factory):
     )
     proc = subprocess.Popen(
         [str(PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
-         "--port", str(FALLBACK_PORT), "--log-level", "warning"],
+         "--port", str(port), "--log-level", "warning"],
         cwd=str(CONTROL),
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     try:
-        if not _wait_up(f"http://127.0.0.1:{FALLBACK_PORT}/healthz"):
-            pytest.skip("兜底实例启动失败")
-        yield f"http://127.0.0.1:{FALLBACK_PORT}"
+        if not _wait_up(f"http://127.0.0.1:{port}/healthz"):
+            pytest.fail(f"兜底实例在动态端口 {port} 上启动失败（端口冲突已排除）")
+        yield f"http://127.0.0.1:{port}"
     finally:
         proc.terminate()
         try:

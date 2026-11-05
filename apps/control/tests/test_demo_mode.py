@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -18,24 +17,11 @@ import pytest
 
 from app import demo
 from app.billing import period_bounds
+from tests.conftest import _free_port
 
 CONTROL_DIR = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
-BASE_PORT = int(os.getenv("UNIFIED_TEST_CTRL_PORT", "8060"))
-DEMO_PORT = BASE_PORT + 20
-OFF_PORT = DEMO_PORT + 1
-CLEAR_PORT = DEMO_PORT + 2
 ADMIN_PASS = "demo-test-pass"
-
-
-def _port_free(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError:
-            return False
-    return True
 
 
 def _env(data_dir: Path, *, demo_on: bool, port: int) -> dict[str, str]:
@@ -134,19 +120,15 @@ def _db_counts(data_dir: Path) -> dict[str, int]:
 
 @pytest.fixture(scope="module")
 def demo_site(tmp_path_factory):
-    if not _port_free(DEMO_PORT):
-        pytest.skip(f"端口 {DEMO_PORT} 被占用，跳过演示模式用例")
     data_dir = tmp_path_factory.mktemp("demo-on")
-    with _control(data_dir, demo_on=True, port=DEMO_PORT) as ctx:
+    with _control(data_dir, demo_on=True, port=_free_port()) as ctx:
         yield ctx
 
 
 @pytest.fixture(scope="module")
 def plain_site(tmp_path_factory):
-    if not _port_free(OFF_PORT):
-        pytest.skip(f"端口 {OFF_PORT} 被占用，跳过关闭模式用例")
     data_dir = tmp_path_factory.mktemp("demo-off")
-    with _control(data_dir, demo_on=False, port=OFF_PORT) as ctx:
+    with _control(data_dir, demo_on=False, port=_free_port()) as ctx:
         yield ctx
 
 
@@ -326,10 +308,9 @@ def test_plain_mode_has_no_demo_traces(plain_site):
 
 
 def test_clear_removes_only_demo_rows(tmp_path_factory):
-    if not _port_free(CLEAR_PORT):
-        pytest.skip(f"端口 {CLEAR_PORT} 被占用，跳过清除用例")
     data_dir = tmp_path_factory.mktemp("demo-clear")
-    with _control(data_dir, demo_on=True, port=CLEAR_PORT):
+    port = _free_port()
+    with _control(data_dir, demo_on=True, port=port):
         pass
 
     before = _db_counts(data_dir)
@@ -347,7 +328,7 @@ def test_clear_removes_only_demo_rows(tmp_path_factory):
     result = subprocess.run(
         [PYTHON, "-c", clear_code],
         cwd=str(CONTROL_DIR),
-        env=_env(data_dir, demo_on=False, port=CLEAR_PORT),
+        env=_env(data_dir, demo_on=False, port=port),
         capture_output=True,
         text=True,
         timeout=60,
