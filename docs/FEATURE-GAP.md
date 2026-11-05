@@ -4,13 +4,16 @@
 
 ## 1. 判定口径
 
-只认代码与测试的实际状态，分三档：
+只认代码与测试的实际状态，分三档（已实现 / 半截 / 未实现），另设三个状态档（待决策 / 待复核 / 不做）。后三档都不是已验收的缺口，也不能互相替代：
 
 | 档位 | 判定标准 |
 | --- | --- |
 | 已实现 | 控制面路由、运行时逻辑、前端入口、测试覆盖四件齐全。测试可以是独立用例，也可以是稳定夹具覆盖；只在本机未入库的，必须在 §5 标注。只有路由没有前端入口的，不算已实现。 |
-| 半截 | 主链路能用，但缺至少一个能指出来的具体点：没有前端入口、没有测试、默认关闭、只做代理不透传、只在某一个 provider 生效。 |
+| 半截 | 主链路能用，但缺至少一个能指出来的具体点，且必须在阻塞原因里写清缺什么：没有前端入口、没有测试、默认关闭、只做代理不透传、只在某一个 provider 生效，或只做了写入方向而缺必需的反向环节（例如只有上传、没有恢复）。半截不得按已实现验收。 |
 | 未实现 | 仓内没有对应路由或运行时逻辑，或者只有文档规划。 |
+| 待决策 | 缺项已经具体到某个人拍某个头，拍板前没法开工。阻塞原因必须写「谁点头、点什么头」，只写「需产品决策」不合格。拍板前不排期。 |
+| 待复核 | 范围或验收标准还不能由现有文档与代码判定，需要先复核。不得据此判已实现，也不得按已实现验收；复核后必须落到其余五档之一。 |
+| 不做（非缺口） | 有意不做，不排期：目标能力已有等价承载，或属全局设计边界的明确排除项。归到这一档的条目不得进缺口清单，也不得按「未实现」排期。 |
 
 证据一律写「文件:行」或「文件:函数名」，均指当前工作区。指不出来的写「未核实」，不猜行号、不引用旧盘点结论。
 
@@ -20,34 +23,37 @@
 
 | 编号 | 功能 | 对标仓库 | 现状档位 | 证据位置（当前工作区） | 阻塞原因 |
 | --- | --- | --- | --- | --- | --- |
-| E-01 | 账号批量动作（禁用/启用/删除/重启/签到，逐条结果） | codebuddy2api、sub2api | 已实现 | `apps/control/app/routers/accounts.py:640`（`POST /accounts/batch`）、`:573`（`/restart`）、`:355`（`/checkin-all`）；`apps/control/tests/test_backend_gaps.py:97,127,151`；`apps/web/app/(main)/accounts/page.tsx:1267-1288`（批量操作条） | 无（代码与测试均未入库） |
-| E-02 | 账号导入 + 保存前试连 | codebuddy2api | 已实现 | `accounts.py:368`（`/import`）、`:432`（`/import/probe`）；`tests/test_accounts_import.py:73-246`；`apps/web/components/common/accounts/ImportAccountDialog.tsx` | 无（未入库） |
-| E-03 | 访问令牌批量动作 | 控制面自建（各上游共用） | 已实现 | `apps/control/app/routers/keys.py:205`（`POST /batch`）；`tests/test_keys_batch.py:55-198`（含超限 400、不泄密、单行审计）；`apps/web/app/(main)/keys/page.tsx:210`（批量操作条） | 测试未入库 |
-| E-04 | 请求日志导出 CSV | sub2api（系统日志）、控制面自建 | 已实现 | `apps/control/app/routers/logs.py:304`（`GET /logs/export`）；`tests/test_logs_export.py:104-197`（同筛选、6 类凭据脱敏、公式注入中和、超限报错不截断）；`apps/web/app/(main)/logs/page.tsx:253` | 前端整页未入库 |
-| E-05 | 模型映射导入 / 导出 / 回滚 | codebuddy2api（模型映射页） | 已实现 | `apps/control/app/routers/settings.py:866,887,1085`；`tests/test_model_map_transfer.py:40-136`；`apps/web/app/(main)/settings/page.tsx:1848` | 组件与测试未入库 |
-| E-06 | Antigravity / Sora / Claude Code 客户端兼容面 | sub2api | 已实现 | `apps/control/app/routers/v1.py:890-984`；`tests/test_v1_client_compat.py:224-500` | 未入库；只对声明了 compat surface 的 provider 生效，其余 501（有意） |
-| E-07 | TOTP 两步验证 + 恢复码 | 控制面自建 | 已实现 | `apps/control/app/routers/auth.py:321-462`（status/setup/enable/disable/verify）；`apps/control/app/totp.py`；`apps/web/components/common/layout/ManagementBar.tsx:643`；`tests/test_user_account_system.py:163-253` | `totp.py` 未入库 |
-| E-08 | 多用户与角色体系 | 控制面自建 | 已实现 | `settings.py:1430-1502`（users CRUD）；`auth.py` 注册开关 / 登录冷却 / 会话轮换；`tests/test_user_account_system.py:60-278` | 测试未入库 |
-| E-09 | 跨 provider 故障转移 | 控制面自建（多上游共性） | 已实现 | `apps/control/app/model_resolve.py:388`（`resolve_targets`）；`v1.py:426-427`（尝试序列与上限）；`settings.py:532,537`（`/api/settings/failover` 读写，带 env 锁定提示）；`apps/web/app/(main)/settings/RuntimeConfigSection.tsx:66`（开关/上限 UI 与来源提示）；`tests/test_failover.py:340-543` | 未入库 |
+| E-01 | 账号批量动作（禁用/启用/删除/重启/签到，逐条结果） | codebuddy2api、sub2api | 已实现 | `apps/control/app/routers/accounts.py:640`（`POST /accounts/batch`）、`:573`（`/restart`）、`:355`（`/checkin-all`）；`apps/control/tests/test_backend_gaps.py:97,127,151`；`apps/web/app/(main)/accounts/page.tsx:1267-1288`（批量操作条） | 无（后端文件首入库 b5772fb、批量操作在 81bb7d8、测试 ca7959b、前端 adf22d8 入库） |
+| E-02 | 账号导入 + 保存前试连 | codebuddy2api | 已实现 | `accounts.py:368`（`/import`）、`:432`（`/import/probe`）；`tests/test_accounts_import.py:73-246`；`apps/web/components/common/accounts/ImportAccountDialog.tsx` | 无（已在 81bb7d8 入库，前端组件在 adf22d8 入库） |
+| E-03 | 访问令牌批量动作 | 控制面自建（各上游共用） | 已实现 | `apps/control/app/routers/keys.py:205`（`POST /batch`）；`tests/test_keys_batch.py:55-198`（含超限 400、不泄密、单行审计）；`apps/web/app/(main)/keys/page.tsx:210`（批量操作条） | 无（后端批量与测试在 8b2d54d 入库、前端在 adf22d8 入库） |
+| E-04 | 请求日志导出 CSV | sub2api（系统日志）、控制面自建 | 已实现 | `apps/control/app/routers/logs.py:304`（`GET /logs/export`）；`tests/test_logs_export.py:104-197`（同筛选、6 类凭据脱敏、公式注入中和、超限报错不截断）；`apps/web/app/(main)/logs/page.tsx:253` | 无（导出路由与测试在 82f03a2 入库、文件首入库 dc19c82，前端 eacc574 入库） |
+| E-05 | 模型映射导入 / 导出 / 回滚 | codebuddy2api（模型映射页） | 已实现 | `apps/control/app/routers/settings.py:866,887,1085`；`tests/test_model_map_transfer.py:40-136`；`apps/web/app/(main)/settings/page.tsx:1848` | 无（已在 65e88b9 入库，组件在 dafb3c4 入库） |
+| E-06 | Antigravity / Sora / Claude Code 客户端兼容面 | sub2api | 已实现 | `apps/control/app/routers/v1.py:890-984`；`tests/test_v1_client_compat.py:224-500` | 无（已在 65e88b9 入库）；只对声明了 compat surface 的 provider 生效，其余 501（有意） |
+| E-07 | TOTP 两步验证 + 恢复码 | 控制面自建 | 已实现 | `apps/control/app/routers/auth.py:321-462`（status/setup/enable/disable/verify）；`apps/control/app/totp.py`；`apps/web/components/common/layout/ManagementBar.tsx:643`；`tests/test_user_account_system.py:163-253` | 无（已在 8b2d54d 入库） |
+| E-08 | 多用户与角色体系 | 控制面自建 | 已实现 | `settings.py:1430-1502`（users CRUD）；`auth.py` 注册开关 / 登录冷却 / 会话轮换；`tests/test_user_account_system.py:60-278` | 无（users CRUD 基线在 b5772fb，账号体系改动与测试在 8b2d54d 入库） |
+| E-09 | 跨 provider 故障转移 | 控制面自建（多上游共性） | 已实现 | `apps/control/app/model_resolve.py:388`（`resolve_targets`）；`v1.py:426-427`（尝试序列与上限）；`settings.py:532,537`（`/api/settings/failover` 读写，带 env 锁定提示）；`apps/web/app/(main)/settings/RuntimeConfigSection.tsx:66`（开关/上限 UI 与来源提示）；`tests/test_failover.py:340-543` | 无（已在 65e88b9 入库；运行参数前端在 7f4d9a1 入库） |
 | E-10 | sub2api 订阅账号池管理面（分组/账号/重置/流水） | sub2api | 已实现 | `apps/control/app/routers/sub2api.py:57-150`（groups 读写删、accounts 读写删、reset、ledger）；`apps/web/app/(main)/quota/page.tsx:57`（三个 tab）；`quota/policies/page.tsx`；测试由 `tests/test_capability_truth.py:364`、`tests/test_billing_responses_usage.py:272` 当夹具调用（无独立用例） | 无 |
 | E-11 | 指标与告警（Prometheus 指标、配额/连败/usage_missing 告警） | sub2api Ops（观测部分） | 已实现 | `apps/control/app/routers/health.py:410`（`GET /metrics`，`:430` `GET /metrics/json`）；`apps/control/app/alerting.py:192`（`evaluate_alerts`，两处指标读取时都会触发）；`quota.py:367`（`GET /alerts`） | 告警在读取时评估，无独立调度（与 P-03 的缺口不重复计） |
-| E-12 | 备份 / 恢复（本地归档） | 控制面自建 | 已实现（工作区未入库） | `apps/control/app/routers/backup.py:164,191,227`；`apps/web/components/common/settings/BackupPanel.tsx`；`settings/page.tsx:2018`；`tests/test_backup_api.py:70-467` | 全部未入库（API/面板/测试为 `??`，`settings/page.tsx` 为未提交修改）；远端与定时见 U-03 |
+| E-12 | 备份 / 恢复（本地归档） | 控制面自建 | 已实现 | `apps/control/app/routers/backup.py:164,191,227`；`apps/web/components/common/settings/BackupPanel.tsx`；`settings/page.tsx:2018`；`tests/test_backup_api.py:70-467` | 无（API / 测试 / 冒烟脚本已在 98d7b31 入库，面板在 dafb3c4 入库）；远端与定时见 U-03 |
 | E-13 | qoder 会话搬运 | qoder-trae-workbuddy-switch | 已实现（受上游路径语义限制） | `apps/control/app/routers/qoder_sessions.py:38`（导出）、`:43`（导入），均为整包透传；`apps/web/components/common/settings/QoderSessionsPanel.tsx:21-204`；`ProvidersSection.tsx:812`；`tests/test_qoder_sessions_proxy.py:37,49` | 上游 `SessionCopy` 只认绝对路径，包留在 sidecar 主机，浏览器既不能上传也不能下载——这是上游协议边界，不是本仓漏做 |
 | P-01 | provider 定时健康检测 | sub2api（账号健康）、codebuddy2api | 半截 | 调度器 `apps/control/app/services/provider_health.py:46-150`；API `providers.py:30,43`；`main.py:148-157` 启动/停止；判定内核 `services/provider_probe.py`；测试 `tests/test_provider_health.py:123-235` | 前端无入口；默认关闭（`config.py:126` `health_check_enabled: bool = False`，测试 `:218` 也锁定这个默认） |
-| P-02 | `/quota/policies` 页面 | sub2api | 半截（基线未登记） | `apps/control/app/routers/quota.py:174-285`；`apps/web/app/(main)/quota/policies/page.tsx`；`FRONTEND-BASELINE.md:67` 页面清单只登记 `/quota` | 需基线登记或产品确认，不是代码缺口 |
-| P-03 | sub2api Ops 排障面 | sub2api | 半截 | 已有等价观测：`health.py:410`、`alerting.py`、`logs.py:260`；缺的能力在 `routers/` 全目录无对应路由（本轮 grep 无命中） | 需产品决策是否自建排障台；上游 LGPL 隔离（`upstreams/upstreams.yaml:87,94`） |
-| U-01 | 在线更新执行 | codebuddy2api（系统更新页）、sub2api | 未实现 | `apps/control/app/routers/system.py:1-6`（模块说明）+ `:87-89`（`update_summary` 恒返回 `available=False`）+ `:147-160`（`/update-status` 固定 `running=False`、`updater_found=False`）；`UpdatePanel.tsx:61-62` 的 `has_update` 分支是死代码 | 无分发通道与签名校验方案，需设计决策 |
-| U-02 | 未定价模型 token 估算计费 | gptGrok2api、muse2api | 未实现（有意不做） | `apps/control/app/billing.py:320-323`（只打 `usage_zero` / `usage_missing` 标，不估 token）；`docs/muse-usage-policy.md:11-12`；`docs/m3-billing-plan.md:161` 的 `billing.charge_on_missing_usage` 在代码中不存在 | 需财务决策并先补价格行；估算误差写的是「可见文本 ±15–30%」（`muse-usage-policy.md:43`） |
-| U-03 | 备份远端目标（S3 等）与定时计划 | 控制面自建 | 未实现（有意不做） | `docs/BACKUP.md:174`（「不做加密、不上传远端」）；`backup.py` 无远端参数与调度 | 需对象存储凭据、失败重试与保留策略设计 |
-| U-04 | `/tasks` 页面恢复 | sub2api / codebuddy2api（任务页） | 未实现（有意删除） | 仓库无 `tasks` 路由（`apps/web/app` 下无该目录）；`FRONTEND-BASELINE.md:70` 记录整条链路已删 | 与基线删页决定冲突，需产品决策 |
-| U-05 | gptGrok 图库 / 提示词 | gptGrok2api | 未实现（有意不做） | `docs/design/frontend-integration-plan.md:99`（「图片图库/文件存储 不进界面」）；控制面无对应路由 | 需产品决策是否自建；存储与权限是新增面 |
-| U-06 | sub2api iframe 嵌入 | sub2api | 未实现（有意不做） | 全仓无 `iframe`（本轮 grep 无命中）；`PROVIDERS.md:257` 取舍 #10「只做协议层，不做各家上游 Web UI」 | 与全局设计边界冲突；LGPL 隔离 |
+| P-02 | `/quota/policies` 页面 | sub2api | 已实现 | 策略 CRUD `apps/control/app/routers/quota.py:193,244,308`（阈值 1-100 校验 `:236-241`），周期用量与告警列表 `:356,390`，告警确认 / 静默 / 关闭 / 重开与审计 `:473-566`；页面 `apps/web/app/(main)/quota/policies/page.tsx:373-384`（页头）、`:512`（删除确认）、`:771-830`（告警处置）；入口 `apps/web/app/(main)/quota/page.tsx:78-82,401`；基线登记 `FRONTEND-BASELINE.md:74`；测试 `tests/test_quota.py:526,559-600`、`tests/test_ops_triage.py:192-229` | 2026-11-05 基线登记完成，阻塞原因解除 |
+| P-03 | sub2api Ops 排障面 | sub2api | 半截（2 真缺 + 2 待复核） | 已于 2026-11-05 复核实现：告警确认 / 静默 / 关闭 / 重开与审计 `quota.py:473-566`，失败请求标记已解决 / 取消 `logs.py:398-449`；真缺①系统日志采集：仓内只有请求日志（`logs.py:270,314`），`system.py` 仅 `:77` changelog、`:95` versions，无进程 / 上游日志路由；真缺②实时流量：无推送与聚合视图，只有指标快照（`health.py:419,439`），现有页面可用轮询承担一部分；待复核③运行时状态：`health.py:117,122` 仅存活 / 就绪，`settings.py:425` 是运行时配置，缺「并发 / 在途 / 调度器」看哪些指标的定义；待复核④告警规则管理面：规则参数只在 `config.py:132-140` 与 env 可配，无 DB CRUD（配额阈值走 `/quota/policies`） | 系统日志与实时流量需运维负责人拍板采集面、保留期与隐私边界；运行时状态与规则管理面需产品确认验收口径。上游 LGPL 隔离仍成立（`upstreams/upstreams.yaml:87,94`） |
+| U-01 | 在线更新执行 | codebuddy2api（系统更新页）、sub2api | 已实现 | `apps/control/app/routers/update.py:57`（`/update-status`）、`:62`（`/update/check`）、`:75`（`/update/apply`，`:83-91` 要求版本逐字一致且 `available`/`can_apply` 双闸）、`:106`（`/update/rollback`）；`services/update_feed.py:78-120`（能力探测与 `can_apply`）、`update_executor.py:4-5`（换码与重启路径）、`update_signing.py`、`update_manifest.py`、`update_boot.py`；前端 `apps/web/components/common/settings/UpdatePanel.tsx:42`（挂在 `apps/web/app/(main)/settings/page.tsx:2016`）；测试 `tests/test_update_manifest.py:68-162`、`tests/test_update_feed.py:125-193`、`tests/test_update_executor.py:117-295` | 无缺口，两个前置条件：①默认 `UNIFIED_UPDATE_ENABLED=false`（`config.py:149,222`），需运营显式开启；②需自备发布源 `UNIFIED_UPDATE_MANIFEST_URL` 与签名密钥（`config.py:150-151,224-225`）。容器部署还要求代码目录绑挂并配 `restart: unless-stopped`，否则探测直接 `can_apply=false`（`update_feed.py:101-108`）。实现已在 8253f2c、9349160 入库 |
+| U-02 | 未定价模型 token 估算计费 | gptGrok2api、muse2api | 待决策 | `apps/control/app/billing.py:320-323`（只打 `usage_zero` / `usage_missing` 标，不估 token）；`docs/muse-usage-policy.md:11-12`；`docs/m3-billing-plan.md:161` 的 `billing.charge_on_missing_usage` 在代码中不存在；估算精度口径 `docs/muse-usage-policy.md:43`（可见文本 ±15–30%） | 需财务负责人点头：估算出的 token 是否计入额度与账单（即「猜出来的用量要不要收钱」），误差是写进账单还是只做提示。点头前还要先给 muse 别名补价格行，否则估出 token 仍套不到价 |
+| U-03 | 备份远端目标（S3 等）与定时计划 | 控制面自建 | 已实现 | 端点 `apps/control/app/routers/backup_remote.py:88,94,114,140,166,222`（配置读取 / 保存、远端列表、手动上传、远端恢复、删除）；下载与解密 `services/backup_remote.py:397`（`download_archive`，先验 `.enc.sha256` 再解密）、`:475`（`commit_download`）、`:489`（`delete_remote`，连 sidecar 一起删）、`:527`（`upload`）、`:716`（按 keep 轮转）；加密 `services/backup_crypto.py`（AES-256-GCM，`crypto_backend` 报 lib/stdlib）；恢复复用 `routers/backup.py:182` 抽出的 `restore_archive()`，本地 `/restore` 在 `:250` 持锁后调用；定时 `services/backup_schedule.py:31-43,64-102`；S3 客户端 `services/s3_client.py`；四个开关 `config.py:183-186,262-269`；lifespan 启停 `main.py:161-162,175,182`；前端 `apps/web/components/common/settings/BackupRemoteSection.tsx`（由 `BackupPanel.tsx` 渲染）；测试 `tests/test_backup_remote.py`、`tests/test_backup_schedule.py`、`tests/test_s3_sigv4.py` | 无缺口；默认 `UNIFIED_BACKUP_REMOTE_ENABLED=false`、开关关闭时零外呼，凭据只从 `UNIFIED_BACKUP_S3_*` 环境变量读，需运营显式开启并配齐。已入库：加密后端 4d7e54a、S3 客户端 9ebff30、路由与调度 500e671、前端面板 622fa9f；分段回放见 §3.3 末块与 §4.11 末块 |
+| U-04 | `/tasks` 页面恢复 | sub2api / codebuddy2api（任务页） | 待决策 | 仓库无 `tasks` 路由（`apps/web/app` 下无该目录）；`FRONTEND-BASELINE.md:70` 记录整条链路已删 | 需产品负责人点头：是恢复已删的 `/tasks` 页面（等于推翻基线删页决定，并新增页面，与 §3「不新增页面」冲突），还是确认维持删除。点头前两件事都算未定 |
+| U-05 | gptGrok 图库 / 提示词 | gptGrok2api | 待决策 | `docs/design/frontend-integration-plan.md:99`（「图片图库/文件存储 不进界面」）；控制面无对应路由 | 需产品负责人点头：是自建图库与提示词管理面（等于新增存储、权限与页面三块），还是维持现有「不进界面」口径。这是范围取舍，不是技术阻塞 |
+| U-06 | sub2api iframe 嵌入 | sub2api | 不做（已合并承载，非缺口） | 配额域已 1:1 落在 `/quota` 三个 tab（`apps/web/app/(main)/quota/page.tsx:57,407-423`，页头入口 `:78-82,401`）与 `/quota/policies`（`apps/control/app/routers/quota.py:193,244,308` 策略 CRUD、`:356,390,473-566` 状态与告警处置审计；页面 `apps/web/app/(main)/quota/policies/page.tsx:373-384,512`）；后端只有分组 / 账号 / 流水三类路由（`apps/control/app/routers/sub2api.py:57-150`；表结构 `apps/control/app/adapters/sub2api_store.py:3`）；上游其余栏目属 `docs/PROVIDERS.md:249` 取舍 #2 的排除项，`routers/` 无对应路由；本仓安全头禁止自身被嵌入（`apps/control/app/main.py:213,217`、`deploy/nginx.conf:254`） | 无（iframe 方案已由等价页面替代；上游栏目清单是文档级证据 `docs/design/frontend-integration-plan.md:181`，仓内无上游前端源码可核对） |
 
 ## 3. 逐项说明
 
 ### 3.1 已实现（E-01 ~ E-13）
 
 **E-01 账号批量动作。** 路由 `accounts.py:640` 支持按文件名列表执行批量动作，测试覆盖了部分失败时继续执行、逐条返回错误、凭据回收。前端账号页有批量选择入口。缺的不是能力，是入库。
+
+**（2026-11-05 已更正）** 末句「缺的不是能力，是入库」已过期：批量路由在 `81bb7d8`、测试在 `ca7959b`、前端批量条在 `adf22d8` 入库（`accounts.py` 文件基线为 `b5772fb`），工作树对该组无未提交改动。§3.1 其余条目同理，均已随分组提交入库，不再需要「等入库」这一步。
+**误判后果**：按「只差入库」读，会把已落地功能挂在待办上等一次并不存在的提交动作，或在盘点时再算一遍「未入库工作量」。
 
 **E-02 账号导入。** `accounts.py:369` 是单条导入：先建统一凭据（`registry.create_credential`），再写 `accounts` 行并把 `credential_id` 记进 `meta_json`，响应不回显明文。`:432` 是保存前试连，禁用 provider 直接 400。测试 `test_accounts_import.py:73-246` 覆盖脱敏、JSON 位置报错、凭据类型非法、sidecar provider 拒绝、非管理员拒绝。前端用 `ImportAccountDialog.tsx`。
 
@@ -73,15 +79,21 @@
 
 **E-13 qoder 会话搬运。** 控制面把导出、导入整包透传给 `qoder_sidecar`，前端面板两个方向都做，回包原样展示、不替上游改写措辞。限制来自上游 `SessionCopy` 只认绝对路径：包落在 sidecar 主机，浏览器不能上传也不能下载。要把包搬回浏览器，得 sidecar 先提供流式出口，这一步不在本仓控制范围内。
 
-### 3.2 半截（P-01 ~ P-03）
+### 3.2 半截（P-01、P-03）与已结案（P-02）
 
 **P-01 provider 定时健康检测。** 后端是完整的：`ProviderHealthService` 有启停、定时 tick、单次触发、历史写入与裁剪、快照读取，`/api/providers/health` 和 `/api/providers/health/run` 都能用，`main.py` 挂了生命周期，`tests/test_provider_health.py:123-235` 覆盖了关闭态不动作、开启态执行、三档结果落库、错误摘要脱敏、只写历史表不改 `enabled`、快照、admin-only、默认关闭。唯一的缺口是前端：没有任何入口能看历史或手动触发。另外默认 `UNIFIED_HEALTH_CHECK_ENABLED=false`，要常开等于按间隔持续打上游，这需要产品与成本判断。
 
 **P-02 `/quota/policies`。** 页面与 API 都可用，`/quota` 页顶部有入口。缺的是基线登记：`FRONTEND-BASELINE.md:67` 的页面清单只有 `/quota`，§3 对「新增页面」的约束以 §4 现状备注为准，这个子页没出现在任何一处。这不是代码缺口，PR 审查时会被当作未登记入口问一次。
 
+**（2026-11-05 已更正）** 原句唯一的阻塞点「基线未登记」已在同一天解除：`FRONTEND-BASELINE.md:74` 的 §4 现状备注已按 `/quota` 二级子页登记（不是导航项、不新增入口数量）。复核实现后也没有别的代码缺口——策略 CRUD 带阈值 1-100 校验（`quota.py:193,244,308`、`:236-241`），周期用量与告警列表（`:356,390`），告警确认 / 静默 / 关闭 / 重开且写审计（`:473-566`）；前端同一页可建、改、删并处置告警（`apps/web/app/(main)/quota/policies/page.tsx:378,449-533,771-830`）；测试覆盖 `tests/test_quota.py:526,559-600` 与 `tests/test_ops_triage.py:192-229`。档位改为「已实现」，阻塞原因改为「2026-11-05 基线登记完成，阻塞原因解除」。
+**误判后果**：按「半截（基线未登记）」排期，会把已经可用的页面压在待办里不做验收，或在 PR 审查时把 `/quota` 页头的既有入口当成越界新增入口再问一次；更糟的是把「半截」当成有代码缺口，去补一个并不存在的能力。
+
 **P-03 sub2api Ops 排障面。** 我们有自己的等价观测（`/metrics`、告警、日志、导出），但没有上游 Ops 的那几块：告警规则 CRUD（只做了配额阈值）、告警事件确认/静默/关闭、失败请求重试与「标记已解决」、系统日志采集、并发与实时流量、网关运行时状态。`routers/` 全目录没有对应路由。补齐前要先定：是自建排障台，还是明确不做、把这块写进 `PROVIDERS.md` 的取舍表。
 
-### 3.3 未实现（U-01 ~ U-06）
+**（2026-11-05 已更正）** 原句的缺口清单有一半已过期。复核实现：告警事件确认 / 静默 / 关闭 / 重开已落地并写审计（`quota.py:473-566`，状态机测试 `tests/test_ops_triage.py:192-229`）；失败请求「标记已解决」已落地（`logs.py:425,448`，落 `request_logs.resolved_at` / `resolved_by`，审计 `logs.py:398-443`）。仍真缺两项：①系统日志采集——仓内只有请求日志（`logs.py:270,314`），`system.py` 只有 `:77` changelog、`:95` versions，没有进程 / 上游日志的采集路由，现有日志页承担不了；②实时流量——没有推送或聚合视图，只有指标快照（`health.py:419,439`），现有页面可用轮询承担一部分，但不是实时流量面。待复核两项：③运行时状态——`health.py:117,122` 只有存活 / 就绪，`settings.py:425` 是运行时配置，缺的是「并发 / 在途 / 调度器」到底看哪些指标、验收标准是什么；④告警规则管理面——规则参数现在只在 `config.py:132-140` 与 env 里可配（`alerting.py:202-234` 按配置评估三条规则），没有 DB CRUD（配额阈值走 `/quota/policies`），是否要管理面属产品取舍。`routers/` 全目录无路由这句只对①②成立，对③④不成立。
+**误判后果**：按旧句排期会重做已经上线的告警状态机与失败请求标记；也会把「全目录无对应路由」当成所有子项都缺，看不出「部分已实现、部分真缺、部分只是没定口径」，验收时无法按子项逐条关掉。
+
+### 3.3 已实现、半截、待决策与不做（U-01 ~ U-06）
 
 **U-01 在线更新。** 后端明确「本部署不提供在线更新」，`check-update` 与 `update-status` 共用同一份 `available=False` 摘要。前端 `UpdatePanel` 仍保留了 `manager.has_update` / `upstream.has_update` 分支，服务端永远不会返回 true，属死代码。要补齐，需要先有发布通道、包签名与回滚方案。
 
@@ -89,15 +101,36 @@
 >
 > **读旧响应会得到的误判**：把 `check-update` 当成仍在服务的「恒无更新」接口，会对着 404 判断「更新通道只是没开」；继续按 `manager.has_update` / `upstream.has_update` 找前端死代码，会去读一个已经被删掉的字段，而真正需要看的是 `available && can_apply && latest_version > current_version` 这条判断。另：若按早先那句「旧投影 `check_update_legacy` 一并删除」去 `git log` 找这次删除，会一无所获，进而怀疑文档在编造改动——正确事实是它从未入库，只存在于未提交的工作态。
 
+**（2026-11-05 已更正）** 本段正文的「本部署不提供在线更新」「共用同一份 `available=False` 摘要」「`has_update` 是死代码」三句均已过期；上面那块只更正了 `check-update` 下线，没有改档位。复核实现：`routers/update.py:57,62,75,106` 提供 status / check / apply / rollback，apply 要求 `confirm_version` 与 latest 逐字一致且 `available`、`can_apply` 双闸（`:83-91`）；能力探测在 `services/update_feed.py:78-120`，换码与重启在 `update_executor.py:4-5`，签名、清单、自举分别是 `update_signing.py`、`update_manifest.py`、`update_boot.py`；前端 `UpdatePanel.tsx:42` 挂在 `settings/page.tsx:2016`，按 `updater_found` / `can_apply` 分别提示（`UpdatePanel.tsx:295-300`）；测试 `test_update_manifest.py:68-162`、`test_update_feed.py:125-193`、`test_update_executor.py:117-295`。档位改为「已实现」。
+**两个前置条件（不是缺口）**：①默认关闭 `UNIFIED_UPDATE_ENABLED=false`（`config.py:149,222`），要运营显式开启；②要自备发布源 `UNIFIED_UPDATE_MANIFEST_URL` 与签名密钥（`config.py:150-151,224-225`）。容器里还得把代码目录绑挂进来并配 `restart: unless-stopped`，否则探测直接给 `can_apply=false` 并带原因（`update_feed.py:101-108`），这是部署前提，不是代码没写完。
+**误判后果**：按「未实现」排期会重写一套已经可用、带签名校验与回滚的执行链；反过来，以为打开开关就能用、忽略发布源与绑挂，上线后只会看到 `can_apply=false`，还查不到该找运营还是找运维。
+
 **U-02 token 估算计费。** 现在只把「上游返回全零」和「根本没有 usage」分成 `usage_zero` / `usage_missing` 两种标注，不做估算。`m3-billing-plan.md:161` 写的 `billing.charge_on_missing_usage` 开关在代码里不存在，文档与实现有漂移。要补齐，前提是财务确认要收这条通道的钱，并先给 muse 别名补价格行——否则估出来的 token 套不到价，仍是 0 元。
+
+**（2026-11-05 已更正）** 原句把「等财务确认」写成了「有意不做」，这两个状态不能同时成立。代码侧确实没有估算（`billing.py:320-323` 只打 `usage_zero` / `usage_missing` 标），但补不补卡在拍板，不是已经决定不做。档位改为「待决策」，点头对象与内容写死：财务负责人确认「估算出的 token 是否计入额度与账单、误差是写进账单还是只做提示」；点头前必须先给 muse 别名补价格行（`docs/muse-usage-policy.md:43` 的 ±15–30% 只描述可见文本误差）。
+**误判后果**：按「有意不做（未实现）」归档会把它从决策队列里摘掉，财务永远等不到这个议题；反过来按「未实现」排进工程工期，会先写估算逻辑，最后因为没定价而算不出钱。
 
 **U-03 备份远端与定时。** `BACKUP.md:174` 明说不加密、不上传远端。所以这是有意不做的取舍，不是漏做；真要补，前置是对象存储凭据管理、失败重试、保留策略。
 
+**（2026-11-05 已更正）** 旧段写于实现之前，已过期，但**不是全做完**。已落地：配置读取 / 保存、远端列表、手动上传四个端点 `routers/backup_remote.py:66,72,90,112`；加密上传把本地归档写成 `<prefix>/<归档名>.enc`，密文 sha256 再写成 `.zip.enc.sha256`，上传后 HEAD 校验大小与 sha256（`services/backup_remote.py:96-97,392-413`），加密为 AES-256-GCM（`services/backup_remote.py:473-478`、`services/backup_crypto.py:223-274`），密钥只从 `UNIFIED_BACKUP_ENCRYPTION_KEY` 读、缺失时 `encryption_key()` 直接抛错并拒绝上传（`backup_remote.py:264-280`）；按 keep 轮转并连 sidecar 一起删（`:508-527`）；失败按 30s / 2m / 10m 重试，403 标 `auth_blocked` 且不泄露密钥。定时计划与 `provider_health` 同构：60 秒一 tick，开关默认关闭时 `due` 短路、零外呼（`services/backup_schedule.py:31-43,56-90`）；四个开关 `config.py:183-186,262-269`；lifespan 启停 `main.py:161-162,175,182`。S3 客户端 `services/s3_client.py:278-299`（SigV4、path-style、重试）。
+**为什么算半截而不是已实现**：远端恢复没有做。`routers/backup.py:177-193` 的 `restore` 仍然只用 `RestoreIn.name` 拼本地备份目录，既不下载远端对象、也不解密；`s3_client.get_object`（`s3_client.py:283`）与 `backup_crypto.decrypt_bytes`（`backup_crypto.py:276`）只有测试调用，生产链路没有接。备份的价值在恢复——只能上传、不能从远端恢复，磁盘全毁时远端那份密文取不回来，等于没有备份。另外前端没有远端备份入口（`apps/web` 搜不到 `backup-remote` 引用），按 §1 只有路由没有前端入口也不算已实现。档位改为「半截（远端上传与定时已实现，缺远端恢复）」。
+**如实标注**：本轮证据文件都在工作区、尚未提交——`?? apps/control/app/routers/backup_remote.py`、`?? apps/control/app/services/{backup_remote,backup_schedule,s3_client,backup_crypto}.py`、`?? apps/control/tests/{test_backup_remote,test_backup_schedule,test_s3_sigv4}.py`、`?? apps/control/tests/fake_s3_server.py`、`M apps/control/app/config.py`、`M apps/control/app/main.py`，不是已入库。
+**误判后果**：按旧句「有意不做」归档，会以为这块从没动工，重复写加密上传与调度；反过来按「已实现」验收，会漏掉远端恢复，真出事时才发现远端只有一堆取不回来的密文。
+
+**（2026-11-05 已更正，本批入库后）** 上面三段里的「缺远端恢复」「前端无入口」「尚未提交」三条全部过期，逐条给证据：远端恢复是 `routers/backup_remote.py:166`（`POST /backups/restore-remote`，`:181-187` 先校验归档名白名单、再要求 `confirm` 与 `name` 逐字相同，否则 400 且不动活库），链路上 `services/backup_remote.py:397`（`download_archive`：下载 `.zip.enc` → 校验 `.enc.sha256` → `backup_crypto` 解密落名）、`:475`（`commit_download`），随后调用 `routers/backup.py:182` 抽出的 `restore_archive()`；本地 `/restore`（`routers/backup.py:250`）改为持锁后调用同一段，对外行为不变。远端删除是 `routers/backup_remote.py:222` → `services/backup_remote.py:489`，连 `.enc.sha256` sidecar 一起删；列表在 `:114` 增加 `has_sidecar` / `s3_reachable` / `credential_source` / `crypto_backend`。前端入口是 `apps/web/components/common/settings/BackupRemoteSection.tsx`（由 `BackupPanel.tsx` 渲染），凭据缺失时点名三个 `UNIFIED_BACKUP_S3_*` 变量，探活 502 时保留配置区可编辑。这些文件已入库：加密后端 4d7e54a、S3 客户端 9ebff30、路由与调度 500e671、前端面板 622fa9f。档位改为「已实现」。
+**误判后果**：继续按「半截」读，会重复实现一套下载 / 解密链，或者以为磁盘全毁时只能手工救；反过来把「已实现」当验收通过而跳过配置——默认关闭，凭据只从环境变量取，不配 `UNIFIED_BACKUP_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` 时 `configured=false`，手动上传返回 409（`routers/backup_remote.py:157-158`），不会「看起来能点但什么也没发生」。
+
 **U-04 `/tasks`。** 页面、9 条幽灵路径已按业务决定整体删除，基线也不再保留。要恢复必须推翻那条决定，且与 §3「不新增页面」冲突。
+
+**（2026-11-05 已更正）** 原句的「已按业务决定整体删除」只描述了删的动作，没写清这是一次可逆的产品决策；档位「未实现（有意删除）」和阻塞原因「需产品决策」也因此互相取消。档位改为「待决策」，点头对象与内容写死：产品负责人确认「是否恢复已删的 `/tasks` 页面（接受推翻基线删页决定、新增页面并触碰 §3 约束），还是确认维持删除」。
+**误判后果**：按「未实现（有意删除）」归档会让人以为删除已经定案，后续任务页需求只能重新争一遍；反过来按「未实现」排期，会在没点头前先去恢复页面，直接撞上 §3 的不新增页面约束。
 
 **U-05 gptGrok 图库 / 提示词。** 设计口径明确「图片图库/文件存储不进界面」（`frontend-integration-plan.md:99`），控制面也没有对应路由。要补，得先有图库路由与存储、权限模型，等于新做一块能力，而不只是加个页面。
 
-**U-06 sub2api iframe。** 全仓没有 iframe。取舍 #10 明确「只做协议层，不做各家上游 Web UI」。嵌 iframe 等于把上游 Web 面板当产品界面，与这条边界直接冲突，也会把 LGPL 的边界问题带回来。
+**（2026-11-05 已更正）** 原句写「有意不做」，但同一段又要求产品决定「是否自建」，两句话互相取消。现状是设计口径写着「不进界面」（`frontend-integration-plan.md:99`）、控制面确无路由，但要不要翻这个口径没有定论。档位改为「待决策」，点头对象与内容写死：产品负责人确认「是否自建图库与提示词管理面，并接受新增存储、权限、页面三块成本」；不点头就维持「不进界面」。
+**误判后果**：按「有意不做（未实现）」归档，会让人以为口径已经闭合，后续再提图库需求只能重新考古；反过来按「未实现」排期，会在产品没点头前先动存储与权限模型。
+
+**U-06 sub2api iframe。** 结案为「不做（已合并承载，非缺口）」。iframe 原本要承载的配额域已 1:1 落在 `/quota` 的分组 / 账号池 / 流水三个 tab（`apps/web/app/(main)/quota/page.tsx:57,407-423`），页头另有 `/quota/policies`（配额策略与告警）入口（`:78-82,401`）；后者有确认弹窗（`apps/web/app/(main)/quota/policies/page.tsx:512`）、错误回显（`:165-233` 的 `setPoliciesError` / `setStatusError` / `setAlertsError`）与操作审计（`apps/control/app/routers/quota.py:295,319,467-470`），比只读 iframe 更完整。上游其余栏目（Channels / Proxies / Subscriptions / Orders / PromoCodes / Redeem / Affiliates / Announcements / Plugins）属取舍 #2 的排除项（`docs/PROVIDERS.md:249`），后端从未建对应路由：`apps/control/app/routers/sub2api.py:57-150` 只有 groups / accounts / ledger，`apps/control/app/adapters/sub2api_store.py:3` 的表结构也只这三张。此外本仓安全头明确禁止自身被嵌入：`apps/control/app/main.py:213`（`X-Frame-Options: DENY`）、`:217`（CSP `frame-ancestors 'none'`）、`deploy/nginx.conf:254`。上游栏目清单是文档级证据（`docs/design/frontend-integration-plan.md:181`），仓内没有上游前端源码可核对。
 
 ## 4. 旧结论更正留档
 
@@ -109,7 +142,7 @@
 >
 > —— `docs/design/frontend-integration-plan.md:126`
 
-**（2026-11-05 已更正）** 这句话和它上面 118-123 行的「无 UI」表格已过期。`apps/web/app/(main)/quota/page.tsx:57` 已实现分组 / 账号 / 流水三个 tab，页面本身已入库；额度重置走账号 tab。实际仍缺的只有 Ops 排障面（见 P-04），不是「前端完全缺失」。
+**（2026-11-05 已更正）** 这句话和它上面 118-123 行的「无 UI」表格已过期。`apps/web/app/(main)/quota/page.tsx:57` 已实现分组 / 账号 / 流水三个 tab，页面本身已入库；额度重置走账号 tab。实际仍缺的只有 Ops 排障面（见 P-03），不是「前端完全缺失」。
 **误判后果**：按旧句排期会把已经做完的 CRUD 再排一遍，或误判 `quota` 页是越界新增；同时把真正缺的排障面当成「顺带就有了」。
 
 ### 4.2 gptGrok images / videos「控制面未接入」
@@ -119,13 +152,122 @@
 > —— `docs/design/frontend-integration-plan.md:96`
 
 **（2026-11-05 已更正）** `routers/v1.py:844-869` 已挂 `/v1/images/generations`、`/v1/images/edits`、`/v1/images/tasks/{task_id}`、`/v1/videos`、`/v1/videos/{task_id}`、`/v1/media/{name}`，`/v1` 路由总数为 14 条（`v1.py:806-884`）。这几条尚在工作区未入库（`M apps/control/app/routers/v1.py`）。
+**（2026-11-05 入库复核）** 上一块末尾「尚在工作区未入库」是写块当时的状态：`v1.py` 的路由改动已随 `65e88b9`（适配器协议面与客户端兼容端点）入库，工作树对该文件无未提交改动。结论（已接入、不再是缺口）不变，只有「未入库」这半句过期。
 **误判后果**：会把已经写好的图片/视频转发当成缺口重做；更糟的是有人据此在 `PROTOCOL-MATRIX` 的「仍不支持」清单里留下错误条目，客户端按 501 处理而实际可用。
 
 ### 4.3 旧「11 项真缺失」清单
 
 原清单没有落成仓内文档，只在会话里口口相传，无法逐字留档。按本文件的口径复核后：账号批量、令牌批量、日志导出、模型映射搬运、Antigravity/Sora 兼容面、备份恢复六类已经在工作区实现（多数尚未入库），不再算「完全没有」；qoder 会话已落地（E-13，受上游路径语义限制）。剩下仍成立的是 P-01 / P-03 / U-01 / U-02 / U-03 与前端三条（U-04 ~ U-06）。旧数字 11 已不可引用。
 
-## 5. 本轮新增但未进 CI 的证据
+**（2026-11-05 更正）** 上一句的「前端三条（U-04 ~ U-06）」已过期：U-06 已结案为「不做（已合并承载，非缺口）」（见 §4.4），仍在前端缺口里的是两条（U-04、U-05），连同 P-01 / P-03 / U-02 / U-03（半截，缺远端恢复）。U-06 留在旧句里是结案前的遗留，不是新发现的缺口。
+
+**（2026-11-05 已更正，本批入库后）** 上一块清单里的 U-03 已不成立：远端恢复、远端删除与前端入口都已落地并入库（500e671 / 622fa9f，见 §3.3 末块），U-03 档位改为「已实现」。故当前仍开的缺口是 P-01 / P-03 / U-02 与前端两条（U-04、U-05）。
+**（2026-11-05 入库复核）** 上一句「多数尚未入库」同样过期：账号批量、令牌批量、日志导出、模型映射搬运、Antigravity/Sora 兼容面、备份恢复六类的路由、测试与前端均已入库，hash 见 §2 对应行。这里只剩「六类不再算完全没有」这一结论仍然成立。
+**误判后果**：按这句做范围盘点，会把「iframe 嵌入」当成仍待决策的前端缺口带进下一轮排期，并掩盖它已被 `/quota` 三个 tab 与 `/quota/policies` 承载的事实；按「多数尚未入库」读，还会把六类已完成功能重新排进实现队列。
+
+### 4.4 把 U-06 当作「未实现」缺口
+
+> | U-06 | sub2api iframe 嵌入 | sub2api | 未实现（有意不做） | 全仓无 `iframe`（本轮 grep 无命中）；`PROVIDERS.md:257` 取舍 #10「只做协议层，不做各家上游 Web UI」 | 与全局设计边界冲突；LGPL 隔离 |
+>
+> **U-06 sub2api iframe。** 全仓没有 iframe。取舍 #10 明确「只做协议层，不做各家上游 Web UI」。嵌 iframe 等于把上游 Web 面板当产品界面，与这条边界直接冲突，也会把 LGPL 的边界问题带回来。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 旧行只回答了「iframe 做不做」，没回答「iframe 要承载的东西有没有别处承载」，于是把「不做」误归到「未实现」。实际已 1:1 承载：配额域在 `/quota` 三个 tab（`apps/web/app/(main)/quota/page.tsx:57,407-423`），策略与告警在 `/quota/policies`（`apps/control/app/routers/quota.py:193,244,308` 策略 CRUD、`:356,390,473-566` 状态与告警处置审计；页面 `apps/web/app/(main)/quota/policies/page.tsx:373-384,512`），带确认弹窗、错误回显与审计，强于只读 iframe。上游其余栏目（Channels / Proxies / Subscriptions / Orders / PromoCodes / Redeem / Affiliates / Announcements / Plugins）属取舍 #2 的排除项（`docs/PROVIDERS.md:249`），后端从未建对应路由（`apps/control/app/routers/sub2api.py:57-150`；`apps/control/app/adapters/sub2api_store.py:3`）。本仓安全头也禁止自身被嵌入（`apps/control/app/main.py:213,217`、`deploy/nginx.conf:254`）。档位改为「不做（已合并承载，非缺口）」。
+**边界说明**：上游栏目清单只有文档级证据（`docs/design/frontend-integration-plan.md:181`），仓内没有上游前端源码可核对。这不影响结论——排除项由 `PROVIDERS.md:249` 的取舍 #2 锁定，不依赖栏目清单是否完整。
+**误判后果**：按「未实现」排期会去重做已经存在的配额页（`/quota` 三个 tab 与 `/quota/policies`）；或者在发现配额页已存在后，转而去用 iframe 补回上游控制台——后者同时违反取舍 #2/#10 与本仓安全头（`X-Frame-Options: DENY` 与 `frame-ancestors 'none'` 让嵌入在本仓内根本不可用）。这条是旧结论的遗留，不是 2026-11-05 新发现的缺口。
+
+### 4.5 P-02「半截（基线未登记）」
+
+> | P-02 | `/quota/policies` 页面 | sub2api | 半截（基线未登记） | `apps/control/app/routers/quota.py:174-285`；`apps/web/app/(main)/quota/policies/page.tsx`；`FRONTEND-BASELINE.md:67` 页面清单只登记 `/quota` | 需基线登记或产品确认，不是代码缺口 |
+>
+> **P-02 `/quota/policies`。** 页面与 API 都可用，`/quota` 页顶部有入口。缺的是基线登记：`FRONTEND-BASELINE.md:67` 的页面清单只有 `/quota`，§3 对「新增页面」的约束以 §4 现状备注为准，这个子页没出现在任何一处。这不是代码缺口，PR 审查时会被当作未登记入口问一次。
+>
+> —— 本文件 §2 总表与 §3.2，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 原句唯一指出的阻塞点「基线未登记」在当天解除：`FRONTEND-BASELINE.md:74` 的 §4 现状备注已按 `/quota` 二级子页登记，不是导航项、不新增入口数量。复核实现后也没有别的代码缺口：策略 CRUD 带阈值 1-100 校验（`apps/control/app/routers/quota.py:193,244,308`、`:236-241`），周期用量与告警列表（`:356,390`），告警确认 / 静默 / 关闭 / 重开且写审计（`:473-566`）；前端同一页可建、改、删并处置告警（`apps/web/app/(main)/quota/policies/page.tsx:378,449-533,771-830`）；测试覆盖 `tests/test_quota.py:526,559-600` 与 `tests/test_ops_triage.py:192-229`。档位改为「已实现」，阻塞原因写「2026-11-05 基线登记完成，阻塞原因解除」。
+**误判后果**：按「半截（基线未登记）」排期会把已经可用的页面压在待办里不做验收，或在 PR 审查时把 `/quota` 页头的既有入口当成越界新增入口再问一次；更糟的是把「半截」当成有代码缺口，去补一个并不存在的能力。
+
+### 4.6 U-01「未实现」
+
+> | U-01 | 在线更新执行 | codebuddy2api（系统更新页）、sub2api | 未实现 | `apps/control/app/routers/system.py:1-6`（模块说明）+ `:87-89`（`update_summary` 恒返回 `available=False`）+ `:147-160`（`/update-status` 固定 `running=False`、`updater_found=False`）；`UpdatePanel.tsx:61-62` 的 `has_update` 分支是死代码 | 无分发通道与签名校验方案，需设计决策 |
+>
+> **U-01 在线更新。** 后端明确「本部署不提供在线更新」，`check-update` 与 `update-status` 共用同一份 `available=False` 摘要。前端 `UpdatePanel` 仍保留了 `manager.has_update` / `upstream.has_update` 分支，服务端永远不会返回 true，属死代码。要补齐，需要先有发布通道、包签名与回滚方案。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 旧行与旧段停留在「恒 `available=False`」的旧壳实现上，而端点、执行链与前端面板早已换新：`routers/update.py:57,62,75,106` 提供 status / check / apply / rollback（apply 带版本逐字确认与 `available`/`can_apply` 双闸，`:83-91`）；能力探测 `services/update_feed.py:78-120`，换码与重启 `update_executor.py:4-5`，签名 / 清单 / 自举分别为 `update_signing.py`、`update_manifest.py`、`update_boot.py`；前端 `UpdatePanel.tsx:42` 挂在 `settings/page.tsx:2016`；测试 `test_update_{manifest,feed,executor}.py` 覆盖验签、拒降级、zip slip、超时、回滚与 watchdog。档位改为「已实现」。
+**两个前置条件（不是缺口）**：默认 `UNIFIED_UPDATE_ENABLED=false`（`config.py:149,222`）；需自备发布源与签名密钥（`config.py:150-151,224-225`）；容器部署还需代码目录绑挂 + `restart: unless-stopped`，否则 `can_apply=false`（`update_feed.py:101-108`）。
+**误判后果**：按旧行排期会重写一套已可用的签名更新链；或以为打开开关即可，忽略发布源与绑挂，上线后只看到 `can_apply=false` 却查不到原因归属。
+
+### 4.7 P-03「缺口清单全缺」
+
+> | P-03 | sub2api Ops 排障面 | sub2api | 半截 | 已有等价观测：`health.py:410`、`alerting.py`、`logs.py:260`；缺的能力在 `routers/` 全目录无对应路由（本轮 grep 无命中） | 需产品决策是否自建排障台；上游 LGPL 隔离（`upstreams/upstreams.yaml:87,94`） |
+>
+> **P-03 sub2api Ops 排障面。** 我们有自己的等价观测（`/metrics`、告警、日志、导出），但没有上游 Ops 的那几块：告警规则 CRUD（只做了配额阈值）、告警事件确认/静默/关闭、失败请求重试与「标记已解决」、系统日志采集、并发与实时流量、网关运行时状态。`routers/` 全目录没有对应路由。补齐前要先定：是自建排障台，还是明确不做、把这块写进 `PROVIDERS.md` 的取舍表。
+>
+> —— 本文件 §2 总表与 §3.2，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 该清单把已实现项与真缺项混在一起。复核后：告警确认 / 静默 / 关闭 / 重开已实现（`quota.py:473-566`，测试 `test_ops_triage.py:192-229`），失败请求标记已解决已实现（`logs.py:425,448`，审计 `:398-443`）。真缺只剩两项：系统日志采集（`logs.py:270,314` 只读请求日志，`system.py:77,95` 只有 changelog / versions，无进程 / 上游日志路由）与实时流量（只有 `health.py:419,439` 快照，无推送 / 聚合，现有页面可用轮询承担一部分）。另两项标「待复核」：运行时状态（`health.py:117,122` 仅存活 / 就绪，看哪些指标未定义）、告警规则管理面（规则只在 `config.py:132-140` 与 env 可配，无 DB CRUD，是否要管理面属产品取舍）。档位改为「半截（2 真缺 + 2 待复核）」。
+**误判后果**：按旧句会把已上线的告警状态机与失败请求标记重做一遍；也会因为「全目录无对应路由」漏掉「部分已实现、部分真缺、部分只是没定口径」的分层，验收无法逐子项关掉。
+
+### 4.8 U-02「有意不做」
+
+> | U-02 | 未定价模型 token 估算计费 | gptGrok2api、muse2api | 未实现（有意不做） | `apps/control/app/billing.py:320-323`（只打 `usage_zero` / `usage_missing` 标，不估 token）；`docs/muse-usage-policy.md:11-12`；`docs/m3-billing-plan.md:161` 的 `billing.charge_on_missing_usage` 在代码中不存在 | 需财务决策并先补价格行；估算误差写的是「可见文本 ±15–30%」（`muse-usage-policy.md:43`） |
+>
+> **U-02 token 估算计费。** 现在只把「上游返回全零」和「根本没有 usage」分成 `usage_zero` / `usage_missing` 两种标注，不做估算。`m3-billing-plan.md:161` 写的 `billing.charge_on_missing_usage` 开关在代码里不存在，文档与实现有漂移。要补齐，前提是财务确认要收这条通道的钱，并先给 muse 别名补价格行——否则估出来的 token 套不到价，仍是 0 元。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 「有意不做」与「等财务确认」不能并存。代码侧确实不估（`billing.py:320-323`），但补齐与否卡在拍板。档位改为「待决策」，阻塞原因写死点头对象：财务负责人确认「估算 token 是否计入额度与账单、误差写进账单还是只做提示」；点头前须先给 muse 别名补价格行。
+**误判后果**：按「有意不做」归档会把它摘出决策队列，财务议题永远不出现；按「未实现」排期则会先写估算代码，最后因无价格行算不出金额。
+
+### 4.9 U-05「有意不做」
+
+> | U-05 | gptGrok 图库 / 提示词 | gptGrok2api | 未实现（有意不做） | `docs/design/frontend-integration-plan.md:99`（「图片图库/文件存储 不进界面」）；控制面无对应路由 | 需产品决策是否自建；存储与权限是新增面 |
+>
+> **U-05 gptGrok 图库 / 提示词。** 设计口径明确「图片图库/文件存储不进界面」（`frontend-integration-plan.md:99`），控制面也没有对应路由。要补，得先有图库路由与存储、权限模型，等于新做一块能力，而不只是加个页面。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 旧行同时写「有意不做」与「需产品决策」，两句互相取消。当前只是设计口径写着「不进界面」、控制面无路由，口子并未闭合。档位改为「待决策」，点头对象写死：产品负责人确认「是否自建图库与提示词管理面，并接受存储 / 权限 / 页面三块新增成本」。
+**误判后果**：按「有意不做」归档会让人以为已有结论，后续提需求只能重新考古；按「未实现」排期则会在没点头前先动存储与权限模型。
+
+### 4.10 U-04「有意删除」
+
+> | U-04 | `/tasks` 页面恢复 | sub2api / codebuddy2api（任务页） | 未实现（有意删除） | 仓库无 `tasks` 路由（`apps/web/app` 下无该目录）；`FRONTEND-BASELINE.md:70` 记录整条链路已删 | 与基线删页决定冲突，需产品决策 |
+>
+> **U-04 `/tasks`。** 页面、9 条幽灵路径已按业务决定整体删除，基线也不再保留。要恢复必须推翻那条决定，且与 §3「不新增页面」冲突。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 旧行把「删了」当成「定了」，但同一行又要求产品决策，两句互相取消。删除动作属实（`apps/web/app` 下无 `tasks` 目录），但「维持删除还是恢复」没有闭合。档位改为「待决策」，点头对象写死：产品负责人确认「恢复 `/tasks`（接受推翻基线删页决定、新增页面并触碰 §3），还是确认维持删除」。
+**误判后果**：按「有意删除」归档会让后来者以为删除已经定案，再提任务页需求只能从头考古；按「未实现」排期则会在没点头前先恢复页面，直接撞 §3 的不新增页面约束。
+
+### 4.11 U-03「未实现（有意不做）」
+
+> | U-03 | 备份远端目标（S3 等）与定时计划 | 控制面自建 | 未实现（有意不做） | `docs/BACKUP.md:174`（「不做加密、不上传远端」）；`backup.py` 无远端参数与调度 | 需对象存储凭据、失败重试与保留策略设计 |
+>
+> **U-03 备份远端与定时。** `BACKUP.md:174` 明说不加密、不上传远端。所以这是有意不做的取舍，不是漏做；真要补，前置是对象存储凭据管理、失败重试、保留策略。
+>
+> —— 本文件 §2 总表与 §3.3，2026-11-05 判定时点
+
+**（2026-11-05 已更正）** 旧行与旧段都过期：远端上传与定时已落地（AES-256-GCM 加密上传 → `.zip.enc` 与 `.zip.enc.sha256`、HEAD 校验、30s/2m/10m 重试、按 keep 轮转、缺加密密钥拒绝上传、默认关闭零外呼），档位改为「半截（远端上传与定时已实现，缺远端恢复）」。证据与行号见 §3.3 同条更正块；这些文件都在工作区、尚未提交，不是已入库。
+**误判后果**：按「有意不做」读，会把已写好的加密上传与调度当成不存在，重复实现并重复设计凭据与重试；按「已实现」关掉，则会在磁盘全毁时才发现没有远端恢复路径，远端只有取不回来的密文。
+
+**（2026-11-05 已更正，本批入库后）** 上一块的「半截」与「尚未提交」都已过期：远端恢复 `POST /api/system/backups/restore-remote`（`routers/backup_remote.py:166`）、远端删除 `DELETE /api/system/backups/remote/{name}`（`:222`）与前端入口 `apps/web/components/common/settings/BackupRemoteSection.tsx` 均已落地，并按主题入库（路由与调度 500e671、前端面板 622fa9f、加密后端 4d7e54a、S3 客户端 9ebff30、依赖 6759077）。U-03 档位由「半截」改为「已实现」，证据与行号见 §3.3 末块。
+**误判后果**：拿这块当「还差恢复」去排期，会重复实现下载 / 解密链路；把「已实现」直接当运营可用，则会忽略默认关闭 + 凭据只走环境变量这两个前提。
+
+## 5. 本轮新增的证据（2026-11-05 入库复核）
+
+**（2026-11-05 已更正）** 本节是 2026-11-05 之前的工作区快照，不能当现状读。此后代码已分组入库，本次只读核对时 HEAD 为 `7e7805b`。照旧读会得到两类误判：一是以为 E-01~E-13 的代码 / 测试 / 组件还挂在工作区外，从而重复排期、重复实现；二是把「本地跑绿 ≠ CI 跑绿」推成「这些用例从未进 CI」，据此重写本该由 CI 覆盖的用例。
+**复核事实（只读 git，未 add / commit / stash / checkout）**：HEAD 为 `7e7805b`。`git status --short` **非空**：`M apps/control/app/config.py`、`M apps/control/app/main.py`、`M apps/control/app/routers/settings.py`（并行会话的 U-03 备份远端接入，2026-11-05 复核时已落地并注册路由 `main.py:182`，档位见 §3.3）、`M docs/FEATURE-GAP.md`、`M docs/FRONTEND-BASELINE.md`（本次文档任务）。未跟踪 9 项：`apps/control/app/routers/backup_remote.py`、`apps/control/app/services/{backup_crypto,backup_remote,backup_schedule,s3_client}.py`、`apps/control/tests/{test_backup_remote,test_backup_schedule,test_s3_sigv4}.py`、`apps/control/tests/fake_s3_server.py`——全部属于 U-03 备份远端，**尚未提交，不能算已入库**。**E-01~E-13 证据列点名的文件没有一个出现在上面两份清单里**，因此它们的「已入库」判断成立；`apps/control/tests/` 现有 63 个已被跟踪的 `test_*.py`，未跟踪 3 个（上列备份远端用例）。按文件首次入库提交：`accounts.py`、`keys.py`、`v1.py`、`sub2api.py`、`auth.py`、`settings/page.tsx`、`UpdatePanel.tsx` = b5772fb；`accounts/page.tsx` 批量条、`ImportAccountDialog.tsx`、`keys/page.tsx` 批量条 = adf22d8；`accounts.py` 批量操作、`provider_probe.py`、`test_accounts_import.py` = 81bb7d8；`test_backend_gaps.py` = ca7959b；`totp.py`、`auth.py` TOTP、`keys.py` 批量、`test_keys_batch.py`、`test_user_account_system.py` = 8b2d54d；`provider_health.py`、`alerting.py`、`test_provider_health.py`、`logs.py` 导出、`test_logs_export.py` = 82f03a2；`settings.py` 模型映射与 failover、`v1.py` compat、`qoder_sessions.py`、`test_model_map_transfer.py`、`test_v1_client_compat.py`、`test_failover.py`、`test_qoder_sessions_proxy.py` = 65e88b9；`RuntimeConfigSection.tsx` = 7f4d9a1；`backup.py`、`test_backup_api.py`、`backup_api_smoke.py` = 98d7b31；`update.py` = 8253f2c；`update_feed.py` = 9349160；`BackupPanel.tsx`、`ModelMapTransfer` 相关设置页 = dafb3c4；`logs/page.tsx` = eacc574；`quota/page.tsx`、`quota/policies/page.tsx` = 925f15c；`RISK-REGISTER.md`、`schema-migration-audit.md` = fbe49d5；`ci.yml` 已跟踪（首入库 b5772fb），工作树无改动。
+**误判后果**：继续按旧快照读，会对已入库的功能重复排期、重复写测试，并把「CI 是否覆盖这些用例」建立在错误的「未入库」前提上。
+
+**（2026-11-05 已更正，本批入库后）** 上一段的 HEAD 与清单都已过期：U-03 的 9 个未跟踪文件已按主题入库——`services/backup_crypto.py` 4d7e54a、`services/s3_client.py` 9ebff30、`services/{backup_remote,backup_schedule}.py` 与 `routers/backup_remote.py` 及 `test_backup_remote.py` / `test_backup_schedule.py` / `test_s3_sigv4.py` / `fake_s3_server.py` 500e671、前端 `BackupRemoteSection.tsx` 622fa9f；`config.py` / `main.py` / `routers/settings.py` 的改动也随 500e671 与 9ebff30 入库，工作树此时为空；`apps/control/tests/` 已跟踪的 `test_*.py` 由 63 变为 66（新增上列三份）。E-01~E-13 的「已入库」判断不受影响。
+**误判后果**：照旧快照核对暂存区，会去找 9 个 `??` 文件来确认「还没入库」，而它们已经在 500e671 里；据此再提交一次会造成重复实现，或误判 CI 缺少覆盖。
+
+以下为 2026-11-05 前快照，逐字保留：
 
 `git status --porcelain` 只读结果（2026-11-05，未做任何 add / commit / stash / checkout）：
 
@@ -139,6 +281,9 @@
 - 本文件引用的 `docs/RISK-REGISTER.md` 与 `docs/schema-migration-audit.md` 自身也是 `??`（未入库）；`docs/FRONTEND-BASELINE.md`、`docs/PROVIDERS.md`、`docs/PROTOCOL-MATRIX.md`、`docs/BACKUP.md`、`docs/design/frontend-integration-plan.md` 均为 `M`（已修改未提交）。也就是说，§4 更正所依据的四份口径文档，当前版本也还没有进版本库。
 
 **本地跑绿不等于 CI 跑绿。** 本轮只做代码与测试文件核对，没有执行任何测试，也不声称上面这些用例跑过。20 个未入库测试文件（上列 10 个只是关键项）一个都不在版本库里，`.github/workflows/ci.yml` 的零 skip 门与两道备份演练也还没提交。当前 CI 能跑到的只是旧用例；本文件标「已实现」的条目，依据是「代码 + 用例存在」，不是「用例通过」。入库前必须先在干净 CI 环境实跑，尤其是依赖假上游、端口与临时目录的备份与 failover 用例。
+
+**（2026-11-05 入库复核）** 上一段的「20 个未入库测试文件」与「`ci.yml` 还没提交」已过期：判定时点之后的分组提交里，`apps/control/tests/` 的 63 个 `test_*.py` 已被跟踪；2026-11-05 新增的 U-03 用例（`test_backup_remote.py`、`test_backup_schedule.py`、`test_s3_sigv4.py` 与夹具 `fake_s3_server.py`）仍在工作区未跟踪，不计入这 63 个。`ci.yml` 已跟踪（首入库 `b5772fb`）且工作树无改动。所以「这些用例从未进 CI」不成立，能确认的只是「已进版本库」。本轮没有执行任何测试，也没有查 CI 运行记录，**用例是否在 CI 里实跑通过仍未核实**，不能把「已入库」当成「已跑绿」。
+**误判后果**：继续按这段读，会去重写已经在 `ci.yml` 覆盖范围内的用例，或把「未入库」推成「CI 从没跑过」而绕开 CI 另建一套验证。
 
 ## 6. 复核方式
 
