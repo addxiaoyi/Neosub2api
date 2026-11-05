@@ -223,12 +223,12 @@ AUTH_READ_PATHS = (
     "/api/stats/daily",
     "/api/system/changelog",
     "/api/system/versions",
-    "/api/grok/register/tasks",
-    "/api/grok/register/worker",
-    "/api/users",
 )
 
 ADMIN_READ_PATHS = (
+    "/api/grok/register/tasks",
+    "/api/grok/register/worker",
+    "/api/users",
     "/api/metrics",
     "/api/sub2api/groups",
     "/api/sub2api/accounts",
@@ -265,6 +265,24 @@ def test_permission_matrix_reads(stranger, viewer, admin):
         _denied(as_viewer)
         as_admin = admin.get(path)
         assert as_admin.status_code == 200, f"{path} admin: {as_admin.status_code} {as_admin.text}"
+
+
+def test_grok_worker_matches_admin_only_consumer(viewer, admin):
+    """worker 只被 admin-only 的注册任务组件消费，鉴权须与消费方同口径。"""
+    denied = _denied(viewer.client.get("/api/grok/register/worker"))
+    assert denied["error"]["required_role"] == "admin"
+    assert denied["error"]["role"] == "viewer"
+
+    ok = admin.get("/api/grok/register/worker")
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert set(body) == {
+        "queued", "running", "succeeded", "failed", "cancelled",
+        "max_concurrency", "max_workers", "executor",
+    }
+    for key in ("queued", "running", "succeeded", "failed", "cancelled", "max_concurrency", "max_workers"):
+        assert isinstance(body[key], int)
+    assert body["executor"] in {"http", "unconfigured"}
 
 
 def test_permission_matrix_writes(stranger, viewer, admin):
@@ -369,6 +387,118 @@ def test_key_and_quota_ownership(viewer, stranger, admin, owned_keys, viewer_pol
     # 归属用户不存在时 admin 的建 key 请求被拒，不落一条无主记录
     ghost = admin.post("/api/keys", json={"name": "ghost-owner-key", "owner_user_id": "no-such-user"})
     assert ghost.status_code == 400, ghost.text
+
+
+# --------------------------------------------------------------------------- #
+# 2b. 读端点收紧：grok 任务行 / 用户枚举 → admin-only；账号列表按归属收窄
+# --------------------------------------------------------------------------- #
+
+
+def test_grok_task_read_is_admin_only(admin, viewer, db_path):
+    """任务行整行回显 proxy / payload_json / result_json，读侧与写侧同为 admin-only。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO grok_tasks(status, count, workers, proxy, payload_json, result_json, created_at) "
+            "VALUES('failed', 1, 1, ?, ?, ?, ?)",
+            (
+                "http://proxy-user:proxy-pass@203.0.113.7:8080",
+                json.dumps({"mail": "ghost@example.com"}),
+                json.dumps({"ok": False}),
+                1_700_000_500,
+            ),
+        )
+        task_id = int(cur.lastrowid)
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        listed = admin.get("/api/grok/register/tasks")
+        assert listed.status_code == 200, listed.text
+        assert any(row["id"] == task_id for row in listed.json())
+
+        detail = admin.get(f"/api/grok/register/tasks/{task_id}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["id"] == task_id
+
+        _denied(viewer.client.get("/api/grok/register/tasks"))
+        _denied(viewer.client.get(f"/api/grok/register/tasks/{task_id}"))
+    finally:
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM grok_tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        conn.close()
+
+
+def test_user_enumeration_is_admin_only(admin, viewer, stranger):
+    listing = admin.get("/api/users")
+    assert listing.status_code == 200, listing.text
+    names = {row["username"] for row in listing.json()}
+    assert {"admin", viewer.name} <= names
+
+    denied = viewer.client.get("/api/users")
+    _denied(denied, "需要管理员权限")
+    # 403 壳里只能有权限原因，不能夹带任何一条用户记录
+    assert '"username"' not in denied.text
+
+    assert stranger.get("/api/users").status_code == 401
+
+
+def test_accounts_list_scoped_by_owner(admin, viewer, db_path, base_url):
+    """admin 拿全量；非 admin 只拿 owner_user_id = 自己的行（无主行不可见）。"""
+    tag = uuid.uuid4().hex[:8]
+    second_name = f"secview2-{tag}"
+    created = admin.post(
+        "/api/users",
+        json={"username": second_name, "password": VIEWER_PASSWORD, "role": "viewer"},
+    )
+    assert created.status_code == 200, created.text
+    second = _login(base_url, second_name, VIEWER_PASSWORD)
+
+    seeded = {
+        f"sec-own-{tag}-first.json": viewer.name,
+        f"sec-own-{tag}-second.json": second_name,
+        f"sec-own-{tag}-shared.json": None,
+    }
+    conn = sqlite3.connect(db_path)
+    try:
+        for file_name, owner in seeded.items():
+            conn.execute(
+                "INSERT INTO accounts(file, provider, uid, nickname, credits, created_at, owner_user_id) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (file_name, "codebuddy", f"uid-{tag}", "sec", 10.0, 1_700_000_600, owner),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        admin_files = {row["file"] for row in admin.get("/api/accounts").json()["accounts"]}
+        assert set(seeded) <= admin_files, "admin 应看到全量（含无主行）"
+
+        first_view = viewer.client.get("/api/accounts")
+        assert first_view.status_code == 200, first_view.text
+        first_files = {row["file"] for row in first_view.json()["accounts"]}
+        assert f"sec-own-{tag}-first.json" in first_files
+        assert f"sec-own-{tag}-second.json" not in first_files, "看到了另一个 viewer 的账号"
+        assert f"sec-own-{tag}-shared.json" not in first_files, "无主行对非 admin 可见"
+
+        second_view = second.get("/api/accounts")
+        assert second_view.status_code == 200, second_view.text
+        second_files = {row["file"] for row in second_view.json()["accounts"]}
+        assert f"sec-own-{tag}-second.json" in second_files
+        assert f"sec-own-{tag}-first.json" not in second_files, "看到了另一个 viewer 的账号"
+        assert f"sec-own-{tag}-shared.json" not in second_files
+
+        body = first_view.json()
+        assert body["total"] == len(body["accounts"]), "total 应与收窄后的行数一致"
+    finally:
+        second.close()
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM accounts WHERE file LIKE ?", (f"sec-own-{tag}-%",))
+        conn.commit()
+        conn.close()
 
 
 def test_full_key_in_url_is_rejected_without_echo(admin, owned_keys):

@@ -98,9 +98,11 @@ class GrokRegisterService:
                 ),
             )
             conn.commit()
-            return self.get(int(cursor.lastrowid))
+            task_id = int(cursor.lastrowid)
         finally:
             conn.close()
+        self._event(task_id, "queued", detail=f"count={count} workers={workers}")
+        return self.get(task_id)
 
     def get(self, task_id: int) -> dict[str, Any]:
         conn = self._db.connect()
@@ -109,6 +111,46 @@ class GrokRegisterService:
             if row is None:
                 raise KeyError(f"未知的注册任务：{task_id}")
             return _row(row)
+        finally:
+            conn.close()
+
+    def detail(self, task_id: int) -> dict[str, Any]:
+        """任务详情：原始行 + 结构化步骤 + 时间线。
+
+        步骤来自 grok_task_events（状态机每次流转都落一条），不是按时间戳倒推的；
+        事件里只有步骤/状态/原因，proxy 与 payload 只在任务行里，沿用 admin-only 口径。
+        """
+        task = self.get(task_id)
+        conn = self._db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT ts, step, status, detail FROM grok_task_events "
+                "WHERE task_id = ? ORDER BY id",
+                (task_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            "task": task,
+            "status": task["status"],
+            "error": task["error"],
+            "steps": [_row(row) for row in rows],
+            "timeline": {
+                "created_at": task["created_at"],
+                "started_at": task["started_at"],
+                "finished_at": task["finished_at"],
+                "next_run_at": task["next_run_at"],
+            },
+        }
+
+    def _event(self, task_id: int, step: str, status: str = "ok", detail: str = "") -> None:
+        conn = self._db.connect()
+        try:
+            conn.execute(
+                "INSERT INTO grok_task_events(task_id, ts, step, status, detail) VALUES(?,?,?,?,?)",
+                (task_id, int(time.time()), step, status, detail[:300]),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -128,15 +170,18 @@ class GrokRegisterService:
             raise ValueError(f"任务状态为 {row['status']}，不能取消")
         conn = self._db.connect()
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE grok_tasks SET status='cancelled', finished_at=? WHERE id=?", (int(time.time()), task_id)
             )
             conn.commit()
+            changed = cursor.rowcount == 1
         finally:
             conn.close()
         task = self._running.get(task_id)
         if task is not None:
             task.cancel()
+        if changed:
+            self._event(task_id, "cancelled")
         return self.get(task_id)
 
     def retry(self, task_id: int) -> dict[str, Any]:
@@ -153,6 +198,7 @@ class GrokRegisterService:
             conn.commit()
         finally:
             conn.close()
+        self._event(task_id, "retried", detail="重置为 queued，等待重新调度")
         return self.get(task_id)
 
     def stats(self) -> dict[str, Any]:
@@ -211,9 +257,12 @@ class GrokRegisterService:
                 (int(time.time()), task_id),
             )
             conn.commit()
-            return cursor.rowcount == 1
+            claimed = cursor.rowcount == 1
         finally:
             conn.close()
+        if claimed:
+            self._event(task_id, "running", detail="执行器接手")
+        return claimed
 
     async def _execute(self, task_id: int) -> None:
         task = self.get(task_id)
@@ -230,6 +279,7 @@ class GrokRegisterService:
                 conn.commit()
             finally:
                 conn.close()
+            self._event(task_id, "succeeded", detail="执行器返回结果并写入 result_json")
         except asyncio.CancelledError:
             self._mark_cancelled(task_id)
             raise
@@ -245,19 +295,24 @@ class GrokRegisterService:
                     error=str(exc)[:300],
                     next_run_at=int(time.time()) + _backoff_seconds(int(current["attempts"])),
                 )
+                self._event(task_id, "retry", "failed", str(exc)[:300])
             else:
                 self._update(task_id, "failed", error=str(exc)[:300], finished_at=int(time.time()))
+                self._event(task_id, "failed", "failed", str(exc)[:300])
 
     def _mark_cancelled(self, task_id: int) -> None:
         conn = self._db.connect()
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE grok_tasks SET status='cancelled', finished_at=? WHERE id=? AND status='running'",
                 (int(time.time()), task_id),
             )
             conn.commit()
+            changed = cursor.rowcount == 1
         finally:
             conn.close()
+        if changed:
+            self._event(task_id, "cancelled")
 
     def _update(self, task_id: int, status: str, **fields: Any) -> None:
         allowed = {"error", "next_run_at", "finished_at"}

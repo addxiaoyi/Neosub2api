@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..security import admin_user, current_user
+from ..security import admin_user
 
 router = APIRouter(prefix="/api/grok/register", tags=["grok-register"])
 
@@ -35,15 +35,25 @@ def create_task(body: TaskCreate, request: Request, user: dict = Depends(admin_u
     )
 
 
+# 任务行含 proxy / payload_json / result_json，读侧与写侧同一口径：仅 admin
 @router.get("/tasks")
-def list_tasks(request: Request, limit: int = 50, user: dict = Depends(current_user)):
+def list_tasks(request: Request, limit: int = 50, user: dict = Depends(admin_user)):
     return _service(request).list_tasks(limit)
 
 
 @router.get("/tasks/{task_id}")
-def get_task(task_id: int, request: Request, user: dict = Depends(current_user)):
+def get_task(task_id: int, request: Request, user: dict = Depends(admin_user)):
     try:
         return _service(request).get(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/tasks/{task_id}/detail")
+def task_detail(task_id: int, request: Request, user: dict = Depends(admin_user)):
+    """任务详情：状态机步骤 + 时间线（步骤取自 grok_task_events，不是前端推测）。"""
+    try:
+        return _service(request).detail(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -68,6 +78,8 @@ def retry_task(task_id: int, request: Request, user: dict = Depends(admin_user))
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+# 队列状态只给 GrokRegisterTasks.tsx 用，而该组件挂在 ProvidersSection 的 isAdmin 分支下，
+# 消费方与端点同一口径：仅 admin
 @router.get("/worker")
-def worker(request: Request, user: dict = Depends(current_user)):
+def worker(request: Request, user: dict = Depends(admin_user)):
     return _service(request).stats()
