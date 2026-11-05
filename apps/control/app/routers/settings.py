@@ -168,6 +168,9 @@ SECRET_EXCLUSIONS = (
     "providers 表与 provider_config 中的 api_key / token / secret / password",
     "upstream_config 中的密钥字段",
     "环境变量里的密钥（CODEBUDDY_API_KEY 等）",
+    "UNIFIED_BACKUP_ENCRYPTION_KEY（远端备份加密密钥，只存在于环境变量）",
+    "UNIFIED_BACKUP_S3_ACCESS_KEY_ID / UNIFIED_BACKUP_S3_SECRET_ACCESS_KEY / "
+    "UNIFIED_BACKUP_S3_SESSION_TOKEN（远端 S3 凭据，只存在于环境变量）",
 )
 
 
@@ -213,6 +216,11 @@ RUNTIME_ITEMS: tuple[RuntimeItem, ...] = (
     RuntimeItem("alert_usage_missing_ratio_percent", "int", 1, 100),
     RuntimeItem("alert_usage_missing_min_requests", "int", 10, 10000),
     RuntimeItem("alert_usage_missing_window_sec", "int", 60, 86400),
+    # 远端备份：界面入口在「备份」分组（本段只落参数与接口），值都参与导出/导入
+    RuntimeItem("backup_remote_enabled", "bool", ui=False),
+    RuntimeItem("backup_remote_interval_sec", "int", 3600, 604800, ui=False),
+    RuntimeItem("backup_remote_auto_upload", "bool", ui=False),
+    RuntimeItem("backup_remote_keep", "int", 1, 90, ui=False),
 )
 RUNTIME_BY_KEY = {item.key: item for item in RUNTIME_ITEMS}
 
