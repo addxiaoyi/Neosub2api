@@ -16,13 +16,22 @@ not_billed=失败/断流（本就不写流水）、unlinked=成功但无关联�
 老 key 和 key_id 为空的匿名日志对非 admin 一律不可见（无法归属）。
 出参不含完整密钥，key_prefix 只回显掩码：写入时固化进 request_logs，老行
 （列为 NULL）回退 join api_keys，两边都拿不到给 null 而不是空串。
+
+导出 `GET /api/logs/export`：与列表同一套筛选参数（key_id/provider/model/status/
+days/start/end），admin-only。一次最多 MAX_EXPORT_ROWS 行，命中更多时显式 400 报出
+真实行数，不静默截断。每个单元格都过 `mask_text`（u2a_ 先跑，再 Bearer/JWT/URL
+查询参数/sk-/厂商前缀），Excel 公式注入的四个起始字符一律加前导单引号；正文带
+UTF-8 BOM，Excel 直接双击不乱码。
 """
 
+import csv
+import io
+import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from ..api_utils import log_failure_sql, log_success_sql, now
+from ..api_utils import log_failure_sql, log_success_sql, mask_text, now
 from ..key_prefix import mask_prefix
 from ..security import PermissionDenied, admin_user, audit_event, current_user
 
@@ -30,7 +39,20 @@ router = APIRouter(prefix="/api/logs", tags=["logs"])
 
 MAX_PAGE_SIZE = 200
 DEFAULT_PAGE_SIZE = 20
+# 导出走一次性全量查询，比列表分页贵得多；5000 行足够带走一周的量，
+# 再大的范围请用时间/状态筛选收窄，而不是让单次响应无限膨胀
+MAX_EXPORT_ROWS = 5000
 OWN_LOGS_DENIED = "无权查看他人密钥的请求日志"
+
+# 列名用英文：CSV 是给外部工具读的，表头不随界面语言变
+EXPORT_COLUMNS = (
+    "id", "ts", "time_utc", "key_id", "key_name", "key_prefix", "provider",
+    "model", "status", "prompt_tokens", "completion_tokens", "latency_ms",
+    "stream", "error", "credit", "credit_status",
+)
+
+# Excel 把 = + - @ 开头的单元格当公式执行，前导单引号强制成文本
+_FORMULA_LEADS = frozenset("=+-@")
 
 
 def _owner(user: dict) -> str | None:
@@ -218,6 +240,23 @@ def _row_to_public(
     }
 
 
+def _csv_cell(value: Any) -> str:
+    """单个 CSV 单元格：先脱敏再防注入，bool 出 true/false，None 出空串。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = mask_text(str(value))
+    return f"'{text}" if text[:1] in _FORMULA_LEADS else text
+
+
+def _export_record(item: dict[str, Any]) -> list[str]:
+    stamp = int(item["ts"] or 0)
+    record = dict(item)
+    record["time_utc"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(stamp)) if stamp else ""
+    return [_csv_cell(record[name]) for name in EXPORT_COLUMNS]
+
+
 @router.get("")
 def list_logs(
     request: Request,
@@ -260,6 +299,70 @@ def list_logs(
             for row in rows
         ],
     }
+
+
+@router.get("/export")
+def export_logs(
+    request: Request,
+    key_id: int | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+    days: int | None = None,
+    start: int | None = None,
+    end: int | None = None,
+    user: dict = Depends(admin_user),
+):
+    """导出一份 CSV：筛选语义与列表完全一致，超上限显式 400 而不是截断。"""
+    owner = _owner(user)
+    conn = request.app.state.db.connect()
+    try:
+        if key_id is not None:
+            _assert_key_owned(conn, key_id, user)
+        where, params = _where(
+            key_id=key_id, provider=provider, model=model, status=status,
+            days=days, start=start, end=end, owner=owner,
+        )
+        matched = int(
+            conn.execute(f"SELECT COUNT(*) AS n FROM request_logs{where}", params).fetchone()["n"]
+        )
+        if matched > MAX_EXPORT_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"当前筛选命中 {matched} 行，超过导出上限 {MAX_EXPORT_ROWS} 行；"
+                    "请缩小时间范围或增加筛选条件"
+                ),
+            )
+        rows = conn.execute(
+            f"SELECT * FROM request_logs{where} ORDER BY ts DESC, id DESC LIMIT ?",
+            [*params, MAX_EXPORT_ROWS],
+        ).fetchall()
+        prefixes = _prefixes(conn, rows)
+        credits = _ledger_credits(conn, rows)
+    finally:
+        conn.close()
+
+    items = [
+        _row_to_public(row, _key_prefix(row, prefixes), _credit_of(row, credits))
+        for row in rows
+    ]
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(EXPORT_COLUMNS)
+    writer.writerows(_export_record(item) for item in items)
+    # 带 BOM：Excel 双击打开时按 UTF-8 解码，中文列不会乱码
+    body = ("\ufeff" + buf.getvalue()).encode("utf-8")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="logs-{stamp}.csv"',
+            # 日志可能带上游报错原文，禁止中间层缓存
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/clear")

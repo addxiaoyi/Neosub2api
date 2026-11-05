@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import socket
@@ -164,6 +165,25 @@ def test_ensure_loopback_bind_rejects_public_host():
     assert "回环" in str(exc.value) and "UNIFIED_DEMO_MODE" in str(exc.value)
 
 
+def test_ledger_day_buckets_hold_at_local_morning():
+    """本地 07:30（UTC 为前一日 23:30）时，日桶仍须按 UTC+8 切出 7 天。
+
+    种子行基于本地零点推算，day-0 行会被 min(ts_row, ts) 压到当前时刻；
+    本地凌晨的那个时刻在 UTC 上属于前一日，只有按本地日界分桶才能稳定得到 7 个。
+    """
+    ts = int(dt.datetime(2026, 11, 5, 7, 30, tzinfo=dt.timezone(dt.timedelta(hours=8))).timestamp())
+    day_start = period_bounds("day", ts)[0]
+    rows = []
+    for day, hour, minute, *_rest in demo.DEMO_SUB2_LEDGER:
+        row_ts = day_start - day * 86400 + hour * 3600 + minute * 60
+        if day == 0:
+            row_ts = min(row_ts, ts)
+        rows.append(row_ts)
+    assert len({period_bounds("day", row_ts)[0] for row_ts in rows}) == 7
+    # 旧断言的 UTC 日桶在这个时刻会把 day-0 与 day-1 撞进同一桶，只剩 6 个
+    assert len({row_ts // 86400 for row_ts in rows}) == 6
+
+
 def test_readiness_reflects_demo_provider(demo_site):
     base, _ = demo_site
     resp = httpx.get(f"{base}/api/health/ready", timeout=10, trust_env=False)
@@ -250,7 +270,9 @@ def test_seeded_rows_are_visible_and_marked(demo_site):
         day_start, _ = period_bounds("day", now_ts)
         assert max(row["ts"] for row in ledger) <= now_ts
         assert any(day_start <= row["ts"] <= now_ts for row in ledger)  # 「今日」按当前时间生成
-        assert len({row["ts"] // 86400 for row in ledger}) >= 7  # 跨 7 天分布
+        # 跨 7 天分布按 UTC+8 日桶数（与种子同一口径）；用 ts // 86400 是 UTC 日桶，
+        # 本地凌晨会把被 min(ts_row, ts) 压到今天的 day-0 行算进前一桶，只剩 6 个
+        assert len({period_bounds("day", row["ts"])[0] for row in ledger}) >= 7
 
         # 今日用量 / 预算进度 / 告警阈值：三个 quota 端点都得有真数据
         status = client.get("/api/quota/status").json()

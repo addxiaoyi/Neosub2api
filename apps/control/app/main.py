@@ -21,6 +21,7 @@ from .observability import (
     bind_request,
     configure_logging,
     log_access,
+    record_http,
     request_id_from,
     reset_request,
 )
@@ -28,6 +29,7 @@ from .registry import ProviderRegistry
 from .routers import (
     accounts,
     auth,
+    backup,
     grok,
     health,
     keys,
@@ -36,6 +38,7 @@ from .routers import (
     pricing,
     provider_credentials,
     providers,
+    qoder_sessions,
     quota,
     security as security_router,
     settings as settings_router,
@@ -47,6 +50,7 @@ from .routers import (
 )
 from .security import hash_password, verify_password
 from .services.grok_register import GrokRegisterService
+from .services.provider_health import ProviderHealthService
 from . import demo
 
 logger = logging.getLogger("unified.security")
@@ -140,6 +144,8 @@ def create_app() -> FastAPI:
     _seed_admin(db, settings)
     registry = ProviderRegistry(db, settings)
     grok_service = GrokRegisterService(settings)
+    # 健康检测与 grok 队列同一机制：lifespan 里 start/stop 的 asyncio 周期任务
+    health_service = ProviderHealthService(settings, db, registry)
     # 演示模式：默认关闭；开启时先校验回环地址，再起进程内假上游并注册 demo provider
     demo_runtime = demo.install(settings, db, registry) if settings.demo_mode else None
 
@@ -148,9 +154,11 @@ def create_app() -> FastAPI:
         if demo_runtime is not None:
             await demo_runtime.seed()
         grok_service.start()
+        health_service.start()
         try:
             yield
         finally:
+            await health_service.stop()
             await grok_service.stop()
             if demo_runtime is not None:
                 demo_runtime.stop()
@@ -168,6 +176,7 @@ def create_app() -> FastAPI:
     app.state.db = db
     app.state.registry = registry
     app.state.grok_service = grok_service
+    app.state.health_service = health_service
     app.state.demo = demo_runtime
 
     app.add_middleware(
@@ -204,17 +213,24 @@ def create_app() -> FastAPI:
         token = bind_request(request_id, request.url.path)
         started = time.perf_counter()
         status = 500
+        provider = "-"
         try:
             response = await call_next(request)
             status = response.status_code
+            provider = response.headers.get("x-upstream-provider", "-") or "-"
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
         finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            # 路由模板而不是原始路径：避免把 /api/xxx/<id> 的 id 带进 Prometheus label
+            route = request.scope.get("route")
+            endpoint = getattr(route, "path", "") or "<unmatched>"
+            record_http(request.method, endpoint, status, elapsed_ms, provider)
             log_access(
                 request.method,
                 request.url.path,
                 status,
-                (time.perf_counter() - started) * 1000,
+                elapsed_ms,
                 request_id,
             )
             reset_request(token)
@@ -276,7 +292,7 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
     for module in (health, auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
-                   sub2api, pricing, quota, grok, system, v1, logs, security_router):
+                   sub2api, pricing, quota, grok, system, backup, v1, logs, security_router, qoder_sessions):
         app.include_router(module.router)
 
     @app.get("/healthz")

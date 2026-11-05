@@ -17,8 +17,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
+from collections import deque
 from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlsplit
@@ -28,6 +30,19 @@ from .api_utils import mask_text
 REQUEST_ID_HEADER = "X-Request-Id"
 LOG_FORMAT_ENV = "UNIFIED_LOG_FORMAT"
 TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+# 进程内指标：Prometheus 抓取要的是真实运行时状态，而不是再从日志表重算一遍。
+# 端点/耗时这两个维度 request_logs 里没有（v1 只写 provider/model/status/latency），
+# 所以在访问日志中间件里顺手累计；这些值随进程重启归零，与官方客户端库语义一致。
+DURATION_BUCKETS_MS = (10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, float("inf"))
+DURATION_SAMPLE_SIZE = 5000
+
+_metric_lock = threading.Lock()
+_http_counts: dict[tuple[str, str, str, str], int] = {}
+_duration_bucket_counts: list[int] = [0] * len(DURATION_BUCKETS_MS)
+_duration_samples: deque[float] = deque(maxlen=DURATION_SAMPLE_SIZE)
+_duration_count = 0
+_duration_sum_ms = 0.0
 
 # 只接受可安全回写的字符；其余（换行、引号、控制字符）一律重新生成
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:\-]{1,128}")
@@ -61,6 +76,51 @@ def reset_request(token) -> None:
 
 def current_context() -> dict[str, str]:
     return dict(_ctx.get())
+
+
+def status_class(status: int) -> str:
+    return f"{status // 100}xx" if 100 <= int(status) <= 599 else "unknown"
+
+
+def record_http(method: str, endpoint: str, status: int, duration_ms: float,
+                provider: str = "") -> None:
+    """累计进程内 HTTP 指标；endpoint 传路由模板，避免把路径参数带进 label。
+
+    provider 取自响应头 x-upstream-provider（v1 网关会写），控制面请求记为 "-"。
+    """
+    global _duration_count, _duration_sum_ms
+    label = (method.upper() or "-", endpoint or "/", status_class(status), provider or "-")
+    elapsed = max(0.0, float(duration_ms))
+    with _metric_lock:
+        _http_counts[label] = _http_counts.get(label, 0) + 1
+        for index, boundary in enumerate(DURATION_BUCKETS_MS):
+            if elapsed <= boundary:
+                _duration_bucket_counts[index] += 1
+                break
+        _duration_samples.append(elapsed)
+        _duration_count += 1
+        _duration_sum_ms += elapsed
+
+
+def http_metrics_snapshot() -> dict[str, Any]:
+    with _metric_lock:
+        return {
+            "requests": [
+                (method, endpoint, state, provider, count)
+                for (method, endpoint, state, provider), count in _http_counts.items()
+            ],
+            "duration_buckets": list(_duration_bucket_counts),
+            "duration_count": _duration_count,
+            "duration_sum_ms": _duration_sum_ms,
+            "duration_samples": sorted(_duration_samples),
+        }
+
+
+def sample_quantile(sorted_values: list[float], quantile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    index = min(len(sorted_values) - 1, max(0, int(round((len(sorted_values) - 1) * quantile))))
+    return sorted_values[index]
 
 
 def log_access(method: str, path: str, status: int, duration_ms: float, request_id: str) -> None:

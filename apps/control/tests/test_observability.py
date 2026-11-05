@@ -205,10 +205,15 @@ def test_metrics_requires_admin_and_reads_existing_tables(admin, base_url) -> No
     with httpx.Client(base_url=base_url, trust_env=False, timeout=10.0) as client:
         assert client.get("/api/metrics").status_code == 401
 
-    body = admin.get("/api/metrics").json()
+    text = admin.get("/api/metrics")
+    assert text.status_code == 200
+    assert text.headers["content-type"].startswith("text/plain")
+    assert "version=0.0.4" in text.headers["content-type"]
+
+    body = admin.get("/api/metrics/json").json()
     assert {"generated_at", "window_seconds", "requests", "providers", "failure_rate_limited"} <= set(body)
     assert {"total", "success", "failed"} <= set(body["requests"])
     assert isinstance(body["providers"], list)
     assert body["window_seconds"] == 3600
-    narrowed = admin.get("/api/metrics", params={"window_seconds": 10})
+    narrowed = admin.get("/api/metrics/json", params={"window_seconds": 10})
     assert narrowed.json()["window_seconds"] == 60  # 下限收口，避免全表扫描

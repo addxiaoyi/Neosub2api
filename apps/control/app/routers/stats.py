@@ -12,10 +12,14 @@ import datetime as dt
 from fastapi import APIRouter, Depends, Request
 
 from ..api_utils import log_success_sql, now
-from ..billing import to_usd
+from ..billing import WINDOW_TZ_OFFSET, period_bounds, to_usd
 from ..security import current_user
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
+
+# 日界与配额周期同一口径（UTC+8），不要用宿主机本地时区：
+# 服务器 TZ=UTC 时 date.today() 会把「今天」拖到北京时间 08:00 才翻篇。
+_TZ = dt.timezone(dt.timedelta(seconds=WINDOW_TZ_OFFSET))
 
 
 def _owner(user: dict) -> str | None:
@@ -33,8 +37,13 @@ def _owned(owner: str | None) -> tuple[str, list]:
 
 
 def _day_start(offset_days: int = 0) -> int:
-    day = dt.date.today() - dt.timedelta(days=offset_days)
-    return int(dt.datetime.combine(day, dt.time.min).timestamp())
+    """第 offset_days 天前的日界（UTC+8），复用它避免第二份日界算法。"""
+    return period_bounds("day", now() - offset_days * 86400)[0]
+
+
+def _day_label(ts: int) -> str:
+    """epoch 秒 → UTC+8 日期标签，与 _day_start 同一时区。"""
+    return dt.datetime.fromtimestamp(int(ts), _TZ).date().isoformat()
 
 
 def _zero_summary() -> dict:
@@ -145,7 +154,7 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
         buckets: dict[str, dict] = {}
         start = _day_start(days - 1)
         for offset in range(days - 1, -1, -1):
-            label = (dt.date.today() - dt.timedelta(days=offset)).isoformat()
+            label = _day_label(now() - offset * 86400)
             buckets[label] = {
                 "day": label,
                 "requests": 0,
@@ -158,7 +167,7 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
             "SELECT * FROM request_logs WHERE ts >= ?" + scope_and, (start, *scope_params)
         ).fetchall()
         for row in rows:
-            label = dt.datetime.fromtimestamp(row["ts"]).date().isoformat()
+            label = _day_label(row["ts"])
             bucket = buckets.get(label)
             if bucket is None:
                 continue
@@ -174,7 +183,7 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
             "SELECT ts, billed_micro FROM billing_ledger WHERE ts >= ?" + scope_and,
             (start, *scope_params),
         ):
-            label = dt.datetime.fromtimestamp(row["ts"]).date().isoformat()
+            label = _day_label(row["ts"])
             if label in micro_by_day:
                 micro_by_day[label] += int(row["billed_micro"] or 0)
         for label, bucket in buckets.items():

@@ -28,6 +28,7 @@ RECENT_ROUTES = {
     "/api/health": {"get"},
     "/api/health/ready": {"get"},
     "/api/metrics": {"get"},
+    "/api/metrics/json": {"get"},
     "/api/accounts/capabilities": {"get"},
     "/api/settings/runtime-config": {"get", "post"},
     "/api/settings/runtime-config/export": {"get"},

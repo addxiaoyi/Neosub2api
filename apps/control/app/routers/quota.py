@@ -20,17 +20,20 @@
 """
 
 import hashlib
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..api_utils import now
+from ..alerting import evaluate_alerts
 from ..billing import QUOTA_WINDOWS, to_usd, window_usage
 from ..key_prefix import KEY_PREFIX, mask_prefix
 from ..security import PermissionDenied, admin_user, audit_event, current_user
 
 router = APIRouter(prefix="/api/quota", tags=["quota"])
+logger = logging.getLogger(__name__)
 
 MAX_PERCENT = 1000
 DENIED_MESSAGE = "无权查看该密钥的配额数据"
@@ -154,6 +157,7 @@ def _alert_public(row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "policy_id": row["policy_id"],
+        "kind": row["kind"] or "quota",
         "threshold_percent": int(row["threshold_percent"]),
         "window": row["window"],
         "period_start": int(row["period_start"]),
@@ -379,6 +383,11 @@ def list_alerts(
     start = max(0, offset)
     conn = request.app.state.db.connect()
     try:
+        # 读取时评估：v1/billing 的请求热路径按约束不改，告警落库挂在抓取/查询入口
+        try:
+            evaluate_alerts(conn, request.app.state.settings)
+        except Exception:  # noqa: BLE001 - 评估失败不影响历史查询
+            logger.exception("读取告警历史前评估告警失败")
         key = _scope_key(conn, key_id, api_key, user)
         owner = _owner(user)
         where: list[str] = []
@@ -401,7 +410,7 @@ def list_alerts(
             f"SELECT COUNT(*) AS n {base}{clause}", params
         ).fetchone()["n"])
         sql = (
-            "SELECT a.*, p.key_id AS key_id, p.provider AS provider, p.model AS model, "
+            "SELECT a.*, p.key_id AS key_id, p.provider AS policy_provider, p.model AS model, "
             "k.name AS key_name, k.prefix AS key_prefix "
             "FROM quota_alerts a LEFT JOIN quota_policies p ON p.id = a.policy_id "
             "LEFT JOIN api_keys k ON k.id = p.key_id"
@@ -414,7 +423,8 @@ def list_alerts(
                 "key_id": row["key_id"],
                 "key_name": row["key_name"] or "",
                 "key_prefix": _mask_prefix(row["key_prefix"] or ""),
-                "provider": row["provider"] or "",
+                # 全局规则（provider 连败 / usage_missing 占比）没有策略行，对象存在 subject
+                "provider": row["subject"] or row["policy_provider"] or "",
                 "model": row["model"] or "",
             }
             for row in rows
