@@ -2,6 +2,7 @@
 
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
+  AlertCircle,
   Gift,
   Zap,
   KeyRound,
@@ -17,12 +18,15 @@ import {
   RotateCcw,
   StickyNote,
   ExternalLink,
+  FileUp,
+  RefreshCw,
 } from 'lucide-react';
 import {useProviders} from '@/lib/use-providers';
 import {providerLabel} from '@/lib/providers';
 import {
   NO_ACCOUNT_OPS,
   accountOpsApi,
+  canImportManaged,
   type AccountOps,
   type ProviderAccountOps,
 } from '@/components/common/accounts/account-ops';
@@ -32,6 +36,7 @@ import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditExpiry, CreditsMeta, UpstreamStatus} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {
+  LOW_CREDIT_THRESHOLD,
   availabilityLabelKey,
   availabilityOf,
   isDegraded,
@@ -42,6 +47,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {ImportAccountDialog} from '@/components/common/accounts/ImportAccountDialog';
 import {OAuthDialog} from '@/components/common/accounts/OAuthDialog';
 import {BatchOAuthDialog} from '@/components/common/accounts/BatchOAuthDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
@@ -59,6 +65,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+
+/** 批量接口单次上限（后端 BATCH_MAX_FILES），超过就是 400，先在前端拦下 */
+const BATCH_LIMIT = 200;
 
 /** CodeBuddy 是唯一实现了全部账号方法的 provider；能力接口未返回前按它兜底，避免首屏按钮闪烁。
  *  接口**失败**时不再兜底：能力未知就不出按钮（见 capsFailed）。 */
@@ -134,10 +143,73 @@ export default function AccountsPage() {
   /** 聚合操作的目标服务商：`all` 时不指定，交给后端在已启用集合里挑（与上面的并集判据一致） */
   const targetProvider = providerFilter === 'all' ? undefined : providerFilter;
   const selectedMeta = providerFilter === 'all' ? undefined : opsMeta[providerFilter];
+  /**
+   * 「导入账号」入口的可见性：只给本仓能真正落库并消费凭证的 managed
+   * （unified / external / quota），且该服务商**已启用**。sidecar 账号生命周期
+   * 在进程外、demo 是种子数据，给按钮就是点了没效果的假入口；未启用服务商的
+   * 账号即使写进库也不会被转发选中（后端同样拒绝），同样是死入口。
+   * 权限与其余按钮同口径（isAdmin）。
+   */
+  const canImport = isAdmin
+    && !capsFailed
+    && (providerFilter === 'all'
+      ? Object.values(opsMeta).some((p) => p.enabled && canImportManaged(p.managed))
+      : !!(selectedMeta?.enabled && canImportManaged(selectedMeta.managed)));
+  /** 导入弹窗的服务商候选：已启用且可导入，判据与 canImport 一致 */
+  const importProviders = useMemo(
+    () =>
+      Object.values(opsMeta)
+        .filter((p) => p.enabled && canImportManaged(p.managed))
+        .map((p) => ({id: p.id, name: p.label})),
+    [opsMeta],
+  );
+  /**
+   * 实时积分请求的硬判据：能力接口已回来、且确实有一家**已启用**的 provider
+   * 支持 credits。不能沿用 selectedOps 的首屏兜底——那只是「先按 CodeBuddy 画
+   * 按钮」的假设，演示模式只启用 demo_local 时按它发出去的
+   * POST /api/accounts/refresh-credits 必然 503（每次进页面最多 9 次）。
+   */
+  const creditsReady = useMemo(() => {
+    if (capsFailed) return false;
+    if (providerFilter === 'all') {
+      return Object.values(opsMeta).some((p) => p.enabled && p.ops.credits);
+    }
+    const row = opsMeta[providerFilter];
+    return !!(row?.enabled && row.ops.credits);
+  }, [capsFailed, opsMeta, providerFilter]);
+  /**
+   * 「同步账号」入口：与后端 POST /api/accounts/sync 的权限一致（admin-only），
+   * 可见性跟能力位 ops.list（适配器真实实现了 sync_accounts）——没有 list 能力的
+   * 服务商点下去只会得到全零 no-op，画出来就是假按钮。
+   */
+  const canSync = isAdmin && selectedOps.list;
+  /**
+   * 「全部」分类取不到 selectedMeta，顶栏又因能力并集为空而整片没按钮时，
+   * 页面上没有任何解释（单分类有 managed_* 提示，all 没有）——补一句，
+   * 否则看起来像按钮坏了。判据与下面各按钮的显示条件对齐：能力接口已返回、
+   * 未失败，oauth/restart/credits/checkin（还要看 realm）与「导入账号」一个都没有。
+   */
+  const allBarEmpty = providerFilter === 'all'
+    && allOps !== null
+    && !capsFailed
+    && !canImport
+    && !canSync
+    && !(allOps.oauth || allOps.restart || allOps.credits || (allOps.checkin && realm === 'cn'));
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 账号列表拉取失败：必须与「真的没有账号」区分开，否则用户会把故障当空池 */
+  const [loadFailed, setLoadFailed] = useState(false);
+  /** 批量操作的多选（按 file，file 是账号行在后端的唯一标识） */
+  const [selected, setSelected] = useState<string[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  /** 批量结果必须留在页面上逐条展开：接口恒 200，失败原因只能靠 results 里的 error */
+  const [batchResult, setBatchResult] = useState<{
+    action: 'disable' | 'delete' | 'restart';
+    results: {id: string; ok: boolean; error?: string}[];
+  } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [oauthOpen, setOAuthOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
   // 备注编辑（issue #67）：记的是**哪个账号**而不是布尔——弹窗要以该账号当前的
@@ -166,8 +238,14 @@ export default function AccountsPage() {
       })
       .catch(() => setCapsFailed(true));
     const [accRes, upRes] = await Promise.allSettled([accountApi.list(), upstreamApi.status()]);
-    if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
-    else notify.err(errText(accRes.reason));
+    if (accRes.status === 'fulfilled') {
+      setAccounts(accRes.value.accounts);
+      setLoadFailed(false);
+    } else {
+      // 不再只弹一条瞬时 toast：列表区会显示可重试的错误块，文案走 i18n，
+      // 不把 axios 的英文 "Network Error" 直接抛给用户。
+      setLoadFailed(true);
+    }
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
     await caps;
     setLoading(false);
@@ -180,8 +258,10 @@ export default function AccountsPage() {
   // 打开页面时自动拉一次实时积分：上游 /status 的 credits 可能滞后数小时，
   // 首次进入应展示真实余额。服务端有 TTL 缓存，重复进入不会频繁请求。
   useEffect(() => {
-    // 没有积分能力的服务商（占位适配器 / sidecar）不必发这个请求；实时积分是 admin-only
-    if (!selectedOps.credits || !isAdmin) return;
+    // 只认**已确认**的能力：没有积分能力的服务商（占位适配器 / sidecar / 未启用）
+    // 一律不发；能力接口回来之前也不发（首屏兜底只是画按钮的假设，不是事实）。
+    // 实时积分是 admin-only。
+    if (!creditsReady || !isAdmin) return;
     let alive = true;
     (async () => {
       try {
@@ -202,7 +282,7 @@ export default function AccountsPage() {
     return () => {
       alive = false;
     };
-  }, [selectedOps.credits, targetProvider, isAdmin]);
+  }, [creditsReady, targetProvider, isAdmin]);
 
   // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
   // 否则会一直显示打开页面那一刻的旧数据。
@@ -277,6 +357,35 @@ export default function AccountsPage() {
     }
   }, [load, targetProvider, t]);
 
+  /** 手动同步账号池：绕过 30 秒节流强制拉一次，逐家结果汇总成提示，不静默失败 */
+  const [syncing, setSyncing] = useState(false);
+  const syncAccounts = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const results = await accountOpsApi.syncNow(targetProvider);
+      const synced = Object.values(results).reduce((n, r) => n + Math.max(r.synced, 0), 0);
+      const errors = Object.entries(results)
+        .filter(([, r]) => r.note)
+        .map(([pid, r]) => `${pid}: ${r.note}`);
+      if (errors.length === 0) {
+        notify.ok(t('accounts.syncDone'), t('accounts.syncDoneDetail', {n: synced}));
+      } else if (synced > 0) {
+        // 部分成功：既报同步条数，也把失败家的上游错误原样带出（后端已脱敏）
+        notify.warn(
+          t('accounts.syncPartial'),
+          `${t('accounts.syncDoneDetail', {n: synced})} ${errors.join(t('common.listSeparator'))}`,
+        );
+      } else {
+        notify.err(t('accounts.syncFailed'), errors.join(t('common.listSeparator')));
+      }
+      await load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setSyncing(false);
+    }
+  }, [targetProvider, load, t]);
+
   /**
    * 将本地 auths 文件与上游账号池状态按 uid 合并。
    *
@@ -285,8 +394,9 @@ export default function AccountsPage() {
    * 「未加载」，用户看到自相矛盾的面板）。
    */
   const merged = useMemo(() => {
-    const codebuddy = accounts.filter((a) => (a.provider ?? 'codebuddy') === 'codebuddy');
-    const others = accounts.filter((a) => (a.provider ?? 'codebuddy') !== 'codebuddy');
+    // 本端导入的行（local_only）上游没有对应账号，跟别家一样如实标未知
+    const codebuddy = accounts.filter((a) => (a.provider ?? 'codebuddy') === 'codebuddy' && !a.local_only);
+    const others = accounts.filter((a) => (a.provider ?? 'codebuddy') !== 'codebuddy' || a.local_only);
     // 上游 /status 只覆盖 CodeBuddy 的账号池。别家的账号没有池状态，
     // 套用这份快照会被判成「不在池里 / 未加载」，属于硬造数据，故如实标未知。
     if (others.length === 0) return mergePoolStatus(accounts, upstream);
@@ -315,6 +425,69 @@ export default function AccountsPage() {
         return true;
       }),
     [merged, realm, providerFilter],
+  );
+
+  /**
+   * 选中项只保留当前列表可见的行：切分类 / 切版本 / 刷新后账号消失时，
+   * 不能让看不见的行继续被批量接口带着走。
+   */
+  useEffect(() => {
+    const alive = new Set(visible.map((a) => a.file));
+    setSelected((prev) => {
+      const next = prev.filter((file) => alive.has(file));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [visible]);
+
+  const toggleSelected = useCallback((file: string) => {
+    setSelected((prev) => (prev.includes(file) ? prev.filter((f) => f !== file) : [...prev, file]));
+  }, []);
+
+  const allVisibleSelected = visible.length > 0 && selected.length === visible.length;
+
+  const toggleAllVisible = useCallback(() => {
+    setSelected(allVisibleSelected ? [] : visible.map((a) => a.file));
+  }, [allVisibleSelected, visible]);
+
+  /**
+   * 执行批量动作。注意后端整批恒 200，`ok` 只是「全部成功」的聚合；
+   * 失败必须逐条展示 results[].error（多数 provider 的 disable / restart 会回「不支持」，
+   * 这是后端口径，不是前端故障）。
+   */
+  const runBatch = useCallback(
+    async (action: 'disable' | 'delete' | 'restart', disabled = true) => {
+      if (!selected.length || batchBusy) return;
+      if (selected.length > BATCH_LIMIT) {
+        notify.err(t('accounts.batchTooMany', {max: BATCH_LIMIT}));
+        return;
+      }
+      setBatchBusy(true);
+      try {
+        const r = await accountApi.batch(action, selected, disabled);
+        const failed = r.results.filter((item) => !item.ok);
+        setBatchResult({action, results: r.results});
+        setSelected([]);
+        if (failed.length === 0) {
+          notify.ok(
+            t('accounts.batchAllOk'),
+            t('accounts.batchSummary', {ok: r.results.length, fail: 0}),
+          );
+        } else {
+          notify.warn(
+            t('accounts.batchFailedTitle', {n: failed.length}),
+            t('accounts.batchSummary', {ok: r.results.length - failed.length, fail: failed.length}),
+          );
+        }
+        // 批量接口不回更新后的账号行，必须重新拉列表才对得上界面
+        await load();
+        window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
+      } catch (e) {
+        notify.err(errText(e));
+      } finally {
+        setBatchBusy(false);
+      }
+    },
+    [selected, batchBusy, load, t],
   );
 
   /**
@@ -628,7 +801,7 @@ export default function AccountsPage() {
       ? 'text-muted-foreground'
       : value <= 0
         ? 'text-destructive-text'
-        : value < 200
+        : value < LOW_CREDIT_THRESHOLD
           ? 'text-warning-text'
           : 'text-foreground';
     return (
@@ -824,10 +997,11 @@ export default function AccountsPage() {
             {off ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
           </Button>
         )}
-        {op.delete && (
+        {/* 本端导入的行（local_only）上游没有 delete_account，但必须能删——不然导入就成了一次性的 */}
+        {(op.delete || a.local_only) && (
           <ConfirmDialog
             title={t('accounts.deleteTitle', {name: a.nickname || a.uid})}
-            description={t('accounts.deleteDesc')}
+            description={a.local_only ? t('accounts.deleteDescLocalOnly') : t('accounts.deleteDesc')}
             confirmText={t('accounts.delete')}
             destructive
             onConfirm={() => run(a.file, () => accountApi.remove(a.file), t('accounts.deleted'))}
@@ -908,12 +1082,27 @@ export default function AccountsPage() {
                 {t('accounts.opsUnavailable')}
               </span>
             )}
-            {/* 非 CodeBuddy 服务商没有网页添加账号的入口。这里明说账号在哪管理，
-                否则操作区整片消失，看起来像按钮坏了。三档由后端 managed 给出：
-                sidecar / quota（sub2api）/ external（token 型，无账号概念）。 */}
-            {selectedMeta && selectedMeta.managed !== 'unified' && (
+            {/* 未启用的分类：导入入口按判据隐藏了，这里必须说明「为什么没按钮」，
+                否则看起来像坏了。每个分类各自带自己的服务商名，点哪个分类都能对上号。 */}
+            {selectedMeta && !selectedMeta.enabled && (
               <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
-                {t(`accounts.managed_${selectedMeta.managed}`)}
+                {t('accounts.importDisabledHint', {provider: selectedMeta.label})}
+              </span>
+            )}
+            {/* 非 CodeBuddy 服务商没有网页添加账号的入口。这里明说账号在哪管理，
+                否则操作区整片消失，看起来像按钮坏了。三档由后端 managed 给出，
+                可导入的（external/quota）换成能动手的口径。 */}
+            {selectedMeta && selectedMeta.enabled && selectedMeta.managed !== 'unified' && (
+              <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
+                {isAdmin && canImportManaged(selectedMeta.managed)
+                  ? t(`accounts.importHint_${selectedMeta.managed}`)
+                  : t(`accounts.managed_${selectedMeta.managed}`)}
+              </span>
+            )}
+            {/* 「全部」分类没有 selectedMeta，上面的提示取不到；顶栏为空时在这补说明 */}
+            {allBarEmpty && (
+              <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
+                {t('accounts.managedAll')}
               </span>
             )}
             {isAdmin && selectedOps.restart && (
@@ -935,7 +1124,7 @@ export default function AccountsPage() {
                 只读账号页面加载时本来就会走缓存路径拿到实时值，所以这个按钮
                 对它们没有意义 —— 显示出来只会点了报 403（issue #56 之后权限
                 是明确的：force 仍限管理员）。与上面几个管理员操作同一个口径。 */}
-            {isAdmin && selectedOps.credits && (
+            {isAdmin && creditsReady && (
             <Button
               size="sm"
               variant="outline"
@@ -994,9 +1183,48 @@ export default function AccountsPage() {
                 </Button>
               </>
             )}
+            {/* 贴凭证导入：sidecar/demo 不给（假按钮），unified/external/quota 都给 */}
+            {canImport && (
+              <Button size="sm" variant="outline" className="rounded-full" onClick={() => setImportOpen(true)}>
+                <FileUp className="mr-1.5 h-3 w-3" />
+                {t('accounts.importAccount')}
+              </Button>
+            )}
+            {/* 手动同步：admin-only + 有 list 能力的服务商才画；进行中转圈禁用 */}
+            {canSync && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={syncAccounts}
+                disabled={syncing}
+              >
+                <RefreshCw className={syncing ? 'animate-spin' : ''} />
+                {t('accounts.syncAccounts')}
+              </Button>
+            )}
           </>
         }
       />
+
+      {/* 拉取失败：单独一块，与「真的没有账号」分开。给出重试，不让用户只能刷新整页 */}
+      {loadFailed && !loading && (
+        <section className="flex flex-wrap items-start justify-between gap-3 rounded-[20px] border border-destructive/30 bg-destructive/5 px-4 py-3.5">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" />
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-destructive-text">{t('accounts.loadFailedTitle')}</div>
+              <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                {t('accounts.loadFailedDesc')}
+              </div>
+            </div>
+          </div>
+          <Button size="sm" variant="outline" className="shrink-0 rounded-full" onClick={load} disabled={loading}>
+            <RotateCcw className="mr-1.5 h-3 w-3" />
+            {t('common.retry')}
+          </Button>
+        </section>
+      )}
 
       {/* 服务商筛选：只有一家在册时没有筛选的意义，直接不显示 */}
       {providers.length > 1 && (
@@ -1029,6 +1257,120 @@ export default function AccountsPage() {
         </div>
       )}
 
+      {/* 批量操作条：admin-only（接口本身也是 admin-only），viewer 完全看不到多选框与这一条 */}
+      {isAdmin && (selected.length > 0 || batchResult) && (
+        <section className="rounded-[20px] bg-muted px-4 py-3">
+          {selected.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs font-medium tabular-nums">
+                {batchBusy
+                  ? t('accounts.batchRunning')
+                  : t('accounts.batchSelected', {n: selected.length})}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => runBatch('disable', true)}
+              >
+                <Pause className="mr-1 h-3 w-3" />
+                {t('accounts.batchDisable')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => runBatch('disable', false)}
+              >
+                <Play className="mr-1 h-3 w-3" />
+                {t('accounts.batchEnable')}
+              </Button>
+              <ConfirmDialog
+                title={t('accounts.batchRestartTitle')}
+                description={t('accounts.batchRestartDesc', {n: selected.length})}
+                confirmText={t('accounts.batchConfirm')}
+                onConfirm={() => runBatch('restart')}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px]"
+                    disabled={batchBusy}
+                  >
+                    <Power className="mr-1 h-3 w-3" />
+                    {t('accounts.batchRestart')}
+                  </Button>
+                }
+              />
+              <ConfirmDialog
+                title={t('accounts.batchDeleteTitle')}
+                description={t('accounts.batchDeleteDesc', {n: selected.length})}
+                confirmText={t('accounts.batchDelete')}
+                destructive
+                onConfirm={() => runBatch('delete')}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px] text-destructive-text hover:text-destructive-text"
+                    disabled={batchBusy}
+                  >
+                    <Trash2 className="mr-1 h-3 w-3" />
+                    {t('accounts.batchDelete')}
+                  </Button>
+                }
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 rounded-full text-[11px]"
+                disabled={batchBusy}
+                onClick={() => setSelected([])}
+              >
+                {t('accounts.batchClear')}
+              </Button>
+            </div>
+          )}
+
+          {/* 逐条结果：成功/失败数 + 每条失败的原因原文，绝不合并成「部分失败」 */}
+          {batchResult && (
+            <div className={selected.length > 0 ? 'mt-2 border-t border-border/40 pt-2' : ''}>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                <span>
+                  {t('accounts.batchSummary', {
+                    ok: batchResult.results.filter((item) => item.ok).length,
+                    fail: batchResult.results.filter((item) => !item.ok).length,
+                  })}
+                </span>
+                <span>{t('accounts.batchLoadNote')}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 rounded-full text-[11px]"
+                  onClick={() => setBatchResult(null)}
+                >
+                  {t('common.close')}
+                </Button>
+              </div>
+              {batchResult.results.some((item) => !item.ok) && (
+                <div className="mt-1 flex flex-col gap-0.5">
+                  {batchResult.results.filter((item) => !item.ok).map((item) => (
+                    <div key={item.id} className="flex flex-wrap items-baseline gap-1.5 text-[10px] leading-4">
+                      <span className="font-mono text-foreground">{item.id}</span>
+                      <span className="whitespace-normal text-destructive-text">
+                        {item.error || t('accounts.batchNoReason')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="overflow-hidden rounded-[20px] bg-muted">
         {/* 手机端：卡片列表。表格 6 列在窄屏需要横向滚动，读一行要来回拖，
             改为纵向卡片后信息一眼可见 */}
@@ -1037,6 +1379,15 @@ export default function AccountsPage() {
             <div key={a.file} className="space-y-2.5 px-3.5 py-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2.5">
+                  {isAdmin && (
+                    <input
+                      type="checkbox"
+                      className="size-4 shrink-0 cursor-pointer accent-primary"
+                      checked={selected.includes(a.file)}
+                      onChange={() => toggleSelected(a.file)}
+                      aria-label={t('accounts.batchSelectRow', {name: a.nickname || a.uid})}
+                    />
+                  )}
                   {renderAvatar(a)}
                   <div className="min-w-0">
                     <div
@@ -1072,7 +1423,7 @@ export default function AccountsPage() {
               {isAdmin && renderActions(a)}
             </div>
           ))}
-          {!visible.length && !loading && (
+          {!visible.length && !loading && !loadFailed && (
             <div className="px-4 py-12 text-center text-xs text-muted-foreground">{t('accounts.tableEmpty')}</div>
           )}
           {loading && !merged.length && (
@@ -1085,8 +1436,19 @@ export default function AccountsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">UID</TableHead>
+              {isAdmin && (
+                <TableHead className="w-9 pl-4 pr-0">
+                  <input
+                    type="checkbox"
+                    className="size-4 cursor-pointer align-middle accent-primary"
+                    checked={allVisibleSelected}
+                    onChange={toggleAllVisible}
+                    aria-label={t('accounts.batchSelectAll')}
+                  />
+                </TableHead>
+              )}
+              <TableHead className={'text-[11px] text-muted-foreground ' + (isAdmin ? 'pl-1' : 'pl-4')}>{t('accounts.colNickname')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colUid')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('metric.credits')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colExpiry')}</TableHead>
@@ -1096,7 +1458,18 @@ export default function AccountsPage() {
           <TableBody>
             {visible.map((a) => (
               <TableRow key={a.file} className="border-b border-border/40">
-                <TableCell className="pl-4">
+                {isAdmin && (
+                  <TableCell className="w-9 pl-4 pr-0">
+                    <input
+                      type="checkbox"
+                      className="size-4 cursor-pointer align-middle accent-primary"
+                      checked={selected.includes(a.file)}
+                      onChange={() => toggleSelected(a.file)}
+                      aria-label={t('accounts.batchSelectRow', {name: a.nickname || a.uid})}
+                    />
+                  </TableCell>
+                )}
+                <TableCell className={isAdmin ? 'pl-1' : 'pl-4'}>
                   <div className="flex items-center gap-2.5">
                     {renderAvatar(a)}
                     <div className="min-w-0">
@@ -1146,35 +1519,59 @@ export default function AccountsPage() {
         </Table>
         </div>
 
-        {!visible.length && !loading && (
+        {!visible.length && !loading && !loadFailed && (
           <EmptyState
             icon={Users}
             title={t('accounts.emptyTitle')}
             description={
-              selectedMeta && selectedMeta.managed !== 'unified'
-                ? t(`accounts.managed_${selectedMeta.managed}`)
-                : isAdmin
-                  ? t('accounts.emptyDescAdmin')
-                  : t('accounts.emptyDescViewer')
+              selectedMeta && !selectedMeta.enabled
+                // 未启用的分类没有导入入口，空态里也要说清楚原因（否则「为什么没按钮」无解）
+                ? t('accounts.importDisabledHint', {provider: selectedMeta.label})
+                : selectedMeta && selectedMeta.managed !== 'unified'
+                ? // 单分类按 managed 分流：能导入的（external/quota）讲清楚在这登记什么；
+                  // sidecar/demo 不给入口，文案如实说明去哪配（详见 managed_* 重写）。
+                  (isAdmin && canImportManaged(selectedMeta.managed)
+                    ? t(`accounts.importHint_${selectedMeta.managed}`)
+                    : t(`accounts.managed_${selectedMeta.managed}`))
+                : allBarEmpty
+                  ? t('accounts.managedAll')
+                  : isAdmin
+                    ? canImport
+                      ? // 顶栏至少有「导入账号」：说明白它怎么用，别只留一句「点添加扫码」
+                        providerFilter === 'all'
+                        ? t('accounts.emptyDescImport')
+                        : t('accounts.importHint_unified')
+                      : t('accounts.emptyDescAdmin')
+                    : t('accounts.emptyDescViewer')
             }
             className="flex flex-col items-center justify-center py-16 text-center"
           >
-            {isAdmin && selectedOps.oauth && (
+            {(isAdmin && selectedOps.oauth) || canImport ? (
               <div className="mt-4 flex flex-wrap justify-center gap-2">
-                <Button className="rounded-full" onClick={() => setOAuthOpen(true)}>
-                  <ExternalLink className="mr-2 h-4 w-4" />
-                  {realm === 'global' ? t('oauth.addOAuthIntl') : t('oauth.addOAuthCn')}
-                </Button>
-                <Button variant="outline" className="rounded-full" onClick={() => setBatchOpen(true)}>
-                  <Users className="mr-1.5 h-4 w-4" />
-                  {realm === 'global' ? t('oauth.addBatchIntl') : t('oauth.addBatchCn')}
-                </Button>
-                <Button className="rounded-full" onClick={() => setAddOpen(true)}>
-                  <Plus />
-                  {t('accounts.addAccount')}
-                </Button>
+                {isAdmin && selectedOps.oauth && (
+                  <>
+                    <Button className="rounded-full" onClick={() => setOAuthOpen(true)}>
+                      <ExternalLink className="mr-2 h-4 w-4" />
+                      {realm === 'global' ? t('oauth.addOAuthIntl') : t('oauth.addOAuthCn')}
+                    </Button>
+                    <Button variant="outline" className="rounded-full" onClick={() => setBatchOpen(true)}>
+                      <Users className="mr-1.5 h-4 w-4" />
+                      {realm === 'global' ? t('oauth.addBatchIntl') : t('oauth.addBatchCn')}
+                    </Button>
+                    <Button className="rounded-full" onClick={() => setAddOpen(true)}>
+                      <Plus />
+                      {t('accounts.addAccount')}
+                    </Button>
+                  </>
+                )}
+                {canImport && (
+                  <Button variant="outline" className="rounded-full" onClick={() => setImportOpen(true)}>
+                    <FileUp className="mr-2 h-4 w-4" />
+                    {t('accounts.importAccount')}
+                  </Button>
+                )}
               </div>
-            )}
+            ) : null}
           </EmptyState>
         )}
         {loading && !merged.length && (
@@ -1183,6 +1580,13 @@ export default function AccountsPage() {
       </section>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
+      <ImportAccountDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        providers={importProviders}
+        defaultProvider={providerFilter !== 'all' && canImport ? providerFilter : undefined}
+        onSaved={load}
+      />
       <OAuthDialog open={oauthOpen} onOpenChange={setOAuthOpen} onSuccess={load} />
       <BatchOAuthDialog open={batchOpen} onOpenChange={setBatchOpen} onSuccess={load} />
       <AccountNoteDialog

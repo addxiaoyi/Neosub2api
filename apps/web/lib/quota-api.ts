@@ -27,6 +27,7 @@ export interface QuotaPolicy {
 export interface QuotaAlert {
   id: number;
   policy_id: number;
+  kind: 'quota' | 'provider_failure' | 'usage_missing_ratio' | string;
   threshold_percent: number;
   window: QuotaWindow;
   period_start: number;

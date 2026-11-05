@@ -20,6 +20,14 @@
  */
 import type {Account, UpstreamStatus} from './types';
 
+/**
+ * 积分「偏低」的显示阈值。
+ *
+ * 只影响账号页与首页的琥珀色提示，不参与转发调度；两页共用这一处，
+ * 避免同一个账号在首页变黄、在列表里还是灰的。
+ */
+export const LOW_CREDIT_THRESHOLD = 200;
+
 /** 账号当前的可用性分档 */
 export type AvailabilityTier =
   | 'disabled'

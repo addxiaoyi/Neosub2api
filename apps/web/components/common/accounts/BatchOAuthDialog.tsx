@@ -108,11 +108,11 @@ export function BatchOAuthDialog({
     w.opener = null;                               // 别把控制台交到第三方页面手里
     // 预留到导航之间会短暂空白，写一行字免得看着像崩了
     w.document.write(
-      '<title>正在准备授权页…</title><body style="font:14px/1.6 system-ui;padding:48px;color:#888">正在准备授权页…</body>',
+      `<title>${t('oauth.preparingAuthPage')}</title><body style="font:14px/1.6 system-ui;padding:48px;color:#888">${t('oauth.preparingAuthPage')}</body>`,
     );
     tabRef.current = w;
     return true;
-  }, []);
+  }, [t]);
 
   /**
    * 把授权地址推进标签页。返回是否成功——被拦或标签页被用户关掉时为 false，
@@ -356,7 +356,7 @@ export function BatchOAuthDialog({
               <span className="font-mono text-[12px]">
                 <span className="text-emerald-500">{ok}</span>
                 <span className="text-muted-foreground">/{total}</span>
-                {failed > 0 && <span className="text-warning-text"> · {failed} fail</span>}
+                {failed > 0 && <span className="text-warning-text"> · {t('oauth.batchFailCount', {n: failed})}</span>}
               </span>
               {(phase === 'idle' || phase === 'done') && (
                 <Button className="rounded-full gap-1.5" onClick={start}>

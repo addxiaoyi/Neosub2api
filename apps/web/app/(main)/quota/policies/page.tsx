@@ -73,6 +73,10 @@ const EMPTY_FORM: FormState = {
   enabled: true,
 };
 
+/** 阈值百分比范围，与后端 `MAX_PERCENT`（1000）一致，越界会被 400 拒绝 */
+const MIN_THRESHOLD_PERCENT = 1;
+const MAX_THRESHOLD_PERCENT = 1000;
+
 export default function QuotaPoliciesPage() {
   const t = useT();
   const {isAdmin, loading} = useAuth();
@@ -283,7 +287,7 @@ function AdminQuotaPolicies() {
       .map((part) => part.trim())
       .filter(Boolean);
     const thresholds = rawThresholds.map(Number);
-    if (thresholds.some((n) => !Number.isInteger(n) || n < 1 || n > 1000)) {
+    if (thresholds.some((n) => !Number.isInteger(n) || n < MIN_THRESHOLD_PERCENT || n > MAX_THRESHOLD_PERCENT)) {
       notify.err(t('quotaPolicy.invalidThresholds'));
       return;
     }
@@ -679,18 +683,30 @@ function AdminQuotaPolicies() {
                           : t('quota.unlimited')}
                       </TableCell>
                       <TableCell className="min-w-[88px]">
-                        <Badge variant="secondary" className="rounded-full">{alert.threshold_percent}%</Badge>
+                        <Badge variant="secondary" className="rounded-full">
+                          {alert.kind === 'provider_failure'
+                            ? t('quotaPolicy.ruleFailureStreak', { count: alert.threshold_percent })
+                            : `${alert.threshold_percent}%`}
+                        </Badge>
                       </TableCell>
                       <TableCell className="hidden text-xs md:table-cell">
-                        {isAmount ? t('quotaPolicy.metricMicro') : t('quotaPolicy.metricRequests')}
+                        {alert.kind === 'provider_failure'
+                          ? t('quotaPolicy.metricProviderFailures')
+                          : alert.kind === 'usage_missing_ratio'
+                            ? t('quotaPolicy.metricUsageMissing')
+                            : isAmount ? t('quotaPolicy.metricMicro') : t('quotaPolicy.metricRequests')}
                       </TableCell>
                       <TableCell className="min-w-[128px] text-right tabular-nums text-xs">
-                        {isAmount
-                          ? `${fmtUsd(alert.used_usd)} / ${fmtMicroUsd(alert.limit_micro)}`
-                          : `${fmtNumber(alert.used_requests)} / ${fmtNumber(alert.limit_requests)}`}
+                        {alert.kind === 'provider_failure'
+                          ? fmtNumber(alert.used_requests)
+                          : isAmount
+                            ? `${fmtUsd(alert.used_usd)} / ${fmtMicroUsd(alert.limit_micro)}`
+                            : `${fmtNumber(alert.used_requests)} / ${fmtNumber(alert.limit_requests)}`}
                       </TableCell>
                       <TableCell className="hidden pr-4 text-xs text-muted-foreground md:table-cell">
-                        {windowText(alert.window)} · {fmtDateTime(alert.period_start)}
+                        {alert.kind === 'quota'
+                          ? `${windowText(alert.window)} · ${fmtDateTime(alert.period_start)}`
+                          : '—'}
                       </TableCell>
                     </TableRow>
                   );
@@ -920,7 +936,9 @@ function UsageCard({
         <div className="mt-3 flex flex-wrap gap-1">
           {item.alerts.map((alert) => (
             <Badge key={alert.id} variant="secondary" className="rounded-full text-[10px]">
-              {alert.threshold_percent}%
+              {alert.kind === 'provider_failure'
+                ? t('quotaPolicy.ruleFailureStreak', { count: alert.threshold_percent })
+                : `${alert.threshold_percent}%`}
             </Badge>
           ))}
         </div>

@@ -26,6 +26,10 @@ type Phase = 'loading' | 'waiting' | 'success' | 'error';
  * —— 否则界面会一直转圈到 5 分钟后再报「已失效」，把真正的故障藏起来。
  */
 const POLL_FAIL_LIMIT = 3;
+/** 2 秒一轮：与上面的失败阈值配套，连续 3 次失败约 6 秒后才打断 */
+const POLL_INTERVAL_MS = 2000;
+/** 成功提示留 1.6 秒再关弹窗，够看清账号名，又不拖住下一次操作 */
+const CLOSE_AFTER_SUCCESS_MS = 1600;
 
 export function OAuthDialog({
   open,
@@ -112,7 +116,7 @@ export function OAuthDialog({
               );
               window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
               onSuccess?.();
-              window.setTimeout(() => onOpenChange(false), 1600);
+              window.setTimeout(() => onOpenChange(false), CLOSE_AFTER_SUCCESS_MS);
             } else if (res.status === 'expired') {
               stopPoll();
               setPhase('error');
@@ -139,7 +143,7 @@ export function OAuthDialog({
         };
 
         tickRef.current = tick;
-        timerRef.current = window.setInterval(tick, 2000);
+        timerRef.current = window.setInterval(tick, POLL_INTERVAL_MS);
         document.addEventListener('visibilitychange', tick);
       } catch (e) {
         if (!cancelled) {
@@ -200,7 +204,7 @@ export function OAuthDialog({
               );
               window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
               onSuccess?.();
-              window.setTimeout(() => onOpenChange(false), 1600);
+              window.setTimeout(() => onOpenChange(false), CLOSE_AFTER_SUCCESS_MS);
             } else if (res.status === 'expired') {
               stopPoll();
               setPhase('error');
@@ -227,7 +231,7 @@ export function OAuthDialog({
         };
 
         tickRef.current = tick;
-        timerRef.current = window.setInterval(tick, 2000);
+        timerRef.current = window.setInterval(tick, POLL_INTERVAL_MS);
         document.addEventListener('visibilitychange', tick);
       } catch (e) {
         setPhase('error');

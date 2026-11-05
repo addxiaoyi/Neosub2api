@@ -14,6 +14,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {getExpiryDailyGroup, groupExpiriesByDay} from '@/lib/display-prefs';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
+import {accountOpsApi} from '@/components/common/accounts/account-ops';
 import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import type {
@@ -33,6 +34,7 @@ import {
   fmtRemain,
 } from '@/lib/format';
 import {
+  LOW_CREDIT_THRESHOLD,
   availabilityLabelKey,
   availabilityTitleKey,
   availabilityClass,
@@ -49,6 +51,11 @@ import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
+
+/** 1 小时内到期算「临近过期」（服务端 remain_seconds 以秒为单位） */
+const EXPIRING_SOON_SECONDS = 3600;
+/** 实时积分在服务端缓存 60 秒，30 秒一轮既不会重复打腾讯，又保证面板最迟半分钟更新 */
+const DASHBOARD_REFRESH_MS = 30000;
 
 export default function DashboardPage() {
   const {realm, label: realmName} = useRealm();
@@ -69,6 +76,12 @@ export default function DashboardPage() {
 
   // 切换版本后要重新取实时积分：两个版本的账号池不同，credits 也不能混
   const load = useCallback(async () => {
+    // 先拿到真实能力位再决定要不要查实时积分：没有已启用且支持 credits 的服务商时
+    // 这个请求必然 503（演示模式只启用 demo_local，此前每次进页面都会打一批空请求）。
+    const creditsSupported = accountOpsApi
+      .capabilities()
+      .then((list) => list.some((p) => p.enabled && p.ops.credits))
+      .catch(() => false);
     const results = await Promise.allSettled([
       accountApi.list(),
       statsApi.summary(realm),
@@ -76,7 +89,9 @@ export default function DashboardPage() {
       upstreamApi.status(),
       // force=false：命中服务端 60 秒缓存，30 秒轮询不会反复打腾讯
       // 实时积分是 admin-only：viewer 不发请求，占位保持后续下标不变
-      isAdmin ? accountApi.refreshCredits(false) : Promise.resolve(null),
+      isAdmin
+        ? creditsSupported.then((ok) => (ok ? accountApi.refreshCredits(false) : null))
+        : Promise.resolve(null),
     ]);
     if (results[0].status === 'fulfilled') setAccounts(results[0].value.accounts);
     if (results[1].status === 'fulfilled') setSummary(results[1].value);
@@ -114,7 +129,7 @@ export default function DashboardPage() {
   }, [load, authLoading]);
 
   // 账号健康度与用量会持续变化，用心跳刷新避免展示陈旧数据
-  useHeartbeat(load, 30000);
+  useHeartbeat(load, DASHBOARD_REFRESH_MS);
 
   /**
    * 合并上游池状态 + 按当前版本过滤。
@@ -170,13 +185,13 @@ export default function DashboardPage() {
   const degraded = scoped.filter(isDegraded).length;
 
   const valid = scoped.filter((a) => !a.is_expired).length;
-  const expiring = scoped.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
+  const expiring = scoped.filter((a) => a.remain_seconds > 0 && a.remain_seconds < EXPIRING_SOON_SECONDS).length;
   // 积分余额合计（仅统计已同步到的账号）
   // 优先用实时查询到的积分，其次上游 /status 的（可能滞后的）值
   const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
   const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
   const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
-  const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+  const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < LOW_CREDIT_THRESHOLD).length;
   /**
    * 最近一笔积分到期（全体账号里最早的那个到期时刻）。
    *
@@ -617,7 +632,7 @@ export default function DashboardPage() {
                           ? 'text-muted-foreground'
                           : (credOf(a) as number) <= 0
                             ? 'text-destructive-text'
-                            : (credOf(a) as number) < 200
+                            : (credOf(a) as number) < LOW_CREDIT_THRESHOLD
                               ? 'text-warning-text'
                               : 'text-foreground')
                       }

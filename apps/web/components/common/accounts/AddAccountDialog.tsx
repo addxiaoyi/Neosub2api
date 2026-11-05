@@ -34,6 +34,10 @@ type Phase = 'loading' | 'waiting' | 'success' | 'error';
  * 「二维码已失效」，把真正的故障藏起来（issue #26）。
  */
 const POLL_FAIL_LIMIT = 3;
+/** 2 秒一轮：与上面的失败阈值配套，连续 3 次失败约 6 秒后才打断 */
+const POLL_INTERVAL_MS = 2000;
+/** 成功提示留 1.6 秒再关弹窗，够看清账号名，又不拖住下一次操作 */
+const CLOSE_AFTER_SUCCESS_MS = 1600;
 
 /**
  * 国际版可选地区（与后端 INTERNATIONAL_REGIONS 保持一致）。
@@ -141,7 +145,7 @@ export function AddAccountDialog({
             );
             window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
             onSuccess?.();
-            window.setTimeout(() => onOpenChange(false), 1600);
+            window.setTimeout(() => onOpenChange(false), CLOSE_AFTER_SUCCESS_MS);
           } else if (res.status === 'expired') {
             // 真过了有效期（5 分钟）：重新取一张码才是对的
             stopPoll();
@@ -175,7 +179,7 @@ export function AddAccountDialog({
       };
 
       tickRef.current = tick;
-      timerRef.current = window.setInterval(tick, 2000);
+      timerRef.current = window.setInterval(tick, POLL_INTERVAL_MS);
       // **切回标签页立即补一次**，这是「点链接登录后界面迟迟不更新」的关键：
       // 用户点授权链接会跳到新标签（或新窗口）完成登录，原标签进入后台被节流；
       // 没有这一句的话，他切回来看见的仍是切走前那一帧，要等最久一整分钟才刷新
