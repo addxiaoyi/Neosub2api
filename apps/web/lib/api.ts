@@ -39,6 +39,9 @@ import type {
   Sub2apiLedgerEntry,
   PriceBookRow,
   PriceResolveResult,
+  PromptDetail,
+  PromptInput,
+  PromptPage,
 } from './types';
 
 /** 单次请求 60s 封顶：转发链路包含上游排队与生成，再久基本已是卡死，交给用户重试 */
@@ -601,4 +604,16 @@ export const grokRegisterApi = {
   detail: (id: number) => get<GrokRegisterDetail>(`/api/grok/register/tasks/${id}/detail`),
   /** 队列计数 + 执行器是否已配置（任何登录用户可读） */
   worker: () => get<GrokRegisterWorkerStats>('/api/grok/register/worker'),
+};
+
+/* ── 提示词库（登录用户只读，admin 增删改）────────────── */
+export const promptApi = {
+  list: (params: {page?: number; size?: number; q?: string; category?: string}) =>
+    get<PromptPage>('/api/prompts', params),
+  categories: () => get<{items: string[]}>('/api/prompts/categories'),
+  detail: (id: number) => get<PromptDetail>(`/api/prompts/${id}`),
+  create: (body: PromptInput) => post<PromptDetail>('/api/prompts', body),
+  update: (id: number, body: Partial<PromptInput>) =>
+    patch<PromptDetail>(`/api/prompts/${id}`, body),
+  remove: (id: number) => del<{ok: boolean}>(`/api/prompts/${id}`),
 };

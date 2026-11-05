@@ -112,6 +112,7 @@ function errorRows(json: Record<string, unknown>): [string, string][] {
 /** 记账口径 → 徽标短文案（键五语同名） */
 const CREDIT_LABEL: Record<CreditStatus, string> = {
   billed: 'logs.creditBilled',
+  estimated: 'logs.creditEstimated',
   unpriced: 'logs.creditUnpriced',
   usage_missing: 'logs.creditUsageMissing',
   not_billed: 'logs.creditNotBilled',
@@ -121,15 +122,18 @@ const CREDIT_LABEL: Record<CreditStatus, string> = {
 /** 记账口径 → 展开后的解释句 */
 const CREDIT_NOTE: Record<CreditStatus, string> = {
   billed: 'logs.creditBilledNote',
+  estimated: 'logs.creditEstimatedNote',
   unpriced: 'logs.creditUnpricedNote',
   usage_missing: 'logs.creditUsageMissingNote',
   not_billed: 'logs.creditNotBilledNote',
   unlinked: 'logs.creditUnlinkedNote',
 };
 
-/** 语气色只复用本页已有的三档：绿=扣过、琥珀=定价存疑、红=失败类，其余走 secondary 底色 */
+/** 语气色只复用本页已有的几档：绿=扣过、蓝=估算、琥珀=定价存疑、红=失败类，其余走 secondary 底色 */
 const CREDIT_TONE: Record<CreditStatus, string> = {
   billed: 'text-emerald-700 dark:text-emerald-400',
+  // 估算金额与「未定价」是两回事：前者有金额但是推算值，后者根本没配价，色与文案都必须分开
+  estimated: 'text-blue-600 dark:text-blue-400',
   unpriced: 'text-warning-text',
   usage_missing: 'text-muted-foreground',
   not_billed: 'text-destructive-text',
@@ -467,7 +471,10 @@ export default function LogsPage() {
                   )}
                   {/* 窄屏没有金额列，金额与口径压成一行，null 只显示「—」 */}
                   <div className="mt-1 flex items-center gap-1.5 text-[10px] leading-none md:hidden">
-                    <span className="tabular-nums text-muted-foreground">{fmtMicroUsd(l.credit)}</span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {l.credit_estimated && '≈'}
+                      {fmtMicroUsd(l.credit)}
+                    </span>
                     <button
                       type="button"
                       aria-expanded={openCredit?.id === l.id}
@@ -485,6 +492,7 @@ export default function LogsPage() {
                 <TableCell className="hidden text-xs md:table-cell">
                   <div className="flex flex-col items-start gap-1">
                     <span className={l.credit === null ? 'tabular-nums text-muted-foreground' : 'tabular-nums'}>
+                      {l.credit_estimated && '≈'}
                       {fmtMicroUsd(l.credit)}
                     </span>
                     <button

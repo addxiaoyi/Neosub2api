@@ -3,6 +3,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   AlertTriangle,
+  BookText,
   Bot,
   Eraser,
   Info,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-react';
 
 import {PageHeader} from '@/components/common/layout/PageHeader';
+import {PromptLibraryDrawer} from '@/components/common/prompts/PromptLibraryDrawer';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
@@ -268,6 +270,7 @@ export default function PlaygroundPage() {
   const [maxTokens, setMaxTokens] = useState('1024');
   const [system, setSystem] = useState('');
   const [input, setInput] = useState('');
+  const [promptOpen, setPromptOpen] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [loadPhase, setLoadPhase] = useState<LoadPhase>('idle');
@@ -286,6 +289,17 @@ export default function PlaygroundPage() {
   const loadingModels = loadPhase !== 'idle';
   /** 列表为空且已降级 → 让用户直接手填模型名 */
   const manualMode = degraded && models.length === 0;
+
+  // 提示词库是控制面能力，密钥与否都能开；填入正文只写回输入框
+  const promptAction = (
+    <Button variant="outline" size="sm" className="rounded-full" onClick={() => setPromptOpen(true)}>
+      <BookText />
+      {t('prompts.open')}
+    </Button>
+  );
+  const promptDrawer = (
+    <PromptLibraryDrawer open={promptOpen} onOpenChange={setPromptOpen} onUse={setInput} />
+  );
 
   const loadModels = useCallback(
     async (key: string): Promise<'ok' | 'empty' | 'degraded' | 'auth'> => {
@@ -667,7 +681,11 @@ export default function PlaygroundPage() {
   if (!apiKey) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-4 md:gap-6">
-        <PageHeader title={t('playground.title')} description={t('playground.description')} />
+        <PageHeader
+          title={t('playground.title')}
+          description={t('playground.description')}
+          actions={promptAction}
+        />
         <div className="flex flex-1 items-center justify-center">
           <div className="w-full max-w-sm space-y-4 rounded-[20px] border p-6">
             <div className="flex items-center gap-2.5">
@@ -698,6 +716,7 @@ export default function PlaygroundPage() {
             </Button>
           </div>
         </div>
+        {promptDrawer}
       </div>
     );
   }
@@ -706,7 +725,11 @@ export default function PlaygroundPage() {
   if (loadingModels && models.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-4 md:gap-6">
-        <PageHeader title={t('playground.title')} description={t('playground.description')} />
+        <PageHeader
+          title={t('playground.title')}
+          description={t('playground.description')}
+          actions={promptAction}
+        />
         <div className="flex flex-1 items-center justify-center">
           <div className="w-full max-w-sm space-y-3 rounded-[20px] border p-6 text-center">
             <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
@@ -719,6 +742,7 @@ export default function PlaygroundPage() {
             </Button>
           </div>
         </div>
+        {promptDrawer}
       </div>
     );
   }
@@ -731,6 +755,7 @@ export default function PlaygroundPage() {
         description={t('playground.description')}
         actions={
           <>
+            {promptAction}
             <Button
               variant="outline"
               size="sm"
@@ -1005,6 +1030,7 @@ export default function PlaygroundPage() {
         <Info className="mt-0.5 h-3 w-3 shrink-0" />
         <span>{t('playground.footnote')}</span>
       </p>
+      {promptDrawer}
     </div>
   );
 }

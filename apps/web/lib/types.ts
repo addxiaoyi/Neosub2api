@@ -308,9 +308,11 @@ export interface RequestLog {
   stream: boolean;
   /** 本次调用真实扣的费（micro-USD 整数）。没记账时为 null，属于哪一类没记账看 credit_status */
   credit: number | null;
-  /** 记账口径：billed=已扣费；unpriced=模型未定价；usage_missing=上游没回 usage；
-   *  not_billed=失败/断流/被拒不写流水；unlinked=历史存量未关联流水 */
+  /** 记账口径：billed=已扣费；estimated=按正文估算计费；unpriced=模型未定价；
+   *  usage_missing=上游没回 usage；not_billed=失败/断流/被拒不写流水；unlinked=历史存量未关联流水 */
   credit_status: CreditStatus;
+  /** credit_status 为 estimated 的布尔捷径；仅为 true 时金额是网关估算，不是上游真值 */
+  credit_estimated: boolean;
   /** 本次实际用的上游账号。后端未采集，恒为 null */
   account: string | null;
   /** 运维是否已标记排查；只改这一列，不影响计费口径 */
@@ -320,7 +322,7 @@ export interface RequestLog {
 }
 
 /** GET /api/logs 每行的记账口径，取值来自 apps/control/app/routers/logs.py 的 _classify_credit */
-export type CreditStatus = 'billed' | 'unpriced' | 'usage_missing' | 'not_billed' | 'unlinked';
+export type CreditStatus = 'billed' | 'estimated' | 'unpriced' | 'usage_missing' | 'not_billed' | 'unlinked';
 
 export interface UsagePoint {
   day: string;
@@ -872,4 +874,40 @@ export interface BackupRestored {
   selfcheck_ok: boolean;
   /** 恢复后各表行数（来自归档 manifest） */
   rows_after: Record<string, number>;
+}
+
+/** 提示词库列表项：正文只回摘要，详情再取 */
+export interface PromptSummary {
+  id: number;
+  title: string;
+  description: string;
+  category: string;
+  sub_category: string;
+  mode: string;
+  image_size: string;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  excerpt: string;
+}
+
+export interface PromptDetail extends Omit<PromptSummary, 'excerpt'> {
+  prompt: string;
+}
+
+export interface PromptPage {
+  total: number;
+  page: number;
+  size: number;
+  items: PromptSummary[];
+}
+
+export interface PromptInput {
+  title: string;
+  prompt: string;
+  description?: string;
+  category?: string;
+  sub_category?: string;
+  mode?: string;
+  image_size?: string;
 }
