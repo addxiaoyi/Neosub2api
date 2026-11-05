@@ -153,6 +153,21 @@ def _policy_public(conn, row) -> dict[str, Any]:
     }
 
 
+ALERT_SILENCE_MIN_SEC = 60
+# 30 天是单条静默的硬上限：更长的「静默」实质等于关掉告警却仍显示为开启
+ALERT_SILENCE_MAX_SEC = 30 * 86400
+
+
+def _alert_status(row, at: int) -> str:
+    """读取端状态：closed 优先，其次是仍在静默期内，否则用库里的状态。"""
+    status = str(row["status"] or "open")
+    if status == "closed":
+        return "closed"
+    if int(row["silenced_until"] or 0) > int(at):
+        return "silenced"
+    return status
+
+
 def _alert_public(row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -168,6 +183,10 @@ def _alert_public(row) -> dict[str, Any]:
         "limit_micro": int(row["limit_micro"]),
         "used_requests": int(row["used_requests"]),
         "limit_requests": int(row["limit_requests"]),
+        "status": _alert_status(row, now()),
+        "acked_at": int(row["acked_at"] or 0),
+        "closed_at": int(row["closed_at"] or 0),
+        "silenced_until": int(row["silenced_until"] or 0),
     }
 
 
@@ -208,6 +227,10 @@ class PolicyIn(BaseModel):
     limit_requests: int = 0
     thresholds: list[int] = Field(default_factory=list)
     enabled: bool = True
+
+
+class AlertSilenceIn(BaseModel):
+    seconds: int
 
 
 def _clean_periods(raw: list[int]) -> list[int]:
@@ -432,3 +455,115 @@ def list_alerts(
     finally:
         conn.close()
     return {"total": total, "items": items}
+
+
+def _load_alert(conn, alert_id: int):
+    row = conn.execute("SELECT * FROM quota_alerts WHERE id = ?", (alert_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "告警不存在")
+    return row
+
+
+def _audit_alert(conn, request: Request, user: dict, action: str, alert_id: int, detail: str) -> None:
+    ip = request.client.host if request.client else ""
+    # detail 只留规则类型与状态变化：上游错误原文不进审计流
+    audit_event(conn, user["username"], f"alert.{action}", f"quota_alert:{alert_id}", detail, ip)
+
+
+@router.post("/alerts/{alert_id}/ack")
+def ack_alert(alert_id: int, request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_alert(conn, alert_id)
+        status = str(row["status"] or "open")
+        if status == "closed":
+            raise HTTPException(409, "已关闭的告警需先 reopen 才能 ack")
+        if status == "acked":
+            # 幂等：重复确认不报错，也不改 acked_at；仍记一条 noop 审计
+            _audit_alert(conn, request, user, "ack", alert_id, f"kind={row['kind']} acked(noop)")
+            return {"ok": True, "item": _alert_public(row)}
+        stamp = now()
+        conn.execute(
+            "UPDATE quota_alerts SET status = 'acked', acked_at = ? WHERE id = ? AND status = 'open'",
+            (stamp, alert_id),
+        )
+        _audit_alert(conn, request, user, "ack", alert_id, f"kind={row['kind']} open->acked")
+        return {"ok": True, "item": _alert_public(_load_alert(conn, alert_id))}
+    finally:
+        conn.close()
+
+
+@router.post("/alerts/{alert_id}/silence")
+def silence_alert(
+    alert_id: int, body: AlertSilenceIn, request: Request, user: dict = Depends(admin_user)
+):
+    seconds = int(body.seconds)
+    if seconds < ALERT_SILENCE_MIN_SEC or seconds > ALERT_SILENCE_MAX_SEC:
+        raise HTTPException(
+            400,
+            f"静默时长必须在 {ALERT_SILENCE_MIN_SEC}..{ALERT_SILENCE_MAX_SEC} 秒之间，"
+            "不支持永久静默",
+        )
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_alert(conn, alert_id)
+        status = str(row["status"] or "open")
+        if status == "closed":
+            raise HTTPException(409, "已关闭的告警不能静默，请先 reopen")
+        stamp = now()
+        until = stamp + seconds
+        # 静默把事件回到 open：到期后自动以 open 呈现，不留「永久静默」
+        conn.execute(
+            "UPDATE quota_alerts SET status = 'open', acked_at = 0, closed_at = 0, "
+            "silenced_until = ? WHERE id = ?",
+            (until, alert_id),
+        )
+        _audit_alert(
+            conn,
+            request,
+            user,
+            "silence",
+            alert_id,
+            f"kind={row['kind']} seconds={seconds} until={until}",
+        )
+        return {"ok": True, "item": _alert_public(_load_alert(conn, alert_id))}
+    finally:
+        conn.close()
+
+
+@router.post("/alerts/{alert_id}/close")
+def close_alert(alert_id: int, request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_alert(conn, alert_id)
+        if str(row["status"] or "open") == "closed":
+            # 幂等：重复关闭不报错，也不改 closed_at；仍记一条 noop 审计
+            _audit_alert(conn, request, user, "close", alert_id, f"kind={row['kind']} closed(noop)")
+            return {"ok": True, "item": _alert_public(row)}
+        stamp = now()
+        conn.execute(
+            "UPDATE quota_alerts SET status = 'closed', closed_at = ?, silenced_until = 0 "
+            "WHERE id = ?",
+            (stamp, alert_id),
+        )
+        _audit_alert(conn, request, user, "close", alert_id, f"kind={row['kind']} ->closed")
+        return {"ok": True, "item": _alert_public(_load_alert(conn, alert_id))}
+    finally:
+        conn.close()
+
+
+@router.post("/alerts/{alert_id}/reopen")
+def reopen_alert(alert_id: int, request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_alert(conn, alert_id)
+        if str(row["status"] or "open") != "closed":
+            raise HTTPException(409, "只有已关闭的告警可以 reopen")
+        conn.execute(
+            "UPDATE quota_alerts SET status = 'open', closed_at = 0, silenced_until = 0 WHERE id = ?",
+            (alert_id,),
+        )
+        _audit_alert(conn, request, user, "reopen", alert_id, f"kind={row['kind']} closed->open")
+        return {"ok": True, "item": _alert_public(_load_alert(conn, alert_id))}
+    finally:
+        conn.close()

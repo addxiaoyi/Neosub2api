@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 PROVIDER_LOOKBACK_SEC = 86400
 USAGE_MISSING_WINDOW_SEC = 600
 USAGE_MISSING_BUCKET_SEC = 3600
+# 下限 10 条而不是 1：600 秒窗口里样本太少时，一两条 usage_missing 就能把占比
+# 推到 50% 以上，告警会退化成噪音。10 条约等于每 1 分钟 1 条，是能判断「计费在漏」
+# 的最低可信量级；上限由设置页钳制到 10000，避免把窗口拉到全量。
+USAGE_MISSING_MIN_SAMPLES = 10
 # 本地准入拒绝（配额/失败限流/未知模型）不是 provider 故障，不计入连败
 LOCAL_REJECTION_MARKS = ("quota_exceeded", "failure_rate_limited", "model_not_found")
 
@@ -78,13 +82,15 @@ def _insert_alert(
     return 1 if cur.rowcount else 0
 
 
-def _provider_failure_alerts(conn: sqlite3.Connection, streak: int, at: int) -> int:
+def _provider_failure_alerts(
+    conn: sqlite3.Connection, streak: int, at: int, window_sec: int = PROVIDER_LOOKBACK_SEC
+) -> int:
     if streak <= 0:
         return 0
     providers = conn.execute(
         "SELECT DISTINCT provider FROM request_logs "
         "WHERE ts >= ? AND provider IS NOT NULL AND provider <> ''",
-        (at - PROVIDER_LOOKBACK_SEC,),
+        (at - window_sec,),
     ).fetchall()
     created = 0
     for row in providers:
@@ -159,7 +165,11 @@ def _quota_remaining_alerts(conn: sqlite3.Connection, remaining_percent: int, at
 
 
 def _usage_missing_alert(
-    conn: sqlite3.Connection, ratio_percent: int, min_requests: int, at: int
+    conn: sqlite3.Connection,
+    ratio_percent: int,
+    min_requests: int,
+    at: int,
+    window_sec: int = USAGE_MISSING_WINDOW_SEC,
 ) -> int:
     if ratio_percent <= 0:
         return 0
@@ -168,7 +178,7 @@ def _usage_missing_alert(
         "COALESCE(SUM(CASE WHEN b.note = 'usage_missing' THEN 1 ELSE 0 END), 0) AS missing "
         "FROM request_logs r LEFT JOIN billing_ledger b ON b.log_id = r.id "
         "WHERE r.ts >= ?",
-        (at - USAGE_MISSING_WINDOW_SEC,),
+        (at - window_sec,),
     ).fetchone()
     total = int(row["n"] or 0)
     missing = int(row["missing"] or 0)
@@ -193,21 +203,40 @@ def evaluate_alerts(conn: sqlite3.Connection, settings: Any, at: int | None = No
     """按配置评估三条规则；单条规则失败只记日志，不影响其余规则。"""
     stamp = int(at) if at is not None else now()
     rules = (
-        ("provider_failure", lambda: _provider_failure_alerts(
-            conn, int(getattr(settings, "alert_provider_failure_streak", 0)), stamp
-        )),
-        ("quota_remaining", lambda: _quota_remaining_alerts(
-            conn, int(getattr(settings, "alert_quota_remaining_percent", 0)), stamp
-        )),
-        ("usage_missing", lambda: _usage_missing_alert(
-            conn,
-            int(getattr(settings, "alert_usage_missing_ratio_percent", 0)),
-            int(getattr(settings, "alert_usage_missing_min_requests", 0)),
-            stamp,
-        )),
+        (
+            "provider_failure",
+            bool(getattr(settings, "alert_provider_failure_enabled", True)),
+            lambda: _provider_failure_alerts(
+                conn,
+                int(getattr(settings, "alert_provider_failure_streak", 0)),
+                stamp,
+                int(getattr(settings, "alert_provider_failure_window_sec", PROVIDER_LOOKBACK_SEC)),
+            ),
+        ),
+        (
+            "quota_remaining",
+            bool(getattr(settings, "alert_quota_remaining_enabled", True)),
+            lambda: _quota_remaining_alerts(
+                conn, int(getattr(settings, "alert_quota_remaining_percent", 0)), stamp
+            ),
+        ),
+        (
+            "usage_missing",
+            bool(getattr(settings, "alert_usage_missing_enabled", True)),
+            lambda: _usage_missing_alert(
+                conn,
+                int(getattr(settings, "alert_usage_missing_ratio_percent", 0)),
+                int(getattr(settings, "alert_usage_missing_min_requests", 0)),
+                stamp,
+                int(getattr(settings, "alert_usage_missing_window_sec", USAGE_MISSING_WINDOW_SEC)),
+            ),
+        ),
     )
     created = 0
-    for name, rule in rules:
+    for name, enabled, rule in rules:
+        # 关闭的规则不进入评估，也不落库；不是「评估后丢弃」
+        if not enabled:
+            continue
         try:
             created += rule()
         except Exception:  # noqa: BLE001 - 单条规则失败不能影响其余规则与抓取

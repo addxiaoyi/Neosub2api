@@ -48,7 +48,7 @@ OWN_LOGS_DENIED = "无权查看他人密钥的请求日志"
 EXPORT_COLUMNS = (
     "id", "ts", "time_utc", "key_id", "key_name", "key_prefix", "provider",
     "model", "status", "prompt_tokens", "completion_tokens", "latency_ms",
-    "stream", "error", "credit", "credit_status",
+    "stream", "error", "credit", "credit_status", "resolved_at", "resolved_by",
 )
 
 # Excel 把 = + - @ 开头的单元格当公式执行，前导单引号强制成文本
@@ -237,6 +237,10 @@ def _row_to_public(
         "credit": credit[0],
         "credit_status": credit[1],
         "account": None,
+        # 排查标记：与 billing 口径无关，只表示运维是否看过这条失败
+        "resolved": bool(row["resolved_at"]),
+        "resolved_at": int(row["resolved_at"]) if row["resolved_at"] else None,
+        "resolved_by": row["resolved_by"] or "",
     }
 
 
@@ -383,3 +387,74 @@ def clear_logs(request: Request, user: dict = Depends(admin_user)):
     finally:
         conn.close()
     return {"ok": True, "deleted": removed}
+
+
+def _triage_audit(conn, request: Request, user: dict, action: str, log_id: int, detail: str) -> None:
+    ip = request.client.host if request.client else ""
+    # 只记状态码，不把上游 error 原文抄进审计
+    audit_event(conn, user["username"], action, f"request_log:{log_id}", detail, ip)
+
+
+def _load_log(conn, log_id: int):
+    row = conn.execute("SELECT * FROM request_logs WHERE id = ?", (log_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "日志不存在")
+    return row
+
+
+def _is_failed(row) -> bool:
+    return int(row["status"] or 0) >= 400 or bool(row["error"])
+
+
+def _triage_view(row) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "id": row["id"],
+        "resolved": bool(row["resolved_at"]),
+        "resolved_at": int(row["resolved_at"]) if row["resolved_at"] else 0,
+        "resolved_by": row["resolved_by"] or "",
+    }
+
+
+@router.post("/{log_id}/resolve")
+def resolve_log(log_id: int, request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_log(conn, log_id)
+        if not _is_failed(row):
+            raise HTTPException(400, "只有失败或异常的请求可以标记已排查")
+        if row["resolved_at"]:
+            # 幂等：重复标记不改时间戳，但仍记一条动作审计
+            _triage_audit(conn, request, user, "logs.resolve", log_id, "resolved(noop)")
+            return _triage_view(row)
+        stamp = now()
+        conn.execute(
+            "UPDATE request_logs SET resolved_at = ?, resolved_by = ? "
+            "WHERE id = ? AND resolved_at IS NULL",
+            (stamp, user["username"], log_id),
+        )
+        _triage_audit(conn, request, user, "logs.resolve", log_id, f"status={int(row['status'] or 0)}")
+        return _triage_view(_load_log(conn, log_id))
+    finally:
+        conn.close()
+
+
+@router.delete("/{log_id}/resolve")
+def unresolve_log(log_id: int, request: Request, user: dict = Depends(admin_user)):
+    conn = request.app.state.db.connect()
+    try:
+        row = _load_log(conn, log_id)
+        if row["resolved_at"]:
+            conn.execute(
+                "UPDATE request_logs SET resolved_at = NULL, resolved_by = '' WHERE id = ?",
+                (log_id,),
+            )
+            _triage_audit(
+                conn, request, user, "logs.unresolve", log_id, f"status={int(row['status'] or 0)}"
+            )
+            row = _load_log(conn, log_id)
+        else:
+            _triage_audit(conn, request, user, "logs.unresolve", log_id, "unresolved(noop)")
+        return _triage_view(row)
+    finally:
+        conn.close()

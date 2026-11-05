@@ -197,6 +197,18 @@ RUNTIME_ITEMS: tuple[RuntimeItem, ...] = (
     # 健康检测的两个旋钮同样由「服务商」分组开关驱动，这里只负责持久化与导出/导入
     RuntimeItem("health_check_enabled", "bool", ui=False),
     RuntimeItem("health_check_interval_sec", "int", 60, 86400, ui=False),
+    # 告警规则：整组走同一个 runtime_config 事务，任一项非法则整组拒绝；
+    # usage_missing 的最少样本下限 10 见 app/alerting.py 的常量说明（1 会让告警变噪音）
+    RuntimeItem("alert_provider_failure_enabled", "bool"),
+    RuntimeItem("alert_provider_failure_streak", "int", 1, 100),
+    RuntimeItem("alert_provider_failure_window_sec", "int", 60, 86400),
+    RuntimeItem("alert_quota_remaining_enabled", "bool"),
+    # 剩余 100% 代表从未用量，阈值会恒真，因此上限定 99
+    RuntimeItem("alert_quota_remaining_percent", "int", 1, 99),
+    RuntimeItem("alert_usage_missing_enabled", "bool"),
+    RuntimeItem("alert_usage_missing_ratio_percent", "int", 1, 100),
+    RuntimeItem("alert_usage_missing_min_requests", "int", 10, 10000),
+    RuntimeItem("alert_usage_missing_window_sec", "int", 60, 86400),
 )
 RUNTIME_BY_KEY = {item.key: item for item in RUNTIME_ITEMS}
 

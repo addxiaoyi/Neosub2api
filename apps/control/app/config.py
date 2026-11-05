@@ -115,11 +115,16 @@ class Settings:
     demo_mode: bool = False
     # 自助注册：默认关闭；开启后 /api/auth/register 才创建账号（role=user）
     allow_registration: bool = False
-    # 运维告警阈值：0 表示关闭该规则。三条规则都复用 quota_alerts 存储与去重语义
+    # 运维告警：每条规则可独立开关，关闭时真的不评估；阈值/窗口由设置页钳制区间
+    alert_provider_failure_enabled: bool = True
     alert_provider_failure_streak: int = 3
+    alert_provider_failure_window_sec: int = 86400
+    alert_quota_remaining_enabled: bool = True
     alert_quota_remaining_percent: int = 20
+    alert_usage_missing_enabled: bool = True
     alert_usage_missing_ratio_percent: int = 50
     alert_usage_missing_min_requests: int = 20
+    alert_usage_missing_window_sec: int = 600
     # Prometheus 抓取令牌：留空 = 只认 admin 会话；配置后额外接受 Authorization: Bearer <token>
     metrics_token: str = ""
     # provider 定时健康检测：默认关闭；只观测可用性，不参与路由与告警
@@ -170,14 +175,21 @@ def load_settings() -> Settings:
         model_fallback_first=_bool("UNIFIED_MODEL_FALLBACK_FIRST", False),
         demo_mode=_bool("UNIFIED_DEMO_MODE", False),
         allow_registration=_bool("UNIFIED_ALLOW_REGISTRATION", False),
+        alert_provider_failure_enabled=_bool("UNIFIED_ALERT_PROVIDER_FAILURE_ENABLED", True),
         alert_provider_failure_streak=int(os.getenv("UNIFIED_ALERT_PROVIDER_FAILURE_STREAK", "3")),
+        alert_provider_failure_window_sec=int(
+            os.getenv("UNIFIED_ALERT_PROVIDER_FAILURE_WINDOW_SEC", "86400")
+        ),
+        alert_quota_remaining_enabled=_bool("UNIFIED_ALERT_QUOTA_REMAINING_ENABLED", True),
         alert_quota_remaining_percent=int(os.getenv("UNIFIED_ALERT_QUOTA_REMAINING_PERCENT", "20")),
+        alert_usage_missing_enabled=_bool("UNIFIED_ALERT_USAGE_MISSING_ENABLED", True),
         alert_usage_missing_ratio_percent=int(
             os.getenv("UNIFIED_ALERT_USAGE_MISSING_RATIO_PERCENT", "50")
         ),
         alert_usage_missing_min_requests=int(
             os.getenv("UNIFIED_ALERT_USAGE_MISSING_MIN_REQUESTS", "20")
         ),
+        alert_usage_missing_window_sec=int(os.getenv("UNIFIED_ALERT_USAGE_MISSING_WINDOW_SEC", "600")),
         metrics_token=os.getenv("UNIFIED_METRICS_TOKEN", "").strip(),
         health_check_enabled=_bool("UNIFIED_HEALTH_CHECK_ENABLED", False),
         health_check_interval_sec=clamp_health_interval(

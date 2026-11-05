@@ -78,7 +78,10 @@ CREATE TABLE IF NOT EXISTS request_logs(
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   stream INTEGER NOT NULL DEFAULT 0,
-  error TEXT
+  error TEXT,
+  -- 运维排查标记：只服务 triage，不参与计费；NULL 表示未排查
+  resolved_at INTEGER,
+  resolved_by TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS usage_records(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,6 +241,12 @@ CREATE TABLE IF NOT EXISTS quota_alerts(
   limit_requests INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL DEFAULT 'quota',              -- quota / provider_failure / usage_missing_ratio
   subject TEXT NOT NULL DEFAULT '',                -- 全局规则的对象（如 provider id），配额规则留空
+  -- 状态机：open -> acked -> closed，closed 只能 reopen 回 open；
+  -- silenced_until 到期后读取端自动按 open 呈现，状态列本身不写 'silenced'
+  status TEXT NOT NULL DEFAULT 'open',
+  acked_at INTEGER,
+  closed_at INTEGER,
+  silenced_until INTEGER NOT NULL DEFAULT 0,
   UNIQUE (policy_id, threshold_percent, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_quota_alerts_policy ON quota_alerts(policy_id, period_start);
@@ -344,6 +353,14 @@ class Database:
             # 告警规则扩展：老库补 kind/subject 列，已有配额告警默认 kind='quota'
             _ensure_column(conn, "quota_alerts", "kind", "TEXT NOT NULL DEFAULT 'quota'")
             _ensure_column(conn, "quota_alerts", "subject", "TEXT NOT NULL DEFAULT ''")
+            # 告警状态机与静默到期：只补列，不改已有行（老告警默认 status='open'）
+            _ensure_column(conn, "quota_alerts", "status", "TEXT NOT NULL DEFAULT 'open'")
+            _ensure_column(conn, "quota_alerts", "acked_at", "INTEGER")
+            _ensure_column(conn, "quota_alerts", "closed_at", "INTEGER")
+            _ensure_column(conn, "quota_alerts", "silenced_until", "INTEGER NOT NULL DEFAULT 0")
+            # 日志排查标记：纯运维元数据，billing_ledger 一行不动
+            _ensure_column(conn, "request_logs", "resolved_at", "INTEGER")
+            _ensure_column(conn, "request_logs", "resolved_by", "TEXT NOT NULL DEFAULT ''")
             # 逐条扣费关联键：老库 billing_ledger 没有 log_id，补完列再建索引（同 request_logs 的顺序）
             _ensure_column(conn, "billing_ledger", "log_id", "INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_billing_ledger_log ON billing_ledger(log_id)")
