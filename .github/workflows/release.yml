@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（形如 v0.2.0）"
+        required: true
+      min_current_version:
+        description: "允许从哪个版本起直接升级（低于它必须先升中间版本）"
+        required: false
+        default: "0.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析版本并校验与代码一致
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          VERSION="${TAG#v}"
+          CODE_VERSION="$(python -c 'import re, pathlib; print(re.search(r"__version__ = \"(.+?)\"", pathlib.Path("apps/control/app/__init__.py").read_text()).group(1))')"
+          if [ "$VERSION" != "$CODE_VERSION" ]; then
+            echo "::error::tag $TAG 与 app/__init__.py 的 __version__=$CODE_VERSION 不一致，版本比较将不可信"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/control/requirements*.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: 构建前端静态产物
+        working-directory: apps/web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:export
+
+      - name: 写入签名私钥
+        env:
+          PRIVATE_KEY: ${{ secrets.UNIFIED_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::缺少 UNIFIED_RELEASE_PRIVATE_KEY（Ed25519 私钥，PKCS#8 PEM），拒绝产出无签名发布物"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$PRIVATE_KEY" > "$RUNNER_TEMP/release.pem"
+
+      - name: 生成发布包与 manifest
+        run: |
+          set -euo pipefail
+          python scripts/release_manifest.py build \
+            --version "${{ steps.version.outputs.version }}" \
+            --commit "$GITHUB_SHA" \
+            --min-current "${{ inputs.min_current_version || '0.0.0' }}" \
+            --private-key "$RUNNER_TEMP/release.pem" \
+            --out dist
+
+      - name: 自校验（内置公钥验签 + 逐文件 sha256）
+        run: |
+          set -euo pipefail
+          PREV="$(git tag --sort=-v:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n1 || true)"
+          CURRENT="${PREV#v}"
+          python scripts/release_manifest.py verify \
+            --zip dist/release.zip \
+            --manifest dist/release-manifest.json \
+            --sig dist/release-manifest.json.sig \
+            --pubkey deploy/release-pubkey.pem \
+            --current "${CURRENT:-0.0.0}"
+
+      - name: 创建 Release 并上传三个资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file CHANGELOG.md \
+            dist/release.zip \
+            dist/release-manifest.json \
+            dist/release-manifest.json.sig
+
+      - name: 清理私钥
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.pem"
