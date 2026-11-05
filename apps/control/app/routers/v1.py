@@ -34,6 +34,7 @@ from ..model_resolve import (
     resolve_targets,
     retryable_status,
 )
+from ..usage_estimate import StreamText, estimate_from_body, estimate_from_text
 
 router = APIRouter(tags=["gateway"])
 logger = logging.getLogger("unified.billing")
@@ -46,6 +47,8 @@ DEFAULT_SSE_MAX_SECONDS = 600
 # 响应也没有可计费的 token 用量（images/videos 按张按秒、count_tokens/rerank 只有非标准 usage），
 # 全零 usage 一律按 usage_missing 落账，不许静默记成 billed(0)
 EXTENSION_CAPABILITIES = frozenset({"embeddings", "images", "videos", "media", "count_tokens", "rerank"})
+# 这三类端点的响应正文能按文本口径估算；其他端点没有可提取的正文，一律维持原状
+ESTIMATABLE_CAPABILITIES = frozenset({"chat", "responses", "messages"})
 
 
 def _anonymous_allowed(request: Request, conn) -> bool:
@@ -215,6 +218,7 @@ def _record(
     stream: bool,
     error: str | None,
     pricing: dict[str, Any] | None = None,
+    estimated_usage: dict[str, Any] | None = None,
 ) -> None:
     """写 request_logs（汇总列）+ usage_records（原始 usage 直通）+ billing_ledger（金额定格）。"""
     prompt_tokens, completion_tokens = totals(usage)
@@ -253,6 +257,7 @@ def _record(
                 usage=usage,
                 pricing=pricing,
                 failed=bool(error),
+                estimated_usage=estimated_usage,
                 # 日志行 id 即关联键：流水按它精确挂到本请求上，日志接口无需猜关联
                 log_id=int(log_cur.lastrowid),
             )
@@ -277,6 +282,23 @@ def _usage_for_ledger(capability: str, usage: dict[str, Any] | None) -> dict[str
     if capability in EXTENSION_CAPABILITIES and not any(totals(usage)):
         return None
     return usage
+
+
+def _estimate_on(request: Request, capability: str) -> bool:
+    """估算计费默认关：关时调用链完全不变，连正文提取都不会发生。"""
+    return (
+        capability in ESTIMATABLE_CAPABILITIES
+        and bool(getattr(request.app.state.settings, "estimate_usage", False))
+    )
+
+
+def _try_estimate(kind: str, payload: Any, source: Any) -> dict[str, Any] | None:
+    """估算只是兜底：任何异常都退回 None，保持 usage_missing，不能影响响应与计费事务。"""
+    try:
+        return estimate_from_body(payload, source) if kind == "body" else estimate_from_text(payload, source)
+    except Exception:  # noqa: BLE001
+        logger.exception("usage 估算失败，本次保持 usage_missing")
+        return None
 
 
 async def _json_payload(request: Request) -> dict[str, Any]:
@@ -491,10 +513,14 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
 
     # 走到这里只剩成功目标：StreamingResponse 在整条候选链跑完后才构造，
     # 因此「已经开始出 SSE 帧」之后不可能再换 provider——首帧后的断流沿用既有补偿逻辑。
+    estimate_on = _estimate_on(request, capability)
     if stream:
         async def body_stream():
             error: str | None = None
+            finished = False
             usage_chunks: list[bytes] = []
+            # 只有开关打开且拿不到 usage 时才需要攒正文；关闭时连实例都不创建
+            text_acc = StreamText() if estimate_on else None
             max_seconds = getattr(request.app.state.settings, "sse_max_seconds", DEFAULT_SSE_MAX_SECONDS)
             deadline = time.monotonic() + max(int(max_seconds), 1)
             source = reply.iter_bytes()
@@ -510,7 +536,10 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
                     # 先解析 SSE data 再判断有没有 usage，避免正文里出现 usage 字样就误攒
                     if len(usage_chunks) < 32 and usage_in_chunk(chunk):
                         usage_chunks.append(chunk)
+                    if text_acc is not None:
+                        text_acc.feed(chunk)
                     yield chunk
+                finished = True
             except Exception as exc:  # 流中断要留痕，否则日志里看不到
                 error = str(exc)
                 # 半路断流不能直接截断：按 SSE 约定补错误事件，调用方才知道这句没说完
@@ -520,11 +549,19 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
                     await source.aclose()  # 超时 break 时也要显式释放上游连接
                 except Exception:
                     pass
+                raw_usage = usage_from_stream(usage_chunks)
+                # 断流/被客户端提前取消时 finished=False：不拿半截正文估算
+                estimated = (
+                    _try_estimate("text", payload, text_acc.output())
+                    if (text_acc is not None and not raw_usage and finished and error is None)
+                    else None
+                )
                 await _record_safe(
                     request, key=key, provider=final_adapter.spec.id, model=final_effective,
-                    status=reply.status_code, usage=usage_from_stream(usage_chunks),
+                    status=reply.status_code, usage=raw_usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     stream=True, error=error, pricing=final_pricing,
+                    estimated_usage=estimated,
                 )
 
         return StreamingResponse(
@@ -535,12 +572,20 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
         )
 
     body = reply.body or b""
-    usage = _usage_for_ledger(capability, extract_usage(body))
+    raw_usage = extract_usage(body)
+    usage = _usage_for_ledger(capability, raw_usage)
+    # 上游只要给了 usage（含全 0）就优先，估算不介入；没有才按正文估算
+    estimated = (
+        _try_estimate("body", payload, body)
+        if (estimate_on and not raw_usage)
+        else None
+    )
     await _record_safe(
         request, key=key, provider=final_adapter.spec.id, model=final_effective,
         status=reply.status_code, usage=usage,
         latency_ms=int((time.perf_counter() - started) * 1000),
         stream=False, error=None, pricing=final_pricing,
+        estimated_usage=estimated,
     )
     return Response(
         content=body,

@@ -258,7 +258,8 @@ def _upstream_failures(conn, since: int) -> dict[str, int]:
 
 def _billing_counts(conn, since: int) -> dict[str, int]:
     """credit_status 口径与 /api/logs 的 _classify_credit 一致：billed/unpriced/
-    usage_missing/not_billed；另外保留 unlinked（成功但无流水）作为第五档。"""
+    usage_missing/estimated/not_billed；另外保留 unlinked（成功但无流水）作为兜底档。
+    estimated 是第四种用量状态（网关估算），不能并进 billed，否则账面分不清真值。"""
     is_failed = "(r.status >= 400 OR COALESCE(r.error, '') <> '')"
     row = conn.execute(
         "SELECT COUNT(*) AS total, "
@@ -266,18 +267,25 @@ def _billing_counts(conn, since: int) -> dict[str, int]:
         f"COALESCE(SUM(CASE WHEN b.id IS NULL AND NOT ({is_failed}) THEN 1 ELSE 0 END), 0) AS unlinked, "
         "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.note = 'usage_missing' "
         "THEN 1 ELSE 0 END), 0) AS usage_missing, "
-        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.note LIKE 'unpriced:%' "
-        "THEN 1 ELSE 0 END), 0) AS unpriced, "
-        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.note <> 'usage_missing' "
-        "AND b.note NOT LIKE 'unpriced:%' THEN 1 ELSE 0 END), 0) AS billed, "
-        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.note <> 'usage_missing' "
-        "AND b.note NOT LIKE 'unpriced:%' THEN b.billed_micro ELSE 0 END), 0) AS billed_micro "
+        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.usage_estimated = 1 "
+        "THEN 1 ELSE 0 END), 0) AS estimated, "
+        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.usage_estimated = 1 "
+        "THEN b.billed_micro ELSE 0 END), 0) AS estimated_micro, "
+        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.usage_estimated = 0 "
+        "AND b.note LIKE 'unpriced:%' THEN 1 ELSE 0 END), 0) AS unpriced, "
+        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.usage_estimated = 0 "
+        "AND b.note <> 'usage_missing' AND b.note NOT LIKE 'unpriced:%' "
+        "THEN 1 ELSE 0 END), 0) AS billed, "
+        "COALESCE(SUM(CASE WHEN b.id IS NOT NULL AND b.usage_estimated = 0 "
+        "AND b.note <> 'usage_missing' AND b.note NOT LIKE 'unpriced:%' "
+        "THEN b.billed_micro ELSE 0 END), 0) AS billed_micro "
         "FROM request_logs r LEFT JOIN billing_ledger b ON b.log_id = r.id "
         "WHERE r.ts >= ?",
         (since,),
     ).fetchone()
     return {key: int(row[key] or 0) for key in
-            ("total", "not_billed", "unlinked", "usage_missing", "unpriced", "billed", "billed_micro")}
+            ("total", "not_billed", "unlinked", "usage_missing", "estimated",
+             "estimated_micro", "unpriced", "billed", "billed_micro")}
 
 
 def _quota_rows(conn, at: int) -> list[dict[str, Any]]:
@@ -382,13 +390,14 @@ def _render_prometheus(conn, window: int) -> str:
     billing = _billing_counts(conn, since)
     _header(lines, "unified_billing_requests_window", "gauge",
             "按 credit_status 分档的请求数（滑动窗口）")
-    for status in ("billed", "unpriced", "usage_missing", "not_billed", "unlinked"):
+    for status in ("billed", "unpriced", "usage_missing", "estimated", "not_billed", "unlinked"):
         lines.append(_line("unified_billing_requests_window",
                            {"credit_status": status}, billing[status]))
     _header(lines, "unified_billing_charged_micro_window", "gauge",
-            "已定格计费金额（micro-USD，滑动窗口；仅 billed 档有值）")
-    lines.append(_line("unified_billing_charged_micro_window",
-                       {"credit_status": "billed"}, billing["billed_micro"]))
+            "已定格计费金额（micro-USD，滑动窗口；billed 与 estimated 两档分别给值）")
+    for status, key in (("billed", "billed_micro"), ("estimated", "estimated_micro")):
+        lines.append(_line("unified_billing_charged_micro_window",
+                           {"credit_status": status}, billing[key]))
 
     _header(lines, "unified_alert_history_total", "counter",
             "告警历史累计条数（按规则与对象）")

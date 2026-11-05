@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS billing_ledger(
   billed_micro INTEGER NOT NULL DEFAULT 0,         -- 定格金额 micro-USD，只增不改成负数（退款走负行）
   price_snapshot_id INTEGER,                       -- 指向 price_book_snapshots.id
   estimated INTEGER NOT NULL DEFAULT 0,            -- 1=金额不完整/为估值（命中未定价档）
-  note TEXT NOT NULL DEFAULT '',                   -- usage_missing / unpriced:input,output / ...
+  usage_estimated INTEGER NOT NULL DEFAULT 0,      -- 1=token 由网关估算（上游未给 usage），与未定价无关
+  note TEXT NOT NULL DEFAULT '',                   -- usage_missing / usage_zero:pid / usage_estimated:<口径> / unpriced:input,output
   log_id INTEGER                                   -- 关联 request_logs.id（settle 写入），/api/logs 按此精确回填逐条金额
 );
 CREATE INDEX IF NOT EXISTS idx_billing_ledger_ts ON billing_ledger(ts);
@@ -307,6 +308,24 @@ CREATE TABLE IF NOT EXISTS provider_health_checks(
   error TEXT NOT NULL DEFAULT ''          -- 已脱敏的错误摘要，绝不落上游原始 key
 );
 CREATE INDEX IF NOT EXISTS idx_provider_health_provider ON provider_health_checks(provider, id);
+
+-- 提示词库：管理员维护的可复用模板，登录用户只读复制。
+-- 建表放在 SCHEMA 里而不是首个请求时懒创建：启动自检、备份清单与并发实例
+-- 都以这套 schema 契约为准，不依赖某个路由先被访问过
+CREATE TABLE IF NOT EXISTS prompt_templates(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT '',
+  sub_category TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT '',
+  image_size TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_templates_category ON prompt_templates(category);
 """
 
 
@@ -364,6 +383,8 @@ class Database:
             # 逐条扣费关联键：老库 billing_ledger 没有 log_id，补完列再建索引（同 request_logs 的顺序）
             _ensure_column(conn, "billing_ledger", "log_id", "INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_billing_ledger_log ON billing_ledger(log_id)")
+            # 估算标记：老库补列，已有行一律 0（历史行没有估算过，不能回溯标成估算）
+            _ensure_column(conn, "billing_ledger", "usage_estimated", "INTEGER NOT NULL DEFAULT 0")
             # F2 缺陷修复：空池拒绝也要留痕，给流水加可空的原因字段
             _ensure_column(conn, "sub2_ledger", "reason", "TEXT")
             # M2 起 codebuddy 默认指向管理端 7864（M1 默认是数据面 7863）；

@@ -9,6 +9,7 @@ stream / error / key_id / key_name / key_prefix，没有 IP、UA、首字延迟�
 （settle 写流水时带上，同事务落库），绝不用 key+model+时间窗弱关联（会串账）。
 credit 为 micro-USD 整数；credit_status 说明口径：
 billed=金额已定格（含 0 元）、unpriced=未配价、usage_missing=上游无 usage、
+estimated=网关按正文估算（第四种状态，金额给出但不是上游真值）、
 not_billed=失败/断流（本就不写流水）、unlinked=成功但无关联流水（存量行或写流水异常）。
 
 归属：api_keys.owner_user_id 存用户名。admin 读全量；非 admin 只读自己名下 key
@@ -48,7 +49,7 @@ OWN_LOGS_DENIED = "无权查看他人密钥的请求日志"
 EXPORT_COLUMNS = (
     "id", "ts", "time_utc", "key_id", "key_name", "key_prefix", "provider",
     "model", "status", "prompt_tokens", "completion_tokens", "latency_ms",
-    "stream", "error", "credit", "credit_status", "resolved_at", "resolved_by",
+    "stream", "error", "credit", "credit_status", "credit_estimated", "resolved_at", "resolved_by",
 )
 
 # Excel 把 = + - @ 开头的单元格当公式执行，前导单引号强制成文本
@@ -178,6 +179,9 @@ def _classify_credit(billed_micro: int, note: str) -> tuple[int | None, str]:
     """流水 note → 输出口径：金额确定才给数，其余给可区分的状态。"""
     if note == "usage_missing":
         return None, "usage_missing"
+    if note.startswith("usage_estimated:"):
+        # 网关按正文估算的第四档：金额给出但必须标明是估算，不和 billed 混同
+        return int(billed_micro), "estimated"
     if note.startswith("unpriced:"):
         # 部分类别缺价时流水金额只是估值（estimated=1），不冒充确定金额
         return None, "unpriced"
@@ -236,6 +240,8 @@ def _row_to_public(
         # micro-USD 整数；关联不到流水时为 null，配合 credit_status 区分口径
         "credit": credit[0],
         "credit_status": credit[1],
+        # 估算标记：与 credit_status 同义但更适合前端做布尔判断/筛选
+        "credit_estimated": credit[1] == "estimated",
         "account": None,
         # 排查标记：与 billing 口径无关，只表示运维是否看过这条失败
         "resolved": bool(row["resolved_at"]),

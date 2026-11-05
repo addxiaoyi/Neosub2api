@@ -130,6 +130,8 @@ class Settings:
     # provider 定时健康检测：默认关闭；只观测可用性，不参与路由与告警
     health_check_enabled: bool = False
     health_check_interval_sec: int = HEALTH_INTERVAL_DEFAULT
+    # 未定价/无 usage 的 token 估算计费：默认关闭；关闭时行为与改动前逐字段一致
+    estimate_usage: bool = False
 
 
 def load_settings() -> Settings:
@@ -195,6 +197,7 @@ def load_settings() -> Settings:
         health_check_interval_sec=clamp_health_interval(
             os.getenv("UNIFIED_HEALTH_CHECK_INTERVAL_SEC", str(HEALTH_INTERVAL_DEFAULT))
         ),
+        estimate_usage=_bool("UNIFIED_ESTIMATE_USAGE", False),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

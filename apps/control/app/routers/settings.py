@@ -197,6 +197,10 @@ RUNTIME_ITEMS: tuple[RuntimeItem, ...] = (
     # 健康检测的两个旋钮同样由「服务商」分组开关驱动，这里只负责持久化与导出/导入
     RuntimeItem("health_check_enabled", "bool", ui=False),
     RuntimeItem("health_check_interval_sec", "int", 60, 86400, ui=False),
+    # 估算计费：默认关。开启后上游没给 usage 的请求按正文估算 token 并落流水，
+    # 估算金额同样计入配额窗口（配额按 billing_ledger 聚合），日志里以 estimated 标出。
+    # 设置页「运行参数」直接暴露这个开关，改完下一次请求立即生效
+    RuntimeItem("estimate_usage", "bool"),
     # 告警规则：整组走同一个 runtime_config 事务，任一项非法则整组拒绝；
     # usage_missing 的最少样本下限 10 见 app/alerting.py 的常量说明（1 会让告警变噪音）
     RuntimeItem("alert_provider_failure_enabled", "bool"),

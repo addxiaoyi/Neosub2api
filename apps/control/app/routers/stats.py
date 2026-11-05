@@ -53,6 +53,11 @@ def _zero_summary() -> dict:
         "today_credit": 0,
         "week_credit": 0,
         "total_credit": 0,
+        # 估算部分单独给数字：total_credit 是账本总额（含估算），这几个字段让调用方能拆出来
+        "today_estimated_credit": 0,
+        "week_estimated_credit": 0,
+        "total_estimated_credit": 0,
+        "total_estimated_requests": 0,
         "week_requests": 0,
         "week_tokens": 0,
         "total_requests": 0,
@@ -111,13 +116,24 @@ def summary(request: Request, realm: str | None = None, user: dict = Depends(cur
         credit = conn.execute(
             "SELECT COALESCE(SUM(billed_micro), 0) AS total_micro, "
             "COALESCE(SUM(CASE WHEN ts >= ? THEN billed_micro ELSE 0 END), 0) AS week_micro, "
-            "COALESCE(SUM(CASE WHEN ts >= ? THEN billed_micro ELSE 0 END), 0) AS today_micro "
+            "COALESCE(SUM(CASE WHEN ts >= ? THEN billed_micro ELSE 0 END), 0) AS today_micro, "
+            "COALESCE(SUM(CASE WHEN usage_estimated = 1 THEN billed_micro ELSE 0 END), 0) "
+            "AS total_estimated_micro, "
+            "COALESCE(SUM(CASE WHEN usage_estimated = 1 AND ts >= ? THEN billed_micro ELSE 0 END), 0) "
+            "AS week_estimated_micro, "
+            "COALESCE(SUM(CASE WHEN usage_estimated = 1 AND ts >= ? THEN billed_micro ELSE 0 END), 0) "
+            "AS today_estimated_micro, "
+            "COALESCE(SUM(usage_estimated), 0) AS estimated_requests "
             "FROM billing_ledger" + scope_where,
-            (week, today, *scope_params),
+            (week, today, week, today, *scope_params),
         ).fetchone()
         result["total_credit"] = to_usd(credit["total_micro"])
         result["week_credit"] = to_usd(credit["week_micro"])
         result["today_credit"] = to_usd(credit["today_micro"])
+        result["total_estimated_credit"] = to_usd(credit["total_estimated_micro"])
+        result["week_estimated_credit"] = to_usd(credit["week_estimated_micro"])
+        result["today_estimated_credit"] = to_usd(credit["today_estimated_micro"])
+        result["total_estimated_requests"] = int(credit["estimated_requests"] or 0)
         active_sql = "SELECT COUNT(*) AS n FROM api_keys WHERE enabled = 1"
         active_params: list = []
         if owner is not None:
@@ -161,6 +177,7 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "credit": 0,
+                "estimated_credit": 0,
                 "failed": 0,
             }
         rows = conn.execute(
@@ -179,15 +196,19 @@ def daily(request: Request, days: int = 30, realm: str | None = None, user: dict
                 bucket["failed"] += 1
         # 金额按日归集：口径与 request_logs 的 success 分桶无关，失败请求通常本来就没有金额
         micro_by_day: dict[str, int] = {label: 0 for label in buckets}
+        estimated_by_day: dict[str, int] = {label: 0 for label in buckets}
         for row in conn.execute(
-            "SELECT ts, billed_micro FROM billing_ledger WHERE ts >= ?" + scope_and,
+            "SELECT ts, billed_micro, usage_estimated FROM billing_ledger WHERE ts >= ?" + scope_and,
             (start, *scope_params),
         ):
             label = _day_label(row["ts"])
             if label in micro_by_day:
                 micro_by_day[label] += int(row["billed_micro"] or 0)
+                if int(row["usage_estimated"] or 0):
+                    estimated_by_day[label] += int(row["billed_micro"] or 0)
         for label, bucket in buckets.items():
             bucket["credit"] = to_usd(micro_by_day[label])
+            bucket["estimated_credit"] = to_usd(estimated_by_day[label])
         return list(buckets.values())
     finally:
         conn.close()

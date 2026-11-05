@@ -13,6 +13,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterator
 
+from .usage_estimate import ESTIMATE_VERSION
+
 MICRO_PER_USD = 1_000_000
 # token 分类与 usage 字段的对应关系见 split_usage
 TOKEN_CLASSES = ("input", "output", "cache_read", "cache_write", "reasoning")
@@ -292,6 +294,8 @@ def settle(
     billing_account_id: int | None = None,
     failed: bool = False,
     log_id: int | None = None,
+    estimated_usage: dict[str, Any] | None = None,
+    estimate_version: str = ESTIMATE_VERSION,
 ) -> dict[str, Any]:
     """把一次请求的用量折成金额写流水；不 commit，由调用方与 request_logs 同一事务提交。
 
@@ -303,22 +307,37 @@ def settle(
 
     log_id 是本次请求在 request_logs 的行 id：写进 log_id 列，
     /api/logs 靠它精确回填逐条金额（不做 key+model+时间窗弱关联，防串账）。
+
+    上游真值永远优先：只要 usage 非空（含全 0），estimated_usage 一律不参与。
+    只有 usage 为空、且调用方在开关打开时显式给了 estimated_usage，才落估算行：
+    note=usage_estimated:<口径版本>，usage_estimated=1，与 usage_missing/usage_zero 可区分。
     """
     zeros = {name: 0 for name in TOKEN_CLASSES}
     if failed or (not usage and status >= 400):
         # 失败请求没有可计量用量，留痕交给 request_logs，不在这里造零金额行
-        return {"written": False, "billed_micro": 0, "estimated": 0, "note": "", "tokens": zeros}
+        return {"written": False, "billed_micro": 0, "estimated": 0, "usage_estimated": 0,
+                "note": "", "tokens": zeros}
 
-    tokens = split_usage(usage)
     lines = (pricing or {}).get("lines") or {}
+    usage_estimated = 0
     if usage:
+        tokens = split_usage(usage)
         billed_micro, unpriced = compute_cost_micro(tokens, lines)
         if any(tokens.values()):
             note = f"unpriced:{','.join(unpriced)}" if unpriced else ""
         else:
             # 上游回了全零 usage（muse 等无计量通道）：0 元但必须能和真实免费请求区分
             note = f"usage_zero:{provider}" if provider else "usage_zero"
+    elif estimated_usage:
+        # 网关估算：第四种状态，既不是 billed 也不是 usage_missing
+        tokens = split_usage(estimated_usage)
+        billed_micro, unpriced = compute_cost_micro(tokens, lines)
+        usage_estimated = 1
+        note = f"usage_estimated:{estimate_version}"
+        if unpriced:
+            note += f";unpriced:{','.join(unpriced)}"
     else:
+        tokens = zeros
         billed_micro, unpriced = 0, []
         note = "usage_missing"
     estimated = 1 if unpriced else 0
@@ -336,8 +355,8 @@ def settle(
     conn.execute(
         "INSERT INTO billing_ledger(ts, key_id, key_name, billing_account_id, provider, model, status, "
         "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
-        "billed_micro, price_snapshot_id, estimated, note, log_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "billed_micro, price_snapshot_id, estimated, note, log_id, usage_estimated) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             ts,
             key_id,
@@ -356,6 +375,7 @@ def settle(
             estimated,
             note,
             int(log_id) if log_id is not None else None,
+            usage_estimated,
         ),
     )
     # 用量刚发生变化，顺带评估阈值；告警失败不能带走已写的流水
@@ -367,6 +387,7 @@ def settle(
         "written": True,
         "billed_micro": billed_micro,
         "estimated": estimated,
+        "usage_estimated": usage_estimated,
         "note": note,
         "snapshot_id": snapshot_id,
         "tokens": tokens,
