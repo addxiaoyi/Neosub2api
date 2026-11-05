@@ -26,7 +26,7 @@ docs/ux-shots/
 
 # 日志与临时构建产物
 *.log
-logs/
+/logs/
 *.tsbuildinfo
 .pytest_cache/
 .mypy_cache/

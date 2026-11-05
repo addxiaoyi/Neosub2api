@@ -11,6 +11,7 @@ import type {AuditLog, GuardInfo, LoginFailuresResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {ClearLoginFailuresDialog} from '@/components/common/security/ClearLoginFailuresDialog';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {
@@ -124,6 +125,8 @@ export default function SecurityPage() {
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearTarget, setClearTarget] = useState<{ip?: string; username?: string} | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -242,6 +245,21 @@ export default function SecurityPage() {
               </span>
             )}
           </div>
+          <div className="flex shrink-0 items-center gap-2">
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 rounded-full text-[11px]"
+              onClick={() => {
+                setClearTarget(null);
+                setClearOpen(true);
+              }}
+            >
+              <Ban className="mr-1 h-3 w-3" />
+              {t('security.clearOpen')}
+            </Button>
+          )}
           {failures && (
             <Badge variant="secondary" className="shrink-0 rounded-full tabular-nums">
               {failures.scope === 'self'
@@ -249,6 +267,7 @@ export default function SecurityPage() {
                 : t('security.loginStats', {today: failures.stats.today, total: failures.stats.total})}
             </Badge>
           )}
+          </div>
         </div>
         {failures?.scope === 'self' ? (
           // 非 admin：后端只给聚合数字，这里也就不渲染 IP / 用户名表
@@ -269,7 +288,7 @@ export default function SecurityPage() {
           <Table>
             <TableHeader>
               <TableRow className="border-b border-border/60 hover:bg-transparent">
-                <TableHead className="pl-4 text-[11px] text-muted-foreground">IP</TableHead>
+                <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('security.loginColIp')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('security.loginColUser')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('security.loginColFailures')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
@@ -294,7 +313,23 @@ export default function SecurityPage() {
                     )}
                   </TableCell>
                   <TableCell className="pr-4 text-xs tabular-nums text-muted-foreground">
-                    {fmtDateTime(f.last_ts)}
+                    <div className="flex items-center justify-end gap-2">
+                      {fmtDateTime(f.last_ts)}
+                      {/* 行内清除把 ip + username 一起带上，清的就是这一对的计数 */}
+                      {isAdmin && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 rounded-full px-2 text-[10px]"
+                          onClick={() => {
+                            setClearTarget({ip: f.ip, username: f.username});
+                            setClearOpen(true);
+                          }}
+                        >
+                          {t('security.clearRow')}
+                        </Button>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -379,6 +414,13 @@ export default function SecurityPage() {
           />
         )}
       </section>
+
+      <ClearLoginFailuresDialog
+        open={clearOpen}
+        onOpenChange={setClearOpen}
+        prefill={clearTarget}
+        onCleared={load}
+      />
     </div>
   );
 }

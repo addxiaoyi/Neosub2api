@@ -914,7 +914,7 @@ export default function PlaygroundPage() {
                         />
                         {!!m.tokens && (
                           <span className="text-[10px] tabular-nums text-muted-foreground/70">
-                            {fmtNumber(m.tokens)} tokens
+                            {t('playground.answerTokens', {n: fmtNumber(m.tokens)})}
                           </span>
                         )}
                       </div>
