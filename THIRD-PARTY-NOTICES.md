@@ -157,11 +157,11 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 
 ## 8. 运行时第三方依赖清单（pip / npm 直接与传递依赖）
 
-第 1–7 节讲 11 家上游仓库；本节讲本仓自己 `pip install` / `npm ci` 装进来的包。复核基线 **2026-11-04**。
+第 1–7 节讲 11 家上游仓库；本节讲本仓自己 `pip install` / `npm ci` 装进来的包。复核基线 **2026-11-04**，Python 侧 **2026-11-05** 因新增加密依赖复核一次（cryptography / cffi / pycparser 三项）。
 
 **取值方式（实读，非记忆）：**
 
-- Python：**版本**取自 `apps/control/requirements.txt` 编译产物（23 包全钉），生成命令 `uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements.in -o apps/control/requirements.txt`（uv 0.13.7，生成日期 2026-11-04，编译环境 Python 3.11 / linux x86_64，对齐运行镜像 `python:3.11-slim`）；**许可证字段**读各包 `METADATA` 的 `License-Expression` / `License` / `Classifier`。依赖随运行镜像分发，证据是 `apps/control/Dockerfile:12-13`（`pip install -r requirements.txt` 于 `python:3.11-slim`）。
+- Python：**版本**取自 `apps/control/requirements.txt` 编译产物（26 包全钉），生成命令 `uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements.in -o apps/control/requirements.txt`（uv 0.13.7，最近一次生成 2026-11-05，编译环境 Python 3.11 / linux x86_64，对齐运行镜像 `python:3.11-slim`）；**许可证字段**读各包 `METADATA` 的 `License-Expression` / `License` / `Classifier`。依赖随运行镜像分发，证据是 `apps/control/Dockerfile:12-13`（`pip install -r requirements.txt` 于 `python:3.11-slim`）。
 - 前端：读 `apps/web/package-lock.json` 与 `node_modules/<pkg>/package.json` 的 `license` 字段。产物是静态导出（`next.config.ts` 的 `output: 'export'`），运行镜像只含 `out/` 静态文件，见第 9 节。
 
 ### 8.1 Python（`apps/control`）
@@ -173,6 +173,9 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 | uvicorn | 0.34.0 | BSD-3-Clause | `License: BSD-3-Clause` + `Classifier: License :: OSI Approved :: BSD License` |
 | httpx | 0.28.1 | BSD-3-Clause | `License` + `Classifier` 同上 |
 | PyYAML | 6.0.3 | MIT | `License: MIT` + `Classifier: License :: OSI Approved :: MIT License` |
+| cryptography | 50.0.2 | **Apache-2.0 OR BSD-3-Clause**（双许可，可任选其一履行） | `License-Expression: Apache-2.0 OR BSD-3-Clause`；**2026-11-05 新增直接依赖**，用于备份归档 AES-256-GCM 加密与更新包 manifest 的 Ed25519 验签；版本低于 41.0 或导入失败时回落纯标准库实现，回落原因可在远端备份状态的 `crypto_backend.reason` 读到（见 `docs/BACKUP.md`「加密后端」） |
+| cffi | 2.1.1 | MIT-0 | `License-Expression: MIT-0`；cryptography 的传递依赖（`Requires-Dist: cffi>=2.0.0`），锁文件行为 `cffi==2.1.1 ; platform_python_implementation != 'PyPy'`，仅排除 PyPy |
+| pycparser | 3.12 | BSD-3-Clause | `License-Expression: BSD-3-Clause`；cffi 的传递依赖，锁文件行为 `pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'`，仅排除 PyPy |
 | pydantic | 2.14.2 | MIT | `License-Expression: MIT` |
 | pydantic-core | 2.50.2 | MIT | `License-Expression: MIT` |
 | annotated-types | 0.8.0 | MIT | `License-Expression: MIT` + `Classifier` |
@@ -192,11 +195,11 @@ LGPL-3.0 允许以动态链接方式使用库而不传染主程序，但前提�
 | websockets | 17.4 | BSD-3-Clause | `License-Expression: BSD-3-Clause`（`uvicorn[standard]`） |
 | uvloop | 0.23.0（锁文件钉版；此前为「未锁定」，2026-11-04 收口） | MIT | 锁文件行：`uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'`。本机（Windows）未安装，读不到本地 `METADATA`，许可证沿用 PyPI JSON `info.license = "MIT License"`；该包 `Classifier` 同时列了 Apache 与 MIT 两条，按 `license` 字段取 MIT。仅非 win32 平台由 `uvicorn[standard]` 装入，Linux 运行镜像内存在 |
 
-本表 23 行与锁文件的 23 个包一一对应，2026-11-04 按锁逐行核对无遗漏、无多列。
+本表 26 行与锁文件的 26 个包一一对应，2026-11-05 按锁逐行核对无遗漏、无多列（本次新增 cryptography / cffi / pycparser 三行）。
 
 两点必须知道的边界：
 
-- **本仓没有 Python 锁文件**（体检当时的旧状态，止于 2026-11-04）。`requirements.txt` 原先只钉 5 个直接依赖，上表传递依赖版本是本机 site-packages 实测值，容器构建时 `pip` 可能解析到同主版本的其他小版本（许可证字段基本不变，版本可能有差异）。**当前状态（2026-11-04 起）**：`requirements.txt` 已改为 `uv pip compile` 全钉编译产物（23 包），上表版本即锁文件版本，容器构建不再有解析漂移；再生成方式见 `docs/dependency-audit.md` 第 5 节。
+- **本仓没有 Python 锁文件**（体检当时的旧状态，止于 2026-11-04）。`requirements.txt` 原先只钉 5 个直接依赖，上表传递依赖版本是本机 site-packages 实测值，容器构建时 `pip` 可能解析到同主版本的其他小版本（许可证字段基本不变，版本可能有差异）。**当前状态（2026-11-04 起）**：`requirements.txt` 已改为 `uv pip compile` 全钉编译产物（26 包，2026-11-05 重新生成时纳入加密三项），上表版本即锁文件版本，容器构建不再有解析漂移；再生成方式见 `docs/dependency-audit.md` 第 5 节。
 - `colorama 0.4.6` **不在锁文件内**（2026-11-04 编译目标为 linux x86_64，`uvicorn[standard]` 的 `sys_platform == 'win32'` 依赖不纳入），即由本仓锁文件安装时 Windows 开发机与 Linux 运行镜像都不装它；`uvicorn` 源码无 `colorama` 导入（本地 site-packages 全量检索 0 命中），不装不影响导入。其元数据只有 `Classifier: License :: OSI Approved :: BSD License`，**没有**可判读的 SPDX 字段，故标 `BSD`（未细到 `-3-Clause`），不推测。
 
 ### 8.2 前端（`apps/web`）

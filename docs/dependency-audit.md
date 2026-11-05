@@ -140,10 +140,10 @@ MIT 177 ・ Apache-2.0 16 ・ ISC 15 ・ LGPL-3.0-or-later 10 ・ `Apache-2.0 AN
 
 | 文件 | 作用 |
 | --- | --- |
-| `requirements.in` | 源清单，手工维护：5 个直接依赖（fastapi / starlette / uvicorn[standard] / httpx / PyYAML），保留原注释与顺序 |
-| `requirements.txt` | 编译产物，23 个包全钉，`pip install -r` 直接消费 |
+| `requirements.in` | 源清单，手工维护：6 个直接依赖（fastapi / starlette / uvicorn[standard] / httpx / PyYAML / cryptography），保留原注释与顺序 |
+| `requirements.txt` | 编译产物，26 个包全钉，`pip install -r` 直接消费 |
 | `requirements-dev.in` | 源清单：`-r requirements.in` + pytest / pytest-asyncio |
-| `requirements-dev.txt` | 编译产物，29 个包全钉（运行时 23 + pytest 链 6） |
+| `requirements-dev.txt` | 编译产物，32 个包全钉（运行时 26 + pytest 链 6） |
 
 **再生成命令**（必须按目标平台编译；在 Windows 本机直接 `pip-compile` / `uv pip compile` 会漏掉 `uvloop` 的 `sys_platform != 'win32'` marker 并多带 Windows-only 的 `colorama`）：
 
@@ -152,8 +152,10 @@ uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 
 uv pip compile --python-platform x86_64-unknown-linux-gnu --python-version 3.11 --no-strip-markers apps/control/requirements-dev.in -o apps/control/requirements-dev.txt
 ```
 
-- 编译环境：uv 0.13.7，目标 Python 3.11 / `x86_64-unknown-linux-gnu`（对齐 `apps/control/Dockerfile` 的 `python:3.11-slim`），生成日期 2026-11-04；`--no-strip-markers` 用于保留环境标记，否则 uv 会按目标平台把 marker 求值后剥掉。
-- 关键行：`uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'`；`colorama` 因目标平台为 linux 未进入锁文件，没有任何 Windows-only 包被无条件锁定。
-- 验证（全部 `pip install --dry-run`，未往任何运行环境安装）：本机 Python 3.11.9 对 prod / dev 两份锁解析成功；`python:3.12-slim` 容器（对齐 CI 的 3.12 口径）同样解析成功；`python:3.11-slim` 容器确认 `uvloop-0.23.0` 正常纳入、`Would install` 全量列出 23 / 29 个包且无报错。
+- 编译环境：uv 0.13.7，目标 Python 3.11 / `x86_64-unknown-linux-gnu`（对齐 `apps/control/Dockerfile` 的 `python:3.11-slim`），首次生成日期 2026-11-04，2026-11-05 因新增 `cryptography` 按同一命令重新生成（两份锁都以旧产物为 preference，除加密三项外版本未漂移）；`--no-strip-markers` 用于保留环境标记，否则 uv 会按目标平台把 marker 求值后剥掉。
+- 关键行：`uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'`；`cffi==2.1.1 ; platform_python_implementation != 'PyPy'`、`pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'`（cryptography 的传递依赖，marker 只排除 PyPy，Windows 开发机与 Linux 镜像都会装）；`colorama` 因目标平台为 linux 未进入锁文件，没有任何 Windows-only 包被无条件锁定。
+- 验证（2026-11-04 首次生成时，全部 `pip install --dry-run`，未往任何运行环境安装）：本机 Python 3.11.9 对 prod / dev 两份锁解析成功；`python:3.12-slim` 容器（对齐 CI 的 3.12 口径）同样解析成功；`python:3.11-slim` 容器确认 `uvloop-0.23.0` 正常纳入、`Would install` 全量列出当时 23 / 29 个包且无报错。
+- **2026-11-05 重新生成并实装**：本机 Python 3.11.9 按锁装上 `cryptography==50.0.2` / `cffi==2.1.1` / `pycparser==3.12`，`backup_crypto.backend_info()` 与 `update_signing.backend_info()` 均返回 `implementation=lib`、`library_version=50.0.2`；全量 `python -m pytest -q` 为 `1045 passed, 1 skipped`（唯一 skip 是 Windows POSIX 权限位的 `[env]` 项），`scripts/check_no_bad_skip.py` 退出码 0。这解释了为什么零 skip 门在未装库的环境会红：互通用例的 `skipif` 代码路径保留，但按依赖声明准备的环境里不会触发。
+- **2026-11-05 复跑（本批新增远端备份用例后）**：同一台机器、同一份锁，全量 `python -m pytest -q` 为 `1051 passed, 1 skipped, 3 subtests passed`（661.15s），唯一 skip 仍是 `test_hardening.py:99` 那条带 `[env]` 的 win32 用例；`scripts/check_no_bad_skip.py apps/control/pytest-full.log` 退出码 0。**与上一段的 1045 对不上**：`test_backup_remote.py` / `test_s3_sigv4.py` / `test_backup_schedule.py` 单跑是 `45 passed`，若 1045 是同一工作树的数，加上它们应为 1090。所以 1045 只能当作那次时点的记录，不能当作「本批之前的基线」来推算增量；以本次 1051 为准。
 - `Dockerfile` 与 CI 不改：`pip install -r requirements.txt` 对全钉文件无感知；CI 的 pip 缓存 key 已按 `requirements*.txt` 内容变化自动失效（`.github/workflows/ci.yml:23`）。
 - 改动仅限 `.in` 源清单与两份锁文件；`package.json` / `package-lock.json` / Dockerfile 未动，未执行任何 git 写操作。

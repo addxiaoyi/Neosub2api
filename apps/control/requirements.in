@@ -4,3 +4,6 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 # 价格表种子导入（config/prices.yaml）
 PyYAML==6.0.3
+# 可选加速后端：备份加密（AES-256-GCM）与 manifest 验签（Ed25519）优先用它，
+# 缺失/版本过低时自动回落纯标准库实现，应用仍可正常启动
+cryptography==50.0.2
