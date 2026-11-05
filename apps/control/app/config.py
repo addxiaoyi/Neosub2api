@@ -31,11 +31,24 @@ LEGACY_PROVIDER_BASES = {
 }
 
 
+# 在线更新：发布物最大字节数（默认 256 MiB，解压后总量同样受它约束）
+UPDATE_MAX_BYTES_DEFAULT = 268435456
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pubkey_path(raw: str) -> Path:
+    """相对路径按仓库根解析：容器里 /repo/deploy/release-pubkey.pem 就是绑挂进来的那把。"""
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("UNIFIED_UPDATE_PUBKEY 不能为空；留空请改用默认值")
+    path = Path(text)
+    return path if path.is_absolute() else (REPO_ROOT / path)
 
 
 def clamp_health_interval(raw: Any) -> int:
@@ -132,6 +145,14 @@ class Settings:
     health_check_interval_sec: int = HEALTH_INTERVAL_DEFAULT
     # 未定价/无 usage 的 token 估算计费：默认关闭；关闭时行为与改动前逐字段一致
     estimate_usage: bool = False
+    # 在线更新：默认关闭 —— 不开开关就不发任何探测请求
+    update_enabled: bool = False
+    update_manifest_url: str = ""
+    update_pubkey: Path = REPO_ROOT / "deploy" / "release-pubkey.pem"
+    update_check_ttl_sec: int = 21600
+    update_max_bytes: int = UPDATE_MAX_BYTES_DEFAULT
+    # 裸机部署的服务名：Windows 用 sc、Linux 用 systemctl restart；留空 = 容器外不可自动更新
+    service_name: str = ""
 
 
 def load_settings() -> Settings:
@@ -198,6 +219,15 @@ def load_settings() -> Settings:
             os.getenv("UNIFIED_HEALTH_CHECK_INTERVAL_SEC", str(HEALTH_INTERVAL_DEFAULT))
         ),
         estimate_usage=_bool("UNIFIED_ESTIMATE_USAGE", False),
+        update_enabled=_bool("UNIFIED_UPDATE_ENABLED", False),
+        # 发布源：manifest 的 URL，签名与发布包按约定取同目录的 .sig / release.zip
+        update_manifest_url=os.getenv("UNIFIED_UPDATE_MANIFEST_URL", "").strip(),
+        update_pubkey=_pubkey_path(os.getenv("UNIFIED_UPDATE_PUBKEY", "deploy/release-pubkey.pem")),
+        update_check_ttl_sec=max(0, int(os.getenv("UNIFIED_UPDATE_CHECK_TTL_SEC", "21600"))),
+        update_max_bytes=max(
+            1024, int(os.getenv("UNIFIED_UPDATE_MAX_BYTES", str(UPDATE_MAX_BYTES_DEFAULT)))
+        ),
+        service_name=os.getenv("UNIFIED_SERVICE_NAME", "").strip(),
         env_base_pids=frozenset(
             pid for pid, var in ENV_BASE_VARS.items() if (os.getenv(var) or "").strip()
         ),

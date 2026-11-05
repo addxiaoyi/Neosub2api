@@ -14,7 +14,6 @@ import importlib.util
 import io
 import json
 import logging
-import os
 import shutil
 import sqlite3
 import tempfile
@@ -29,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from ..api_utils import db_of, mask_text
 from ..security import admin_user, audit_event
+from ..services.ops_lock import OpsBusy, busy_guard as ops_busy_guard
 from .settings import _apply_stored_runtime
 
 logger = logging.getLogger("unified.backup")
@@ -36,8 +36,6 @@ logger = logging.getLogger("unified.backup")
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 BACKUP_KEEP = 14  # 与 scripts/backup.sh 的默认 --keep 一致
-LOCK_FILE = "backup.lock"
-LOCK_STALE_SEC = 600  # 备份恢复都是秒级，10 分钟没释放视为进程已崩溃
 CORE_PATH = Path(__file__).resolve().parents[4] / "scripts" / "backup_core.py"
 
 _core_module: Any = None
@@ -67,58 +65,15 @@ def _backup_dir(settings: Any) -> Path:
 
 @contextmanager
 def _busy_guard(directory: Path, op: str) -> Iterator[None]:
-    """跨进程互斥：同一时间只允许一个备份/恢复，抢不到锁直接 409。"""
-    directory.mkdir(parents=True, exist_ok=True)
-    lock = directory / LOCK_FILE
-    payload = json.dumps(
-        {"op": op, "pid": os.getpid(), "started_at": int(time.time())}, ensure_ascii=False
-    )
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if _lock_age_sec(lock) > LOCK_STALE_SEC:
-                lock.unlink(missing_ok=True)
-                continue
-            raise HTTPException(status_code=409, detail=_busy_detail(lock, op)) from None
-        break
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(payload)
+    """跨进程互斥：同一时间只允许一个备份/恢复/更新，抢不到锁直接 409。
+
+    锁本体在 app/services/ops_lock.py：在线更新与这里抢的是同一个文件。
+    """
     try:
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
-
-
-def _lock_meta(lock: Path) -> dict[str, Any]:
-    try:
-        meta = json.loads(lock.read_text(encoding="utf-8"))
-        return meta if isinstance(meta, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _lock_age_sec(lock: Path) -> float:
-    meta = _lock_meta(lock)
-    started = meta.get("started_at")
-    if isinstance(started, (int, float)):
-        return time.time() - started
-    try:
-        return time.time() - lock.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _busy_detail(lock: Path, op: str) -> str:
-    meta = _lock_meta(lock)
-    running = str(meta.get("op") or "备份")
-    started = meta.get("started_at")
-    when = (
-        time.strftime("%H:%M:%S", time.localtime(started))
-        if isinstance(started, (int, float))
-        else "刚才"
-    )
-    return f"已有 {running} 在进行中（{when} 开始），同一时间只能有一个任务，稍后再试（本次请求：{op}）"
+        with ops_busy_guard(directory, op):
+            yield
+    except OpsBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
 
 def _audit(request: Request, username: str, action: str, target: str, detail: str) -> None:

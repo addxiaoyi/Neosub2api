@@ -47,11 +47,15 @@ from .routers import (
     sub2api,
     system,
     tokens,
+    update,
     v1,
 )
 from .security import hash_password, verify_password
 from .services.grok_register import GrokRegisterService
 from .services.provider_health import ProviderHealthService
+from .services.update_boot import arm_confirm, reconcile
+from .services.update_executor import UpdateExecutor
+from .services.update_feed import UpdateFeed
 from . import demo
 
 logger = logging.getLogger("unified.security")
@@ -141,6 +145,9 @@ def create_app() -> FastAPI:
     # 日志格式在第一个 logger 使用前确定：UNIFIED_LOG_FORMAT=json 时全局换 formatter
     configure_logging()
     settings = load_settings()
+    # 新进程起来的第一件事：看门狗先落地 pending 的 boot_attempted 或直接回滚，
+    # 之后才碰数据库——换目录失败时不能在半坏状态里跑业务
+    boot = reconcile(settings)
     db = Database(settings.db_path)
     _seed_admin(db, settings)
     registry = ProviderRegistry(db, settings)
@@ -149,6 +156,9 @@ def create_app() -> FastAPI:
     health_service = ProviderHealthService(settings, db, registry)
     # 演示模式：默认关闭；开启时先校验回环地址，再起进程内假上游并注册 demo provider
     demo_runtime = demo.install(settings, db, registry) if settings.demo_mode else None
+    # 在线更新：feed 负责探测与验签，executor 负责换目录；默认关闭时两块都不发请求
+    update_feed = UpdateFeed(settings)
+    update_executor = UpdateExecutor(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -156,6 +166,9 @@ def create_app() -> FastAPI:
             await demo_runtime.seed()
         grok_service.start()
         health_service.start()
+        if boot.get("pending"):
+            # 新版本已经在这个进程里跑起来了，自证健康后删 pending、收尾任务
+            arm_confirm(settings)
         try:
             yield
         finally:
@@ -179,6 +192,9 @@ def create_app() -> FastAPI:
     app.state.grok_service = grok_service
     app.state.health_service = health_service
     app.state.demo = demo_runtime
+    app.state.update_boot = boot
+    app.state.update_feed = update_feed
+    app.state.update_executor = update_executor
 
     app.add_middleware(
         CORSMiddleware,
@@ -293,7 +309,7 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
     for module in (health, auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
-                   sub2api, pricing, quota, grok, system, backup, v1, logs, prompts, security_router, qoder_sessions):
+                   sub2api, pricing, quota, grok, update, system, backup, v1, logs, prompts, security_router, qoder_sessions):
         app.include_router(module.router)
 
     @app.get("/healthz")
