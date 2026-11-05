@@ -27,6 +27,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import {useT} from '@/lib/i18n/provider';
+import {BackupRemoteSection} from '@/components/common/settings/BackupRemoteSection';
 
 const SIZE_UNITS = ['B', 'KB', 'MB', 'GB'];
 
@@ -324,6 +325,9 @@ export function BackupPanel() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* 远端（S3 兼容）备份：与本地归档共用同一个面板，不新增页面入口 */}
+      <BackupRemoteSection />
     </section>
   );
 }

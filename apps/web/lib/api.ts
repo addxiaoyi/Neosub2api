@@ -26,6 +26,11 @@ import type {
   BackupList,
   BackupCreated,
   BackupRestored,
+  RemoteBackupConfig,
+  RemoteBackupList,
+  RemoteBackupListFailure,
+  RemoteBackupRestored,
+  RemoteBackupUploaded,
   StatsSummary,
   UpstreamConfig,
   UpstreamStatus,
@@ -584,6 +589,32 @@ export const systemApi = {
   /** 用指定归档覆盖当前库；confirm 必须显式 true，后端会先自动存一份当前快照 */
   restoreBackup: (name: string) =>
     post<BackupRestored>('/api/system/restore', {name, confirm: true}),
+  /** 远端备份连接参数与非敏感状态；密钥不会出现在响应里 */
+  remoteConfig: () => get<RemoteBackupConfig>('/api/system/backup-remote'),
+  /** 只保存连接参数，不带任何密钥 */
+  saveRemoteConfig: (body: {
+    endpoint: string;
+    bucket: string;
+    region: string;
+    prefix: string;
+    path_style: boolean;
+  }) => post<RemoteBackupConfig>('/api/system/backup-remote', body),
+  /** 远端对象列表；502 时 body 是 detail 包装，逐层解析交给调用方 */
+  remoteBackups: async () => {
+    const r = await http.get<RemoteBackupList | RemoteBackupListFailure>(
+      '/api/system/backups/remote',
+      {validateStatus: () => true},
+    );
+    return {status: r.status, data: r.data};
+  },
+  /** 手动上传当前最新本地归档；缺密钥/未配置返回 409 */
+  uploadRemoteBackup: () => post<RemoteBackupUploaded>('/api/system/backups/upload'),
+  /** 从远端恢复；confirm 必须与 name 逐字一致 */
+  restoreRemoteBackup: (name: string) =>
+    post<RemoteBackupRestored>('/api/system/backups/restore-remote', {name, confirm: name}),
+  /** 删除远端一份及其旁注；name 是完整对象 key（含 prefix） */
+  deleteRemoteBackup: (name: string) =>
+    del<{ok: boolean}>(`/api/system/backups/remote/${encodeURIComponent(name)}`),
 };
 
 /* ── 服务商凭据（统一凭据库，secret 只回掩码）────────────── */

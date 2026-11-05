@@ -825,6 +825,100 @@ export interface BackupRestored {
   rows_after: Record<string, number>;
 }
 
+/** 远端备份的运行状态：后端可能嵌在 state 里，也可能平铺在响应顶层 */
+export interface RemoteBackupState {
+  /** epoch 秒；0 表示从未 */
+  last_attempt_at?: number;
+  last_ok_at?: number;
+  last_uploaded?: string;
+  last_error?: string;
+  last_error_code?: string;
+  next_retry_at?: number;
+  /** 认证被存储拒绝：改完连接参数后下一轮自动解除 */
+  auth_blocked?: boolean;
+  /** 列表端点探活结果；未探活过时不存在 */
+  s3_reachable?: boolean;
+  s3_checked_at?: number;
+  s3_last_error?: string;
+}
+
+export interface RemoteBackupSettings {
+  enabled?: boolean;
+  interval_sec?: number;
+  auto_upload?: boolean;
+  keep?: number;
+}
+
+/** GET/POST /api/system/backup-remote：连接参数与非敏感状态，密钥只回打码值 */
+export interface RemoteBackupConfig extends RemoteBackupState {
+  configured: boolean;
+  endpoint: string;
+  bucket: string;
+  region: string;
+  prefix: string;
+  path_style: boolean;
+  encryption_key_configured: boolean;
+  /** 打码后的 access key id；凭据只来自环境变量，空串表示未配置 */
+  access_key_id_masked: string;
+  /** 凭据来源固定为 env：后端不接受把密钥写进库 */
+  credential_source: 'env' | string;
+  s3_reachable?: boolean;
+  keep?: number;
+  settings?: RemoteBackupSettings;
+  state?: RemoteBackupState;
+}
+
+/** GET /api/system/backups/remote 的对象：key 是远端完整对象名 */
+export interface RemoteBackupObject {
+  key: string;
+  size_bytes: number;
+  /** S3 返回的 ISO 时间串 */
+  last_modified: string;
+  /** 旁注（.sha256）是否在同一前缀下；后端未返回时不冒充为缺失 */
+  has_sidecar?: boolean;
+}
+
+export interface RemoteBackupList {
+  ok: boolean;
+  configured: boolean;
+  access_key_id_masked?: string;
+  credential_source?: 'env' | string;
+  encryption_key_configured?: boolean;
+  state?: RemoteBackupState;
+  objects: RemoteBackupObject[];
+  count: number;
+  settings?: RemoteBackupSettings;
+  /** 列表接口的探活结果；未配置时为 null */
+  s3_reachable?: boolean | null;
+}
+
+/** 列表失败时后端把状态与错误一起塞进 502 的 detail 里 */
+export interface RemoteBackupListFailure {
+  detail?: RemoteBackupList & {
+    error?: {code?: string; message?: string};
+  };
+}
+
+/** POST /api/system/backups/upload */
+export interface RemoteBackupUploaded {
+  ok: boolean;
+  object?: string;
+  sidecar?: string;
+  size_bytes?: number;
+  sha256?: string;
+  attempts?: number;
+  rotated?: number;
+}
+
+/** POST /api/system/backups/restore-remote：confirm 必须与 name 逐字一致 */
+export interface RemoteBackupRestored {
+  ok: boolean;
+  restored?: string;
+  name?: string;
+  pre_restore_backup?: string;
+  duration_ms?: number;
+}
+
 /** 提示词库列表项：正文只回摘要，详情再取 */
 export interface PromptSummary {
   id: number;
