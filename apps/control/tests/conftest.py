@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import locale
 import multiprocessing
 import os
 import socket
@@ -26,6 +27,18 @@ PY = sys.executable
 # FAST_PORT 是审计后约定的端口名；FAKE_PORT 为历史写法，保留兼容
 FAKE_PORT = int(os.getenv("UNIFIED_TEST_FAST_PORT", os.getenv("UNIFIED_TEST_FAKE_PORT", "8061")))
 CTRL_PORT = int(os.getenv("UNIFIED_TEST_CTRL_PORT", "8060"))
+# 就绪等待上限（秒）；启动失败的诊断消息里报同一个数
+STARTUP_TIMEOUT = 15.0
+# 启动失败时贴多少行 stderr 尾部
+STDERR_TAIL_LINES = 20
+# 代码级失败判据：stderr 见到这些就是仓库/依赖坏了，任何环境都 fail
+CODE_ERROR_MARKS = (
+    "ImportError",
+    "ModuleNotFoundError",
+    "SyntaxError",
+    "FileNotFoundError",
+    "No module named",
+)
 
 
 def _port_free(port: int) -> bool:
@@ -39,7 +52,7 @@ def _port_free(port: int) -> bool:
     return True
 
 
-def _wait_up(url: str, timeout: float = 15.0) -> bool:
+def _wait_up(url: str, timeout: float = 15.0, proc: subprocess.Popen | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -48,6 +61,9 @@ def _wait_up(url: str, timeout: float = 15.0) -> bool:
                 return True
         except Exception:
             pass
+        # 进程已经退出就别等满超时：失败要带着诊断尽快抛出去
+        if proc is not None and proc.poll() is not None:
+            return False
         time.sleep(0.2)
     return False
 
@@ -66,6 +82,61 @@ def _port_busy_hint(port: int) -> str:
     )
 
 
+def _startup_down(
+    name: str, proc: subprocess.Popen, port: int, timeout: float, log_path: Path
+) -> None:
+    """启动失败的统一出口。
+
+    分流口径与上面 _port_busy_hint 那段一致：同一个 CI 环境变量、同一对 skip/fail 动作，
+    但方向相反（那段 CI skip/本地 fail，这里 CI 必 fail）——进程起不来大概率是导入错误、
+    依赖缺失这类代码问题，CI 下整会话 skip 等于把"代码崩了"伪装成"这环境跑不了"的假绿。
+    取舍：stderr 为空或读不到时无法区分环境性/代码性失败，统一按 fail 处理，
+    宁可本地误报也不放过 CI 假绿；本地只有 stderr 明确不含代码级错误才允许 skip。
+    """
+    readable = True
+    try:
+        raw = log_path.read_bytes()
+    except OSError as exc:
+        raw, readable = f"(读取 stderr 日志失败: {exc})".encode("utf-8"), False
+
+    # 子进程 stderr 落文件按系统 locale 编码（Windows 常见 cp936），先试 UTF-8 再回退
+    tail = ""
+    for enc in ("utf-8", locale.getpreferredencoding(False) or "utf-8"):
+        try:
+            tail = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        tail = raw.decode("utf-8", errors="replace")
+    tail = tail.strip()
+    tail = "\n".join(tail.splitlines()[-STDERR_TAIL_LINES:]) if tail else "(stderr 为空)"
+
+    state = (
+        f"进程已退出，exit code {proc.returncode}"
+        if proc.poll() is not None
+        else "进程仍在运行"
+    )
+    detail = (
+        f"{name} 未能在 {timeout:.0f}s 内就绪（端口 {port}，{state}）\n"
+        f"  stderr 尾部（{log_path.name}）：\n{tail}"
+    )
+    if any(mark in tail for mark in CODE_ERROR_MARKS):
+        pytest.fail(
+            f"{name} 启动失败：stderr 是代码级错误（import/语法/缺文件），本地也不 skip\n{detail}"
+        )
+    if os.environ.get("CI"):
+        pytest.fail(f"{name} 启动失败：CI 下不 skip，避免假绿\n{detail}")
+    if not readable or tail == "(stderr 为空)":
+        pytest.fail(
+            f"{name} 启动失败：stderr 无有效信息，无法区分环境性/代码性，按 fail 处理"
+            f"（宁可本地误报也不放过 CI 假绿）\n{detail}"
+        )
+    pytest.skip(
+        f"{name} 启动失败：该环境不具备条件（stderr 未见代码级错误），本地跳过\n{detail}"
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
     """会话级：起假上游 + 控制面；退出时强杀。"""
@@ -81,11 +152,13 @@ def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
     data_dir = tmp / "data"
     data_dir.mkdir()
 
-    # 起假上游
+    # stderr 落文件而不是 DEVNULL：启动失败时要靠尾部判定是代码错还是环境错
+    fake_log = tmp / "fake_upstream.stderr.log"
+    fake_err = fake_log.open("wb")
     fake = subprocess.Popen(
         [str(PY), str(CONTROL / "scripts" / "fake_upstream.py"), str(FAKE_PORT)],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=fake_err,
     )
 
     env = os.environ.copy()
@@ -109,20 +182,22 @@ def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
         }
     )
 
+    ctrl_log = tmp / "control_plane.stderr.log"
+    ctrl_err = ctrl_log.open("wb")
     ctrl = subprocess.Popen(
         [str(PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
          "--port", str(CTRL_PORT), "--log-level", "warning"],
         cwd=str(CONTROL),
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=ctrl_err,
     )
 
     try:
-        if not _wait_up(f"http://127.0.0.1:{FAKE_PORT}/healthz"):
-            pytest.skip("假上游启动失败")
-        if not _wait_up(f"http://127.0.0.1:{CTRL_PORT}/healthz"):
-            pytest.skip("控制面启动失败")
+        if not _wait_up(f"http://127.0.0.1:{FAKE_PORT}/healthz", STARTUP_TIMEOUT, fake):
+            _startup_down("假上游", fake, FAKE_PORT, STARTUP_TIMEOUT, fake_log)
+        if not _wait_up(f"http://127.0.0.1:{CTRL_PORT}/healthz", STARTUP_TIMEOUT, ctrl):
+            _startup_down("控制面", ctrl, CTRL_PORT, STARTUP_TIMEOUT, ctrl_log)
         # /healthz 不再回传库路径，测试直接拿临时 data_dir（S-09）
         yield {"data_dir": data_dir}
     finally:
@@ -143,6 +218,9 @@ def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
                     p.wait(timeout=2)
                 except Exception:
                     pass
+        # 进程都退了再关句柄，子进程退出前可能还在往里写
+        fake_err.close()
+        ctrl_err.close()
 
 
 @pytest.fixture(scope="session")

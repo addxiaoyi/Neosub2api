@@ -9,8 +9,15 @@
 4. 模型目录自动匹配：唯一命中直接走，多家命中 400，无命中 404。
 
 兜底开关（`UNIFIED_MODEL_FALLBACK_FIRST`，默认关）只作用在「一家都没命中」这一步：
-打开后用首家启用的、支持当前端点能力位的 provider 承接未知模型名。多家命中（歧义）
-仍返回 400，不会被兜底掩盖。
+打开后用首家启用的、支持当前端点能力位的 provider 承接未知模型名。
+
+跨 provider 故障转移（默认关；默认最多尝试 2 次，钳制在 1..10）只作用在「本来就有
+多个可能的目标」的两条路径：模型目录多命中、兜底候选。开关关闭时目录多命中仍按原契约
+返回 400 `ambiguous_model`；开关打开时按命中顺序尝试，首项就是旧的 `resolve_model`
+返回值。取值优先级：环境变量 `UNIFIED_FAILOVER_ENABLED` / `UNIFIED_FAILOVER_MAX_ATTEMPTS`
+已设置则以它为准（界面显示「被环境变量锁定」），否则读 settings 表的 `failover_config`
+（管理员在「设置 → 运行参数」里改，保存后立即生效，无需重启），都没有才是默认值。
+显式 `x-provider` 与 `provider/model` 前缀是客户端钉死的目标，永远单目标、不换家。
 
 头与前缀同时给出且指向不同 provider 时直接 400 `conflicting_provider_hints`（不静默取
 其一），同源则剥离前缀后转发；本地注册表未命中报 `provider_not_found`，与真正的上游
@@ -22,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from .adapters.base import ProviderAdapter, ProviderError
@@ -44,6 +52,91 @@ MODE_PREFIX = "prefix"
 MODE_ALIAS = "alias"
 MODE_CATALOG = "catalog"
 MODE_FALLBACK = "fallback"
+
+FAILOVER_ENABLED_ENV = "UNIFIED_FAILOVER_ENABLED"
+FAILOVER_ATTEMPTS_ENV = "UNIFIED_FAILOVER_MAX_ATTEMPTS"
+FAILOVER_CONFIG_KEY = "failover_config"
+DEFAULT_FAILOVER_ENABLED = False
+DEFAULT_FAILOVER_ATTEMPTS = 2
+MIN_FAILOVER_ATTEMPTS = 1
+MAX_FAILOVER_ATTEMPTS = 10
+
+# 值得换家再试的 4xx 只有两种：408 超时、429 限流。
+# 401/403 是上游凭证/权限问题，换家理论上可能绕过，但那会把「我们的配置错误」
+# 变成对其他 provider 的压测，保守不转；400/404 是请求本身的问题，换了也一样。
+RETRYABLE_4XX = frozenset({408, 429})
+# 501 是能力位不支持（换家同样不支持），不算「服务暂时不可用」
+NOT_RETRYABLE_5XX = frozenset({501})
+
+# settings 表的进程内副本：启动时读一次、管理员每次保存后重读一次，
+# 请求路径只读内存，避免每个请求都开库。改配置立即生效靠的就是这份缓存。
+_stored_failover: dict[str, Any] = {}
+
+
+def _clean_failover(raw: Any) -> dict[str, Any]:
+    """只认出 enabled:bool 与 max_attempts:int；库里的脏值忽略或就地钳制。"""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(raw.get("enabled"), bool):
+        out["enabled"] = raw["enabled"]
+    attempts = raw.get("max_attempts")
+    if isinstance(attempts, int) and not isinstance(attempts, bool):
+        out["max_attempts"] = max(MIN_FAILOVER_ATTEMPTS, min(attempts, MAX_FAILOVER_ATTEMPTS))
+    return out
+
+
+def load_stored_failover(conn) -> None:
+    """从 settings 表读 `failover_config` 到内存；启动与每次管理员保存后调用。"""
+    global _stored_failover
+    _stored_failover = _clean_failover(get_json_setting(conn, FAILOVER_CONFIG_KEY, {}))
+
+
+def stored_failover() -> dict[str, Any]:
+    return dict(_stored_failover)
+
+
+def failover_env_locked() -> dict[str, bool]:
+    return {
+        "enabled": bool((os.getenv(FAILOVER_ENABLED_ENV) or "").strip()),
+        "max_attempts": bool((os.getenv(FAILOVER_ATTEMPTS_ENV) or "").strip()),
+    }
+
+
+def failover_sources() -> dict[str, str]:
+    """每个字段当前生效来源：env（锁定）> db（界面配置）> default。"""
+    locked = failover_env_locked()
+    return {
+        "enabled": "env" if locked["enabled"] else ("db" if "enabled" in _stored_failover else "default"),
+        "max_attempts": "env"
+        if locked["max_attempts"]
+        else ("db" if "max_attempts" in _stored_failover else "default"),
+    }
+
+
+def failover_enabled() -> bool:
+    """环境变量已设置则以它为准；否则用管理员在界面上保存的配置，都没有就默认关。"""
+    raw = (os.getenv(FAILOVER_ENABLED_ENV) or "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes", "on"}
+    return bool(_stored_failover.get("enabled", DEFAULT_FAILOVER_ENABLED))
+
+
+def failover_max_attempts() -> int:
+    raw = (os.getenv(FAILOVER_ATTEMPTS_ENV) or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = DEFAULT_FAILOVER_ATTEMPTS
+    else:
+        value = int(_stored_failover.get("max_attempts", DEFAULT_FAILOVER_ATTEMPTS))
+    return max(MIN_FAILOVER_ATTEMPTS, min(value, MAX_FAILOVER_ATTEMPTS))
+
+
+def retryable_status(status: int) -> bool:
+    """该状态码是否值得换下一个 provider 再试。"""
+    return status in RETRYABLE_4XX or (500 <= status < 600 and status not in NOT_RETRYABLE_5XX)
 
 
 class ModelResolutionError(GatewayError):
@@ -292,12 +385,90 @@ def _missing(registry: Any, model: str) -> ModelResolutionError:
     )
 
 
-def _fallback_provider(registry: Any, capability: str, conn=None) -> tuple[ProviderAdapter, int] | None:
-    """首个启用的、支持该能力位的 provider；候选数一并返回给日志。"""
-    capable = [adapter for adapter in registry.enabled(conn=conn) if adapter.spec.capabilities.get(capability)]
-    if not capable:
-        return None
-    return capable[0], len(capable)
+async def resolve_targets(
+    registry: Any,
+    model: str,
+    explicit: str | None = None,
+    capability: str = "chat",
+    ttl_sec: int = 60,
+    *,
+    fallback_first: bool = False,
+    request_id: str | None = None,
+    conn=None,
+    failover: bool | None = None,
+) -> list[tuple[ProviderAdapter, str, str]]:
+    """返回按序尝试的目标列表 [(adapter, 上游模型名, 解析模式)]，首项即主目标。
+
+    只有「目录多命中」与「兜底候选」可能给出多个目标；显式 x-provider 与
+    provider/model 前缀是客户端钉死的选择，恒单目标。
+    failover 为 None 时按调用时刻的生效值判定（env 优先、其次界面配置），便于测试 monkeypatch。
+
+    conn：网关准入段共用连接，借给需要读库的判定步骤复用，不传则各步骤自开自关。
+    """
+    on = failover_enabled() if failover is None else failover
+    limit = failover_max_attempts() if on else 1
+
+    pid = (explicit or "").strip()
+    # 前缀只做存在性识别；冲突/停用的判定顺序：本地存在性 → 冲突 → 停用
+    prefix_hit = _prefix_of(registry, model, conn)
+    if pid:
+        adapter = _known_provider(registry, pid, conn)
+        if adapter is None:
+            raise _unknown_provider(pid)
+        if prefix_hit is not None and prefix_hit[0].spec.id != pid:
+            raise _conflict(pid, prefix_hit[0].spec.id, model)
+        _require_enabled(registry, adapter, conn)
+        # 头与前缀同源时按前缀剥离转发，避免把整串 provider/model 交给上游
+        return [(adapter, prefix_hit[1] if prefix_hit else model, MODE_EXPLICIT)]
+
+    if prefix_hit is not None:
+        adapter, rest = prefix_hit
+        _require_enabled(registry, adapter, conn)
+        return [(adapter, rest, MODE_PREFIX)]
+
+    target = _alias_target(registry, model, conn)
+    if target != model:
+        prefixed = _prefixed(registry, target, conn)
+        if prefixed is not None:
+            adapter, rest = prefixed
+            return [(adapter, rest, MODE_ALIAS)]
+
+    entries, adapters = await _catalog(registry, ttl_sec, conn)
+    entry = next((item for item in entries if str(item.get("id") or "") == target), None)
+    if entry is None:
+        if fallback_first:
+            capable = [
+                adapter
+                for adapter in registry.enabled(conn=conn)
+                if adapter.spec.capabilities.get(capability)
+            ]
+            picked = capable[:limit]
+            if picked:
+                if on:
+                    logger.info(
+                        "unified.model_fallback request_id=%s model=%s provider=%s candidates=%d attempts=%d",
+                        request_id or "-", mask_text(target), picked[0].spec.id, len(capable), len(picked),
+                    )
+                else:
+                    logger.info(
+                        "unified.model_fallback request_id=%s model=%s provider=%s candidates=%d",
+                        request_id or "-", mask_text(target), picked[0].spec.id, len(capable),
+                    )
+                return [(adapter, target, MODE_FALLBACK) for adapter in picked]
+        raise _missing(registry, target)
+
+    hits = _capable_hits(entry, adapters, capability)
+    if len(hits) > 1:
+        if not on:
+            raise _ambiguous(target, hits)
+        picked_hits = hits[:limit]
+        logger.info(
+            "unified.model_failover request_id=%s model=%s 候选=%s",
+            request_id or "-", mask_text(target), " → ".join(pid for pid, _ in picked_hits),
+        )
+        return [(adapters[hit_pid], target, MODE_CATALOG) for hit_pid, _ in picked_hits]
+    provider = hits[0][0] if hits else str(entry["providers"][0])
+    return [(adapters[provider], target, MODE_CATALOG)]
 
 
 async def resolve_model(
@@ -311,51 +482,15 @@ async def resolve_model(
     request_id: str | None = None,
     conn=None,
 ) -> tuple[ProviderAdapter, str, str]:
-    """返回 (adapter, 上游使用的模型名, 解析模式)；ProviderError 交给调用方统一映射。
-
-    conn：网关准入段共用连接，借给需要读库的判定步骤复用，不传则各步骤自开自关。
-    """
-    pid = (explicit or "").strip()
-    # 前缀只做存在性识别；冲突/停用的判定顺序：本地存在性 → 冲突 → 停用
-    prefix_hit = _prefix_of(registry, model, conn)
-    if pid:
-        adapter = _known_provider(registry, pid, conn)
-        if adapter is None:
-            raise _unknown_provider(pid)
-        if prefix_hit is not None and prefix_hit[0].spec.id != pid:
-            raise _conflict(pid, prefix_hit[0].spec.id, model)
-        _require_enabled(registry, adapter, conn)
-        # 头与前缀同源时按前缀剥离转发，避免把整串 provider/model 交给上游
-        return adapter, prefix_hit[1] if prefix_hit else model, MODE_EXPLICIT
-
-    if prefix_hit is not None:
-        adapter, rest = prefix_hit
-        _require_enabled(registry, adapter, conn)
-        return adapter, rest, MODE_PREFIX
-
-    target = _alias_target(registry, model, conn)
-    if target != model:
-        prefixed = _prefixed(registry, target, conn)
-        if prefixed is not None:
-            adapter, rest = prefixed
-            return adapter, rest, MODE_ALIAS
-
-    entries, adapters = await _catalog(registry, ttl_sec, conn)
-    entry = next((item for item in entries if str(item.get("id") or "") == target), None)
-    if entry is None:
-        if fallback_first:
-            picked = _fallback_provider(registry, capability, conn)
-            if picked is not None:
-                adapter, candidates = picked
-                logger.info(
-                    "unified.model_fallback request_id=%s model=%s provider=%s candidates=%d",
-                    request_id or "-", mask_text(target), adapter.spec.id, candidates,
-                )
-                return adapter, target, MODE_FALLBACK
-        raise _missing(registry, target)
-
-    hits = _capable_hits(entry, adapters, capability)
-    if len(hits) > 1:
-        raise _ambiguous(target, hits)
-    provider = hits[0][0] if hits else str(entry["providers"][0])
-    return adapters[provider], target, MODE_CATALOG
+    """旧接口：取有序目标的首项，签名与行为不变（歧义仍由 resolve_targets 决定）。"""
+    targets = await resolve_targets(
+        registry,
+        model,
+        explicit,
+        capability,
+        ttl_sec,
+        fallback_first=fallback_first,
+        request_id=request_id,
+        conn=conn,
+    )
+    return targets[0]

@@ -17,6 +17,22 @@ CREATE TABLE IF NOT EXISTS sessions(
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
+-- 2FA 登录挑战：账号密码通过但缺验证码时签发，一次性消费
+CREATE TABLE IF NOT EXISTS login_challenges(
+  token TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0
+);
+-- 恢复码：一次性，hash 存；used_at 非空即失效
+CREATE TABLE IF NOT EXISTS totp_recovery_codes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_totp_recovery_user ON totp_recovery_codes(username, used_at);
 CREATE TABLE IF NOT EXISTS providers(
   id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -35,7 +51,10 @@ CREATE TABLE IF NOT EXISTS accounts(
   credits REAL,
   note TEXT NOT NULL DEFAULT '',
   disabled INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- 归属（users.username）：与 api_keys.owner_user_id 同口径。
+  -- NULL = 共享/无主，非 admin 不可见
+  owner_user_id TEXT
 );
 CREATE TABLE IF NOT EXISTS api_keys(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +236,8 @@ CREATE TABLE IF NOT EXISTS quota_alerts(
   limit_micro INTEGER NOT NULL DEFAULT 0,
   used_requests INTEGER NOT NULL DEFAULT 0,
   limit_requests INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'quota',              -- quota / provider_failure / usage_missing_ratio
+  subject TEXT NOT NULL DEFAULT '',                -- 全局规则的对象（如 provider id），配额规则留空
   UNIQUE (policy_id, threshold_percent, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_quota_alerts_policy ON quota_alerts(policy_id, period_start);
@@ -239,6 +260,16 @@ CREATE TABLE IF NOT EXISTS grok_tasks(
   next_run_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_grok_tasks_queue ON grok_tasks(status, next_run_at);
+-- 任务状态流转事件：任务详情抽屉按它逐条展示步骤；只记步骤/状态/原因，不落 proxy 与 payload
+CREATE TABLE IF NOT EXISTS grok_task_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ok',
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_grok_task_events_task ON grok_task_events(task_id, id);
 
 -- 统一凭据库：每家 provider 可存多条凭证，按 (sort_order, id) 顺序轮换取用
 CREATE TABLE IF NOT EXISTS provider_credentials(
@@ -255,6 +286,18 @@ CREATE TABLE IF NOT EXISTS provider_credentials(
 );
 CREATE INDEX IF NOT EXISTS idx_provider_credentials_order
   ON provider_credentials(provider, enabled, sort_order, id);
+
+-- 定时健康检测历史：只做可用性观测，不参与路由/计费/告警
+CREATE TABLE IF NOT EXISTS provider_health_checks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'unsupported')),
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT ''          -- 已脱敏的错误摘要，绝不落上游原始 key
+);
+CREATE INDEX IF NOT EXISTS idx_provider_health_provider ON provider_health_checks(provider, id);
 """
 
 
@@ -273,6 +316,21 @@ class Database:
             # 靠 SCHEMA 里的 CREATE TABLE IF NOT EXISTS 自动补到已有库，不需要 ALTER。
             # 轻量迁移：给已有库补列（CREATE TABLE IF NOT EXISTS 不会改旧表）
             _ensure_column(conn, "accounts", "meta_json", "TEXT NOT NULL DEFAULT '{}'")
+            # 用户账号体系：注册邮箱唯一、2FA 状态与登录失败冷却计数。
+            # 均为新增列，老库补列时只写默认值，不改动已有行的业务字段。
+            _ensure_column(conn, "users", "email", "TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            _ensure_column(conn, "users", "totp_secret", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "users", "totp_pending_secret", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "users", "totp_last_counter", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "users", "last_failed_at", "INTEGER NOT NULL DEFAULT 0")
+            # 注册口径统一：历史自助注册账号的 role='user' 与 viewer 权限等价，启动时幂等映射；只匹配 user，不碰 admin
+            conn.execute("UPDATE users SET role = 'viewer' WHERE role = 'user'")
+            # 账号归属列：老库没有，启动时幂等补列；非 admin 只看 owner_user_id = 自己的行
+            _ensure_column(conn, "accounts", "owner_user_id", "TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_user_id)")
             # 归属列：老库没有，启动时幂等补列；补完再建索引，避免旧库上索引先于列失败
             _ensure_column(conn, "api_keys", "owner_user_id", "TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
@@ -283,26 +341,30 @@ class Database:
             _ensure_column(conn, "request_logs", "key_prefix", "TEXT")
             # 失败限流按 (key_id, ts) 聚合 request_logs，索引让窗口查询不退化成全表扫描
             conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_key_ts ON request_logs(key_id, ts)")
+            # 告警规则扩展：老库补 kind/subject 列，已有配额告警默认 kind='quota'
+            _ensure_column(conn, "quota_alerts", "kind", "TEXT NOT NULL DEFAULT 'quota'")
+            _ensure_column(conn, "quota_alerts", "subject", "TEXT NOT NULL DEFAULT ''")
             # 逐条扣费关联键：老库 billing_ledger 没有 log_id，补完列再建索引（同 request_logs 的顺序）
             _ensure_column(conn, "billing_ledger", "log_id", "INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_billing_ledger_log ON billing_ledger(log_id)")
             # F2 缺陷修复：空池拒绝也要留痕，给流水加可空的原因字段
             _ensure_column(conn, "sub2_ledger", "reason", "TEXT")
-            # M2 起 codebuddy 默认指向管理端 7864（M1 默认是数据面 7863），只迁移没动过的存量
+            # M2 起 codebuddy 默认指向管理端 7864（M1 默认是数据面 7863）；
+            # 全等匹配：只有仍是出厂默认值的行才迁，用户改过的 URL 一律不动
             conn.execute(
-                "UPDATE providers SET base_url = REPLACE(base_url, ':7863', ':7864') "
-                "WHERE id = 'codebuddy' AND base_url LIKE '%:7863%'"
+                "UPDATE providers SET base_url = 'http://127.0.0.1:7864' "
+                "WHERE id = 'codebuddy' AND base_url = 'http://127.0.0.1:7863'"
             )
-            # F1：三家占位桩改成主仓内置实现，清掉旧的本地 sidecar 地址（只迁默认值）
+            # F1：三家占位桩改成主仓内置实现，清掉旧的本地 sidecar 地址（同样只迁出厂默认值）
             conn.execute(
                 "UPDATE providers SET base_url = 'https://opencode.ai/zen' "
-                "WHERE id = 'opencode' AND base_url LIKE '%:7869%'"
+                "WHERE id = 'opencode' AND base_url = 'http://127.0.0.1:7869'"
             )
             conn.execute(
-                "UPDATE providers SET base_url = '' WHERE id = 'sub2api' AND base_url LIKE '%:7870%'"
+                "UPDATE providers SET base_url = '' WHERE id = 'sub2api' AND base_url = 'http://127.0.0.1:7870'"
             )
             conn.execute(
-                "UPDATE providers SET base_url = '' WHERE id = 'grok-register' AND base_url LIKE '%:7866%'"
+                "UPDATE providers SET base_url = '' WHERE id = 'grok-register' AND base_url = 'http://127.0.0.1:7866'"
             )
             # 热路径索引：建表/补列之后统一接线；定义升级靠 ensure_indexes 比对重建
             from .perf_indexes import ensure_indexes
