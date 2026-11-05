@@ -43,10 +43,63 @@ def mask_secret(value: str) -> str:
 _KEY_IN_TEXT = re.compile(re.escape(KEY_PREFIX) + r"[A-Za-z0-9_-]{4,}")
 
 
+# 通用凭据形态。每条都要求「已知前缀 + 足够长的随机体」，长度下限就是误杀闸门。
+def _keep_lead_mask_value(match: re.Match[str]) -> str:
+    # 查询参数只换取值，?key= 这类键名留着才好排障
+    return f"{match.group('lead')}{match.group('name')}=***"
+
+
+_CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], Any], ...] = (
+    # Bearer 后的 opaque token：16 位起步，放过 "Bearer certificates" 这类正常英文搭配
+    (re.compile(r"(?<![A-Za-z0-9])(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE), r"\1***"),
+    # JWT 三段式：头固定 eyJ，三段各 8 位以上，普通 a.b.c 不会被当成 token
+    (re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "***"),
+    # URL 查询参数：只吃敏感参数名的取值，保留 ?key= 前缀便于排障；取值 6 位起步
+    (
+        re.compile(
+            r"(?P<lead>[?&]|^|[\s,\"\'])(?P<name>client_secret|access_token|refresh_token"
+            r"|api_key|apikey|secret|token|password|key)=(?P<value>[^\s&\"'<>…]{6,})"
+        ),
+        _keep_lead_mask_value,
+    ),
+    # OpenAI 风格：左边界断言排除 risk-/task- 这种普通英文里的 sk-，8 位起步
+    (re.compile(r"(?<![A-Za-z0-9])sk[-_][A-Za-z0-9_-]{8,}"), "***"),
+    # 常见厂商前缀：固定尾随长度，单独出现的前缀字样不命中
+    (re.compile(r"(?<![A-Za-z0-9])(?:ghp_[A-Za-z0-9]{20,}|xoxb-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16})"), "***"),
+)
+
+
+# 对外文案里的 URL：userinfo 可能是 user:pass@，query 可能带 key=，都必须丢掉
+_URL_IN_TEXT = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<userinfo>[^/@\s]*@)?"
+    r"(?P<host>[^/\s?#]+)(?P<path>/[^\s?#]*)?(?P<tail>[?#][^\s]*)?"
+)
+
+
+def safe_url(url: str) -> str:
+    """上游地址对外展示前去掉 userinfo 与 query/fragment，只留 scheme://host[:port]/path。"""
+    cleaned = _URL_IN_TEXT.sub(
+        lambda match: f"{match.group('scheme')}{match.group('host')}{match.group('path') or ''}",
+        str(url or ""),
+    )
+    return mask_text(cleaned)
+
+
+def exc_summary(exc: BaseException, *, limit: int = 160) -> str:
+    """对外错误只留异常类型名 + 脱敏后的 str(exc)；repr 会带完整 URL/请求对象，不原样透出。"""
+    detail = mask_text(safe_url(str(exc) or "").strip())[:limit].strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def mask_text(value: str) -> str:
-    """把任意文本里疑似 u2a_ 密钥的片段换成掩码，日志/审计落库前统一走这里。"""
+    """日志/审计落库前的统一脱敏：u2a_ 掩码口径不变，其余凭据形态一律换成 ***。"""
     text = "" if value is None else str(value)
-    return _KEY_IN_TEXT.sub(lambda match: mask_secret(match.group(0)), text)
+    # u2a_ 必须先跑：它保留前缀方便定位，跑在后面会被通用规则连前缀一起吃掉
+    text = _KEY_IN_TEXT.sub(lambda match: mask_secret(match.group(0)), text)
+    for pattern, repl in _CREDENTIAL_RULES:
+        text = pattern.sub(repl, text)
+    return text
 
 
 def mask_access_args(args: Any) -> Any:

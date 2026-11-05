@@ -157,6 +157,9 @@ class GatewayError(HTTPException):
         upstream_message: str | None = None,
         retry_after: str | None = None,
     ) -> None:
+        # 对外错误的统一出口：上游原文无论从哪个工厂进来，出壳前再过一遍掩码（幂等，已掩过的不再命中）
+        message = mask_text(message)
+        detail = mask_text(detail) if isinstance(detail, str) else detail
         headers = {"Retry-After": str(retry_after or DEFAULT_RETRY_AFTER)} if status_code == 429 else None
         super().__init__(status_code=status_code, detail=detail if detail is not None else message, headers=headers)
         self.error: dict[str, Any] = {
@@ -175,7 +178,7 @@ class GatewayError(HTTPException):
         if upstream_code is not None:
             self.error["upstream_code"] = upstream_code
         if upstream_message is not None:
-            self.error["upstream_message"] = upstream_message
+            self.error["upstream_message"] = mask_text(upstream_message)
 
     def extra_fields(self) -> dict[str, Any]:
         return {key: self.error[key] for key in _EXTRA_KEYS if key in self.error}
