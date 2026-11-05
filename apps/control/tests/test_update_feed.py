@@ -133,6 +133,8 @@ def test_signature_is_valid_for_published_manifest(tmp_path: Path, feed_server: 
     assert status["current_version"] == __version__
     for key in ("channel", "updater_found", "in_container", "can_apply", "cached"):
         assert key in status
+    # 验签实现必须可从状态里看出来（lib=装了 cryptography，stdlib=回落）
+    assert status["crypto_backend"]["implementation"] in {"lib", "stdlib"}
 
 
 def test_manifest_404_reports_reason(tmp_path: Path, feed_server: FeedServer):

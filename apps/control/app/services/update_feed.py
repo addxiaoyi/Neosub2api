@@ -17,7 +17,13 @@ from ..api_utils import exc_summary, mask_text, safe_url
 from ..config import REPO_ROOT
 from ..services import update_manifest as mf
 from ..services.update_manifest import UpdateError
-from ..services.update_signing import SigningError, decode_signature, load_public_key, verify
+from ..services.update_signing import (
+    SigningError,
+    backend_info as signing_backend_info,
+    decode_signature,
+    load_public_key,
+    verify,
+)
 
 REQUEST_TIMEOUT_SEC = 8.0
 SIGNATURE_LIMIT_BYTES = 8 * 1024
@@ -166,6 +172,8 @@ class UpdateFeed:
             "reason": cap["reason"],
             "checked_at": int(time.time()),
             "error": "",
+            # 验签走 lib 还是纯标准库，必须能从状态里看出来，不允许静默切换
+            "crypto_backend": signing_backend_info(),
         }
         if not cap["updater_found"]:
             return payload

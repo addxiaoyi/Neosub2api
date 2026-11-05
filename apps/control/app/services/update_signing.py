@@ -1,16 +1,22 @@
-"""Ed25519 detached 签名（RFC 8032 参考实现，仅标准库）。
+"""Ed25519 detached 签名：优先用 cryptography，缺失时回落 RFC 8032 纯标准库实现。
 
 运行期只用 verify：发布 manifest 的签名必须能用仓库内置公钥验过，验不过就中止。
 签名函数只给 scripts/release_manifest.py 用（那里持有私钥），进程内不参与任何判定。
 
-为什么不用 cryptography/PyNaCl：镜像里只装了 requirements.txt 那几个包，加依赖会让
-「更新器要在最坏情况下也能启动」这件事变得脆弱；曲线参数是常量，纯标准库足够且可审计。
+两条实现产出/接受的签名格式都是 64 字节 `R || S`，公钥都是 32 字节裸公钥，
+所以换实现不影响任何已发布签名。cryptography 缺失、版本过低或安装损坏时回落
+纯标准库实现，并打日志 + 在更新状态里暴露 `implementation`，不静默切换。
+
+PEM/DER 的读写仍留在标准库：那是对外格式约束（RFC 8410 前缀逐字节校验），
+不是密码学运算，交给库反而会改变错误语义。
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import logging
+import re
 
 P = 2**255 - 19
 L = 2**252 + 27742317777372353535851937790883648493
@@ -23,9 +29,84 @@ PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 
 Point = tuple[int, int, int, int]  # x, y, z, t（扩展坐标）
 
+# cryptography 41 起 Ed25519 与异常类型才处于持续安全维护的版本带
+LIB_MIN_VERSION = (41, 0)
+
+logger = logging.getLogger("unified.update.signing")
+
+_lib_probed = False
+_lib_ok = False
+_lib_version = ""
+_lib_reason = ""
+_logged_backend = ""
+
 
 class SigningError(ValueError):
     """公钥/私钥/签名格式不合法。调用方据此给出可读原因，不静默当成验签失败。"""
+
+
+class SigningBackendUnavailable(RuntimeError):
+    """显式点名要 lib 实现但它不可用；生产路径走 auto，永远不会抛这个。"""
+
+
+def _probe_lib() -> None:
+    """只探测一次：导入失败、版本过低、API 缺失都记下原因供状态接口展示。"""
+    global _lib_probed, _lib_ok, _lib_version, _lib_reason
+    if _lib_probed:
+        return
+    _lib_probed = True
+    try:
+        import cryptography
+        from cryptography.exceptions import InvalidSignature  # noqa: F401
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: F401
+            Ed25519PrivateKey,
+            Ed25519PublicKey,
+        )
+
+        version = str(getattr(cryptography, "__version__", ""))
+        _lib_version = version
+        match = re.match(r"(\d+)\.(\d+)", version)
+        if not match:
+            _lib_reason = f"cryptography 版本号无法识别：{version or '(空)'}"
+            return
+        if (int(match.group(1)), int(match.group(2))) < LIB_MIN_VERSION:
+            _lib_reason = (
+                f"cryptography {version} 低于最低可用版本 "
+                f"{LIB_MIN_VERSION[0]}.{LIB_MIN_VERSION[1]}"
+            )
+            return
+        _lib_ok = True
+    except Exception as exc:  # 安装损坏（缺 _rust/缺 cffi）同样要能回落，不能把启动带崩
+        _lib_reason = f"导入 cryptography 失败：{type(exc).__name__}: {exc}"
+
+
+def lib_available() -> bool:
+    _probe_lib()
+    return _lib_ok
+
+
+def backend() -> str:
+    """返回 `lib` 或 `stdlib`；首次判定时把结果打进日志，避免静默切换。"""
+    global _logged_backend
+    _probe_lib()
+    name = "lib" if _lib_ok else "stdlib"
+    if not _logged_backend:
+        _logged_backend = name
+        if _lib_ok:
+            logger.info("manifest 验签使用 cryptography %s（lib 实现）", _lib_version)
+        else:
+            logger.warning("manifest 验签回落纯标准库实现：%s", _lib_reason)
+    return name
+
+
+def backend_info() -> dict[str, str]:
+    """给更新状态用：implementation 只能是 lib/stdlib，reason 说明为什么回落。"""
+    name = backend()
+    return {
+        "implementation": name,
+        "library_version": _lib_version if name == "lib" else "",
+        "reason": "" if name == "lib" else _lib_reason,
+    }
 
 
 def _sha512(data: bytes) -> bytes:
@@ -105,6 +186,30 @@ def _decompress(raw: bytes) -> Point:
 
 
 def sign(seed: bytes, message: bytes) -> bytes:
+    """按当前环境选实现；两条实现产出同一份 RFC 8032 签名格式。"""
+    return sign_with(seed, message, backend())
+
+
+def sign_with(seed: bytes, message: bytes, implementation: str) -> bytes:
+    """显式点名实现，只给测试与发布工具排障用；生产入口是 sign。"""
+    if implementation == "lib":
+        if not lib_available():
+            raise SigningBackendUnavailable(f"lib 实现不可用：{_lib_reason}")
+        return _sign_lib(seed, message)
+    if implementation == "stdlib":
+        return _sign_stdlib(seed, message)
+    raise ValueError(f"未知的签名实现：{implementation}")
+
+
+def _sign_lib(seed: bytes, message: bytes) -> bytes:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    if len(seed) != 32:
+        raise SigningError("Ed25519 私钥种子必须是 32 字节")
+    return Ed25519PrivateKey.from_private_bytes(seed).sign(message)
+
+
+def _sign_stdlib(seed: bytes, message: bytes) -> bytes:
     """RFC 8032 §5.1.6：返回 64 字节签名；只给发布工具用。"""
     if len(seed) != 32:
         raise SigningError("Ed25519 私钥种子必须是 32 字节")
@@ -118,6 +223,37 @@ def sign(seed: bytes, message: bytes) -> bytes:
 
 
 def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    """按当前环境选实现；两条实现都拒绝 S >= L 的可塑签名。"""
+    return verify_with(public_key, message, signature, backend())
+
+
+def verify_with(
+    public_key: bytes, message: bytes, signature: bytes, implementation: str
+) -> bool:
+    """显式点名实现，只给测试与排障用；生产入口是 verify。"""
+    if implementation == "lib":
+        if not lib_available():
+            raise SigningBackendUnavailable(f"lib 实现不可用：{_lib_reason}")
+        return _verify_lib(public_key, message, signature)
+    if implementation == "stdlib":
+        return _verify_stdlib(public_key, message, signature)
+    raise ValueError(f"未知的验签实现：{implementation}")
+
+
+def _verify_lib(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+    except (InvalidSignature, ValueError):
+        return False
+    return True
+
+
+def _verify_stdlib(public_key: bytes, message: bytes, signature: bytes) -> bool:
     """RFC 8032 §5.1.7：任何格式问题都返回 False，调用方按「验签失败」处理。"""
     if len(public_key) != 32 or len(signature) != 64:
         return False
