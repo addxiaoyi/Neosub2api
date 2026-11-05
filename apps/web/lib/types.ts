@@ -456,104 +456,53 @@ export interface CreditsMeta {
   expiries?: CreditExpiry[];
 }
 
-export interface UpdateLogLine {
-  ts: number;
-  level: string;
-  text: string;
+/** 更新任务所处的阶段；空闲时后端给空串 */
+export type UpdateStep =
+  | 'download'
+  | 'verify'
+  | 'stage'
+  | 'stop'
+  | 'swap'
+  | 'start'
+  | 'health'
+  | 'rollback';
+
+export type UpdateJobState = 'idle' | 'running' | 'done' | 'failed';
+
+/** 发布包签名校验结果：已验证 / 无签名 / 签名无效 / 未执行 */
+export type UpdateSignature = 'verified' | 'unsigned' | 'invalid' | 'none';
+
+export interface UpdateJob {
+  state: UpdateJobState;
+  /** 空闲时为空串 */
+  step: UpdateStep | '';
+  /** 0-100 */
+  progress: number;
+  /** epoch 秒；0 = 尚未开始 */
+  started_at: number;
+  /** epoch 秒；0 = 尚未结束 */
+  finished_at: number;
+  error: string;
+  log_tail: string[];
 }
 
 export interface UpdateStatus {
+  current_version: string;
+  latest_version: string;
+  /** 是否有比当前版本更新的版本可用 */
   available: boolean;
-  /** 是否运行在容器里（决定能力边界，见 can_update_upstream） */
-  in_container?: boolean;
-  /**
-   * 是否支持「更新上游」。容器部署为 false —— 重建上游容器需要 docker CLI，
-   * 而挂载 docker.sock 会把宿主 root 权限交给容器内进程，是本项目刻意不做的事。
-   */
-  can_update_upstream?: boolean;
-  /** 是否正在更新 */
-  running: boolean;
-  /** 上次更新是否成功（null = 未运行过） */
-  ok: boolean | null;
-  step: string;
-  logs: UpdateLogLine[];
-  /** 当前部署版本 */
-  version: string;
+  /** 发布通道，如 stable */
+  channel: string;
+  signature: UpdateSignature;
+  /** 本部署是否找得到可用的更新器 */
   updater_found: boolean;
-  upstream_dir: string;
-  /** 当前固定的上游版本（空 = 跟随分支） */
-  upstream_ref?: string;
-  started_at?: number;
-  finished_at?: number | null;
-  duration?: number;
-  pid?: number;
-  /** 日志原文（便于复制反馈） */
-  log_tail?: string;
-  /**
-   * 发布包签名校验结果（供应链防护）。
-   * verified = 已验签通过；skipped = 走了 WB_SKIP_SIGNATURE 绕过开关（有风险）；
-   * none 或缺失 = 未执行验签（如旧版本更新器）。
-   */
-  signature?: {status: 'verified' | 'skipped' | 'none'; detail?: string};
-}
-
-export interface VersionSide {
-  /** 当前版本 */
-  current: string;
-  /** 远端最新 */
-  latest: string;
-  /** 是否有更新可用 */
-  has_update: boolean;
-  /** 检测失败原因 */
-  error: string;
-}
-
-export interface ManagerVersion extends VersionSide {
-  /** Release 页面地址 */
-  url: string;
-  repo: string;
-}
-
-/** 上游两个版本之间的单条提交 */
-export interface UpstreamChange {
-  sha: string;
-  subject: string;
-  date: string;
-}
-
-export interface UpstreamVersion extends VersionSide {
-  /** 最新提交时间 */
-  date: string;
-  /** 最新提交说明 */
-  subject: string;
-  /** 本地落后远端多少个提交（0 = 未知或不落后） */
-  ahead?: number;
-  /** 两版本之间的提交总数 */
-  total?: number;
-  /** 变更说明列表（最新在前，最多 20 条） */
-  changes?: UpstreamChange[];
-  /** 提交数超过展示上限，列表被截断 */
-  truncated?: boolean;
-  repo: string;
-}
-
-export interface UpdateCheck {
-  /** 检测时间（秒） */
-  checked_at: number;
-  /** 是否为缓存结果 */
-  cached: boolean;
-  /**
-   * 是否具备在线更新能力。
-   * false = 本部署不提供在线更新（reason 说明原因）；此时 has_any 恒为 false，
-   * 界面不能据此显示「已是最新」——那是在骗用户。
-   */
-  available?: boolean;
-  /** available=false 时的原因文案（后端给的中文说明） */
-  reason?: string;
-  manager: ManagerVersion;
-  upstream: UpstreamVersion;
-  /** 任一组件有更新 */
-  has_any: boolean;
+  /** 是否运行在容器里 */
+  in_container: boolean;
+  /** 是否具备执行更新的条件（容器/服务管理器未配置时为 false） */
+  can_apply: boolean;
+  /** can_apply=false 时的原文原因 */
+  reason: string;
+  job: UpdateJob;
 }
 
 export interface Versions {

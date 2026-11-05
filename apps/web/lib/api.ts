@@ -29,7 +29,6 @@ import type {
   StatsSummary,
   UpstreamConfig,
   UpstreamStatus,
-  UpdateCheck,
   UpdateStatus,
   UsagePoint,
   UserItem,
@@ -567,8 +566,14 @@ export type {Account};
 /* ── 系统维护（一键更新）──────────────────────────────── */
 export const systemApi = {
   updateStatus: () => get<UpdateStatus>('/api/system/update-status'),
-  /** 检测新版本；force=true 绕过 6 小时缓存 */
-  checkUpdate: (force = false) => get<UpdateCheck>('/api/system/check-update', {force}),
+  /** 主动检测远端版本（普通用户也可触发），返回刷新后的更新状态 */
+  checkUpdates: () => post<UpdateStatus>('/api/system/update/check'),
+  /** 执行在线更新；confirm_version 必须与 latest_version 逐字一致（admin） */
+  applyUpdate: (confirmVersion: string) =>
+    post<UpdateStatus>('/api/system/update/apply', {confirm_version: confirmVersion}),
+  /** 回滚到上一个版本（admin） */
+  rollbackUpdate: () => post<UpdateStatus>('/api/system/update/rollback'),
+  /** 运行时版本信息：管理栏读取当前部署版本 */
   versions: () => get<Versions>('/api/system/versions'),
   /** 更新日志（解析仓库根目录 CHANGELOG.md，离线可用） */
   changelog: () => get<Changelog>('/api/system/changelog'),

@@ -3,64 +3,79 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AlertTriangle, CheckCircle2, Loader2, RefreshCw, Server, ShieldCheck, ShieldOff, Terminal, X, XCircle} from 'lucide-react';
 import {errText, systemApi} from '@/lib/api';
-import type {UpdateCheck, UpdateStatus} from '@/lib/types';
+import type {UpdateStatus, UpdateStep} from '@/lib/types';
+import {useAuth} from '@/lib/auth-context';
 import {notify} from '@/lib/toast';
 import {fmtAgo} from '@/lib/format';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
+import {Progress} from '@/components/ui/progress';
+import {Input} from '@/components/ui/input';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useT} from '@/lib/i18n/provider';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
-/** 更新进行中 1.5 秒一拉，日志跟得上；空闲 15 秒一拉，避免无意义请求（更新期间服务会短暂不可用） */
-const RUNNING_POLL_MS = 1500;
-const IDLE_POLL_MS = 15000;
+/** 只在 job.state === running 时轮询，完成或组件卸载即停 */
+const POLL_MS = 3000;
+const EMPTY_LOGS: string[] = [];
+
+const STEP_KEYS: Record<UpdateStep, string> = {
+  download: 'updatePanel.stepDownload',
+  verify: 'updatePanel.stepVerify',
+  stage: 'updatePanel.stepStage',
+  stop: 'updatePanel.stepStop',
+  swap: 'updatePanel.stepSwap',
+  start: 'updatePanel.stepStart',
+  health: 'updatePanel.stepHealth',
+  rollback: 'updatePanel.stepRollback',
+};
 
 export function UpdatePanel() {
   const t = useT();
+  const {isAdmin} = useAuth();
   const [status, setStatus] = useState<UpdateStatus | null>(null);
-  const [versions, setVersions] = useState<{manager: string; upstream_connected: boolean; upstream_accounts: number | null} | null>(null);
-  const [check, setCheck] = useState<UpdateCheck | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
-  /**
-   * 结果横幅是否已被关闭。用「是否正在运行」的边沿来复位：
-   * 状态从 running 变为结束、或再次发起更新时会重新出现，
-   * 不依赖 finished_at 是否存在，避免时间戳缺失时关不掉。
-   */
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [typedVersion, setTypedVersion] = useState('');
+  const [applying, setApplying] = useState(false);
+  const [rollingBack, setRollingBack] = useState(false);
+  /** 结果横幅是否已被关闭；新一轮更新开始时复位 */
   const [resultDismissed, setResultDismissed] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const [st, vs, ck] = await Promise.allSettled([
-        systemApi.updateStatus(),
-        systemApi.versions(),
-        systemApi.checkUpdate(),
-      ]);
-      if (st.status === 'fulfilled') setStatus(st.value);
-      if (vs.status === 'fulfilled') setVersions(vs.value);
-      if (ck.status === 'fulfilled') setCheck(ck.value);
-    } catch {
-      /* 服务重启时忽略瞬时失败 */
+      const st = await systemApi.updateStatus();
+      setStatus(st);
+      setError('');
+    } catch (e) {
+      // 更新期间服务会重启：轮询的瞬时失败不打断等待，保留上一份状态
+      if (!silent) setError(errText(e));
+    } finally {
+      if (!silent) setLoading(false);
     }
   }, []);
 
-  /** 强制重新检测（绕过服务端 6 小时缓存） */
   const recheck = useCallback(async () => {
     setChecking(true);
     try {
-      const r = await systemApi.checkUpdate(true);
-      setCheck(r);
-      if (r.available === false) {
-        // 本部署没有在线更新能力：has_any 恒 false，不能据此弹绿色「已是最新」骗用户。
-        notify.warn(
-          t('updatePanel.updateNotAvailable'),
-          t('updatePanel.updateNotAvailableDesc', {reason: r.reason || ''}),
-        );
-      } else if (r.has_any) {
-        const parts: string[] = [];
-        if (r.manager.has_update) parts.push(t('update.managerVersion', {v: r.manager.latest}));
-        if (r.upstream.has_update) parts.push(t('update.upstreamVersion', {v: r.upstream.latest}));
-        notify.warn(t('updatePanel.newVersion'), parts.join(' · '));
+      const st = await systemApi.checkUpdates();
+      setStatus(st);
+      setError('');
+      if (st.available) {
+        notify.warn(t('updatePanel.newVersion'), `${st.current_version} → ${st.latest_version}`);
       } else {
         notify.ok(t('updatePanel.upToDate'), t('updatePanel.upToDateDesc'));
       }
@@ -69,45 +84,116 @@ export function UpdatePanel() {
     } finally {
       setChecking(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
-  // 运行中高频轮询，空闲时低频（服务可能在更新中短暂不可用）
-  const running = !!status?.running;
+  const job = status?.job;
+  const jobState = job?.state ?? 'idle';
+  const running = jobState === 'running';
+
   useEffect(() => {
-    const interval = running ? RUNNING_POLL_MS : IDLE_POLL_MS;
+    if (!running) return;
     const timer = window.setInterval(() => {
-      void load();
-    }, interval);
+      void load(true);
+    }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [load, running]);
 
-  // running 一旦变为 true，就复位「已关闭」，使本轮结果在结束后重新可见
+  // 新一轮更新开始时复位「已关闭」，结束后结果重新可见
   useEffect(() => {
     if (running) setResultDismissed(false);
   }, [running]);
 
-  // 日志自动滚到底
+  const logs = job?.log_tail ?? EMPTY_LOGS;
+  const logText = useMemo(() => logs.join('\n'), [logs]);
+
   useEffect(() => {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  }, [status?.logs]);
+  }, [logs]);
 
-  const logs = status?.logs ?? [];
-  const logText = useMemo(
-    () => (logs.length ? logs.map((l) => l.text).join('\n') : status?.log_tail || ''),
-    [logs, status?.log_tail],
-  );
+  const targetVersion = status?.latest_version ?? '';
+  const canConfirm = !applying && targetVersion !== '' && typedVersion.trim() === targetVersion;
+  const applyDisabled = !status || !status.can_apply || !status.available || running || applying;
+  const tookSeconds =
+    job && job.started_at > 0 && job.finished_at > job.started_at ? job.finished_at - job.started_at : 0;
 
-  const done = !!status && !status.running && status.ok !== null && !resultDismissed;
+  const applyUpdate = useCallback(async () => {
+    if (!canConfirm) return;
+    setApplying(true);
+    try {
+      const st = await systemApi.applyUpdate(typedVersion.trim());
+      setStatus(st);
+      setConfirmOpen(false);
+      setTypedVersion('');
+      notify.ok(t('updatePanel.applyStarted'));
+      await load(true);
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setApplying(false);
+    }
+  }, [canConfirm, load, t, typedVersion]);
+
+  const rollback = useCallback(async () => {
+    setRollingBack(true);
+    try {
+      const st = await systemApi.rollbackUpdate();
+      setStatus(st);
+      setResultDismissed(false);
+      notify.ok(t('updatePanel.rollbackStarted'));
+      await load(true);
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setRollingBack(false);
+    }
+  }, [load, t]);
+
+  const signatureBadge = () => {
+    if (status?.signature === 'verified') {
+      return (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+          title={t('updatePanel.signedTitle')}
+        >
+          <ShieldCheck className="h-3 w-3" />
+          {t('updatePanel.signed')}
+        </span>
+      );
+    }
+    if (status?.signature === 'unsigned') {
+      return (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-text"
+          title={t('updatePanel.unsignedTitle')}
+        >
+          <ShieldOff className="h-3 w-3" />
+          {t('updatePanel.unsigned')}
+        </span>
+      );
+    }
+    if (status?.signature === 'invalid') {
+      return (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-destructive-text"
+          title={t('updatePanel.invalidSignatureTitle')}
+        >
+          <XCircle className="h-3 w-3" />
+          {t('updatePanel.invalidSignature')}
+        </span>
+      );
+    }
+    return null;
+  };
 
   return (
     <div className="space-y-4">
-      {/* 当前版本 */}
+      {/* 版本信息 */}
       <div className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-sm font-medium">
@@ -115,6 +201,20 @@ export function UpdatePanel() {
             {t('updatePanel.currentVersion')}
           </div>
           <div className="flex items-center gap-2">
+            {isAdmin && (
+              <Button
+                size="sm"
+                className="rounded-full"
+                disabled={applyDisabled}
+                title={!status?.can_apply ? status?.reason : undefined}
+                onClick={() => {
+                  setTypedVersion('');
+                  setConfirmOpen(true);
+                }}
+              >
+                {t('updatePanel.applyUpdate')}
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -125,135 +225,183 @@ export function UpdatePanel() {
               <RefreshCw className={checking ? 'animate-spin' : ''} />
               {t('updatePanel.checkUpdate')}
             </Button>
-            <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={running}>
-              <RefreshCw className={running ? 'animate-spin' : ''} />
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              onClick={() => void load()}
+              disabled={loading || running}
+            >
+              <RefreshCw className={loading ? 'animate-spin' : ''} />
               {t('common.refresh')}
             </Button>
           </div>
         </div>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="rounded-2xl bg-background/60 px-3.5 py-3">
-            <div className="text-[11px] text-muted-foreground">{t('updatePanel.manager')}</div>
-            <div className="mt-1 flex items-center gap-1.5 text-sm font-semibold tabular-nums">
-              {versions?.manager || status?.version || '—'}
-              {/* 供应链防护：本次更新的包是否经过签名校验，必须让用户看得见 */}
-              {status?.signature?.status === 'verified' && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
-                  title={
-                    status.signature.detail
-                      ? t('updatePanel.signedTitleDetail', {detail: status.signature.detail})
-                      : t('updatePanel.signedTitle')
-                  }
-                >
-                  <ShieldCheck className="h-3 w-3" />
-                  {t('updatePanel.signed')}
-                </span>
-              )}
-              {status?.signature?.status === 'skipped' && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-text"
-                  title={t('updatePanel.unsignedTitle')}
-                >
-                  <ShieldOff className="h-3 w-3" />
-                  {t('updatePanel.unsigned')}
-                </span>
-              )}
+
+        {loading && !status ? (
+          <div className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {t('common.loading')}
+          </div>
+        ) : !status && error ? (
+          <div className="flex items-start gap-2.5 rounded-2xl border border-destructive/30 bg-destructive/5 px-3.5 py-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" />
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-medium">{t('updatePanel.loadFailed')}</div>
+              <div className="mt-1 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">
+                {error}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2 rounded-full"
+                onClick={() => void load()}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                {t('common.retry')}
+              </Button>
             </div>
           </div>
-          <div className="rounded-2xl bg-background/60 px-3.5 py-3">
-            <div className="text-[11px] text-muted-foreground">{t('updatePanel.upstreamConn')}</div>
-            <div className="mt-1 flex items-center gap-1.5 text-sm font-semibold">
-              {versions?.upstream_connected ? (
-                <>
-                  <span className="text-emerald-600 dark:text-emerald-400">{t('updatePanel.connOk')}</span>
-                  {typeof versions.upstream_accounts === 'number' && (
-                    <span className="text-xs font-normal text-muted-foreground">
-                      {t('updatePanel.accountCount', {
-                        count: versions.upstream_accounts,
-                        n: versions.upstream_accounts,
-                      })}
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span className="text-destructive-text">{t('updatePanel.connDown')}</span>
-              )}
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl bg-background/60 px-3.5 py-3">
+              <div className="text-[11px] text-muted-foreground">{t('updatePanel.currentVersion')}</div>
+              <div className="mt-1 text-sm font-semibold tabular-nums">
+                {status?.current_version || '—'}
+              </div>
             </div>
-          </div>
-          <div className="rounded-2xl bg-background/60 px-3.5 py-3">
-            <div className="text-[11px] text-muted-foreground">{t('updatePanel.lastUpdate')}</div>
-            <div className="mt-1 text-sm font-semibold">
-              {status?.finished_at ? fmtAgo(status.finished_at) : t('format.never')}
+            <div className="rounded-2xl bg-background/60 px-3.5 py-3">
+              <div className="text-[11px] text-muted-foreground">{t('updatePanel.latestVersion')}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-sm font-semibold tabular-nums">
+                {status?.latest_version || '—'}
+                {signatureBadge()}
+              </div>
             </div>
-          </div>
-        </div>
-        {status?.upstream_dir && (
-          <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={status.upstream_dir}>
-            {t('updatePanel.upstreamDir', {dir: status.upstream_dir})}
+            <div className="rounded-2xl bg-background/60 px-3.5 py-3">
+              <div className="text-[11px] text-muted-foreground">{t('updatePanel.channel')}</div>
+              <div className="mt-1 text-sm font-semibold">{status?.channel || '—'}</div>
+            </div>
+            <div className="rounded-2xl bg-background/60 px-3.5 py-3">
+              <div className="text-[11px] text-muted-foreground">{t('updatePanel.lastUpdate')}</div>
+              <div className="mt-1 text-sm font-semibold">
+                {job && job.finished_at > 0 ? fmtAgo(job.finished_at) : t('format.never')}
+              </div>
+            </div>
           </div>
         )}
       </div>
 
-      {check && !check.has_any && !check.manager.error && !check.upstream.error && !status?.running && check.available !== false && (
-        <div className="flex items-center gap-2 rounded-[20px] border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-          <span className="text-xs">{t('updatePanel.allUpToDate')}</span>
-          {check.checked_at > 0 && (
-            <span className="text-[11px] text-muted-foreground">
-              {t('updatePanel.checkedAgo', {ago: fmtAgo(check.checked_at)})}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* 更新状态 */}
-      {status?.running && (
-        <div className="flex items-start gap-2.5 rounded-[20px] border border-blue-500/30 bg-blue-500/10 p-4">
-          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-blue-500" />
+      {/* 本部署无法执行更新：原因原样展示，按钮已在上面禁用 */}
+      {status && (!status.updater_found || !status.can_apply) && (
+        <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
           <div className="min-w-0 flex-1 space-y-1">
-            <div className="text-xs font-medium">
-              {t('updatePanel.updatingNow', {step: status.step || t('updatePanel.stepRunning')})}
-            </div>
-            <div className="text-[11px] text-muted-foreground">
-              {t('updatePanel.updatingHint')}
-            </div>
+            <div className="text-xs font-medium">{t('updatePanel.updateNotAvailable')}</div>
+            {status.reason && (
+              <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-muted-foreground">
+                {status.reason}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {done && (
+      {/* 无可用更新（空态） */}
+      {status && !status.available && !running && jobState !== 'failed' && (jobState === 'idle' || resultDismissed) && (
+        <div className="flex items-center gap-2 rounded-[20px] border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+          <span className="text-xs">{t('updatePanel.allUpToDate')}</span>
+        </div>
+      )}
+
+      {/* 执行中：阶段名 + 进度 */}
+      {running && job && (
+        <div className="space-y-2.5 rounded-[20px] border border-blue-500/30 bg-blue-500/10 p-4">
+          <div className="flex items-start gap-2.5">
+            <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-blue-500" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="text-xs font-medium">
+                {t('updatePanel.updatingNow', {
+                  step: job.step ? t(STEP_KEYS[job.step]) : t('updatePanel.stepRunning'),
+                })}
+              </div>
+              <div className="text-[11px] text-muted-foreground">{t('updatePanel.updatingHint')}</div>
+            </div>
+            <div className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
+              {t('updatePanel.progress', {n: Math.max(0, Math.min(100, job.progress))})}
+            </div>
+          </div>
+          <Progress value={Math.max(0, Math.min(100, job.progress))} />
+        </div>
+      )}
+
+      {/* 结果：成功展示新版本号，失败展示 error + 回滚 */}
+      {!resultDismissed && (jobState === 'done' || jobState === 'failed') && (
         <div
           className={
             'flex items-start gap-2.5 rounded-[20px] border p-4 ' +
-            (status?.ok
+            (jobState === 'done'
               ? 'border-emerald-500/30 bg-emerald-500/10'
               : 'border-red-500/30 bg-red-500/10')
           }
         >
-          {status?.ok ? (
+          {jobState === 'done' ? (
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
           ) : (
             <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive-text" />
           )}
           <div className="min-w-0 flex-1 space-y-1">
             <div className="text-xs font-medium">
-              {status?.ok ? t('updatePanel.updateDone') : t('updatePanel.updateNotDone')}
+              {jobState === 'done' ? t('updatePanel.updateDone') : t('updatePanel.updateNotDone')}
             </div>
-            <div className="text-[11px] text-muted-foreground">
-              {status?.ok
-                ? (status?.duration ? t('updatePanel.doneDuration', {n: status.duration}) : '') +
-                  t('updatePanel.doneRestart') +
-                  (status?.signature?.status === 'verified' ? t('updatePanel.doneSigned') : '')
-                : t('updatePanel.failedDetail')}
-            </div>
-            {status?.ok && status?.signature?.status === 'skipped' && (
-              <div className="flex items-start gap-1.5 pt-1 text-[11px] text-warning-text">
-                <ShieldOff className="mt-0.5 h-3 w-3 shrink-0" />
-                <span>
-                  <RichText text={t('updatePanel.skippedWarn')} />
-                </span>
-              </div>
+            {jobState === 'done' ? (
+              <>
+                <div className="text-[11px] leading-5 text-muted-foreground">
+                  {status?.current_version
+                    ? `${t('updatePanel.updateDoneTo', {version: status.current_version})} `
+                    : ''}
+                  {tookSeconds > 0 ? t('updatePanel.doneDuration', {n: tookSeconds}) : ''}
+                  {t('updatePanel.doneRestart')}
+                </div>
+                {status?.signature === 'verified' && (
+                  <div className="text-[11px] text-muted-foreground">
+                    {t('updatePanel.doneSigned')}
+                  </div>
+                )}
+                {(status?.signature === 'unsigned' || status?.signature === 'invalid') && (
+                  <div className="flex items-start gap-1.5 pt-1 text-[11px] text-warning-text">
+                    <ShieldOff className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span>
+                      <RichText text={t('updatePanel.skippedWarn')} />
+                    </span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {job?.error && (
+                  <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-muted-foreground">
+                    {job.error}
+                  </div>
+                )}
+                <div className="text-[11px] leading-5 text-muted-foreground">
+                  {t('updatePanel.failedDetail')}
+                </div>
+                {isAdmin && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-1.5 rounded-full"
+                    disabled={rollingBack}
+                    onClick={() => void rollback()}
+                  >
+                    {rollingBack ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : null}
+                    {rollingBack ? t('updatePanel.rollingBack') : t('updatePanel.rollback')}
+                  </Button>
+                )}
+              </>
             )}
           </div>
           <button
@@ -265,20 +413,6 @@ export function UpdatePanel() {
           >
             <X className="h-4 w-4" />
           </button>
-        </div>
-      )}
-
-      {/* 本部署没有在线更新能力：后端 /api/system/* 只提供状态与版本查询，
-          没有 update / upstream-ref 接口，所以这里不摆任何会 404 的按钮 */}
-      {(check?.available === false || status?.updater_found === false) && (
-        <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
-          <div className="space-y-1">
-            <div className="text-xs font-medium">{t('updatePanel.updateNotAvailable')}</div>
-            <div className="text-[11px] text-muted-foreground">
-              {check?.reason || t('updatePanel.updateNotAvailable')}
-            </div>
-          </div>
         </div>
       )}
 
@@ -310,6 +444,68 @@ export function UpdatePanel() {
           </div>
         )}
       </div>
+
+      {/* 执行更新前的二次确认：必须手动输入目标版本号 */}
+      <AlertDialog
+        open={confirmOpen}
+        onOpenChange={(open) => {
+          if (!open && !applying) {
+            setConfirmOpen(false);
+            setTypedVersion('');
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('updatePanel.confirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <span className="block">{t('updatePanel.confirmWarn')}</span>
+              <span className="block break-all font-mono text-[11.5px] text-foreground">
+                {status?.current_version || '—'} → {targetVersion || '—'}
+              </span>
+              {status?.in_container && (
+                <span className="block font-medium text-warning-text">
+                  {t('updatePanel.confirmRestart')}
+                </span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="mt-1 space-y-1.5">
+            <label
+              htmlFor="update-confirm-version"
+              className="block text-[11.5px] leading-5 text-muted-foreground"
+            >
+              {t('updatePanel.typeVersion', {version: targetVersion})}
+            </label>
+            <Input
+              id="update-confirm-version"
+              autoFocus
+              autoComplete="off"
+              value={typedVersion}
+              onChange={(e) => setTypedVersion(e.target.value)}
+              placeholder={targetVersion}
+              disabled={applying}
+              className="bg-background"
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={applying} onClick={() => setTypedVersion('')}>
+              {t('common.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!canConfirm}
+              onClick={(e) => {
+                // 更新请求会重启服务，不能交给 Radix 自动关闭
+                e.preventDefault();
+                if (canConfirm) void applyUpdate();
+              }}
+            >
+              {applying ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+              {applying ? t('updatePanel.applyingUpdate') : t('updatePanel.confirmApply')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
