@@ -93,8 +93,67 @@ def leaf_count(tree: dict) -> int:
     )
 
 
+# 这些位置的 / 只能是正则起始（除法操作符不可能紧跟它们之后）。
+# 故意不含 < 和 >：JSX 文本里的 "/" 前面就是 >，而 a < b / c、a > b / c 都是除法。
+_REGEX_LEADS = frozenset("(,=:[!&|?{};+*%~^")
+# 关键字后面跟 / 也算正则起始（return /re/、typeof /re/ ...）
+_REGEX_KEYWORDS = (
+    "return", "typeof", "instanceof", "in", "of", "new", "delete",
+    "void", "throw", "case", "do", "else", "yield", "await",
+)
+
+
+def _can_start_regex(prefix: str) -> bool:
+    """按前一个有效 token 判断 / 是正则起始还是除法操作符。"""
+    stripped = prefix.rstrip()
+    if not stripped:
+        return True
+    # a++ / b、a-- / b 的加号是后缀自增，这里只能是除法
+    if stripped.endswith(("++", "--")):
+        return False
+    # 箭头函数体可以是正则字面量（=> /re/.test(x)）；单个 > 不在此列，见 _REGEX_LEADS 注释
+    if stripped.endswith("=>"):
+        return True
+    if stripped[-1] in _REGEX_LEADS:
+        return True
+    word = re.search(r"([A-Za-z_$][\w$]*)$", stripped)
+    return bool(word) and word.group(1) in _REGEX_KEYWORDS
+
+
+def _skip_regex(code: str, index: int) -> int:
+    """跳过 /.../flags，返回字面量之后的下标；index 指向开头的 /。
+
+    字符类 [...] 里的 / 不是结束符。正则不跨行：遇到换行就收手，
+    宁可漏跳一行也不要把后面的代码当成正则体吞掉。
+    """
+    i = index + 1
+    in_class = False
+    while i < len(code):
+        char = code[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char in "\r\n":
+            return i
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        elif char == "/" and not in_class:
+            i += 1
+            while i < len(code) and (code[i].isalnum() or code[i] == "_"):
+                i += 1
+            return i
+        i += 1
+    return i
+
+
 def strip_comments(code: str) -> str:
-    """去掉 // 与 /* */ 注释，保留换行以维持行号；字符串/模板里的内容原样保留。"""
+    """去掉 // 与 /* */ 注释，保留换行以维持行号；字符串/模板里的内容原样保留。
+
+    正则字面量整体跳过：`/filename="?([^";]+)"?/` 里的引号不能进入字符串状态，
+    否则状态机会一路错到后面的注释，把注释里的字面量当成源码键引用。
+    """
     out: list[str] = []
     index = 0
     length = len(code)
@@ -110,6 +169,9 @@ def strip_comments(code: str) -> str:
             if pair == "/*":
                 state = "block"
                 index += 2
+                continue
+            if char == "/" and _can_start_regex("".join(out[-24:])):
+                index = _skip_regex(code, index)
                 continue
             out.append(char)
             if char == "'":

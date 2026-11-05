@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同一 ref 的新提交取消旧 run，避免过期门禁结果误导
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -35,13 +40,101 @@ jobs:
         working-directory: apps/control
         run: python ../../scripts/contract_check.py --fail-on-ghost
 
+      # conftest 里假上游/控制面起不来是无条件 pytest.skip：整批跳过照样 exit 0，tee 留日志给下一道门查
       - name: Pytest
         working-directory: apps/control
-        run: python -m pytest tests/ -v
+        run: |
+          set -euo pipefail
+          python -m pytest tests/ -v -rs | tee pytest.log
+
+      - name: 零 skip 断言（出现 SKIPPED 即失败）
+        working-directory: apps/control
+        run: |
+          set -euo pipefail
+          if grep -qE 'SKIPPED|[0-9]+ skipped' pytest.log; then
+            grep -E 'SKIPPED|[0-9]+ skipped' pytest.log | head -20 || true
+            echo "::error::零 skip 门失败：pytest.log 出现 SKIPPED，CI 不接受任何跳过（假绿）"
+            exit 1
+          fi
+          echo "零 skip 门通过：pytest.log 无 SKIPPED"
 
       - name: Compile-check
         working-directory: apps/control
         run: python -m compileall app tests
+
+      # 关键表清单不写死，直接读 backup_core.REQUIRED_TABLES，避免两处定义漂移
+      - name: 备份恢复演练（backup → restore → Python 复查）
+        run: |
+          set -euo pipefail
+          DRILL="$(mktemp -d)"
+          python - "$DRILL" <<'PY'
+          import sqlite3
+          import sys
+          import time
+          from pathlib import Path
+
+          sys.path.insert(0, "apps/control")
+          from app.db import Database
+
+          drill = Path(sys.argv[1])
+          source = drill / "source.db"
+          Database(source)
+          conn = sqlite3.connect(source)
+          conn.execute(
+              "INSERT INTO users(username, password_hash, role, created_at) VALUES(?, ?, 'admin', ?)",
+              ("ci_drill_admin", "not-a-real-hash", int(time.time())),
+          )
+          conn.commit()
+          conn.close()
+          # 恢复目标先建成无 admin 的空库：恢复后 admin 在 = 内容确实被替换
+          Database(drill / "target.db")
+          print(f"drill: {drill}")
+          PY
+          python scripts/backup_core.py backup --db "$DRILL/source.db" --out-dir "$DRILL/backups"
+          ARCHIVE="$(python scripts/backup_core.py latest --out-dir "$DRILL/backups")"
+          python scripts/backup_core.py restore --archive "$ARCHIVE" --db "$DRILL/target.db" --backups "$DRILL/pre-restore"
+          TARGET="$DRILL/target.db"
+          python - "$TARGET" <<'PY'
+          import sqlite3
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          import backup_core
+
+          target = Path(sys.argv[1])
+          conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+          try:
+              integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+              if integrity != "ok":
+                  print(f"::error::备份恢复门失败：恢复库 integrity_check={integrity}")
+                  raise SystemExit(1)
+              existing = {
+                  row[0]
+                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              }
+              missing = [t for t in backup_core.REQUIRED_TABLES if t not in existing]
+              if missing:
+                  print(f"::error::备份恢复门失败：恢复库缺表 {', '.join(missing)}")
+                  raise SystemExit(1)
+              admins = conn.execute(
+                  "SELECT COUNT(*) FROM users WHERE role='admin'"
+              ).fetchone()[0]
+              if admins < 1:
+                  print("::error::备份恢复门失败：恢复库无 admin（内容未被替换？）")
+                  raise SystemExit(1)
+          finally:
+              conn.close()
+          print(
+              f"备份恢复演练通过：{len(backup_core.REQUIRED_TABLES)} 张关键表均存在，admin={admins}"
+          )
+          PY
+
+      # CLI 演练只覆盖 scripts/backup_core.py；这一道补 API 的四个关口
+      # （admin-only / 缺 confirm / 文件名穿越 / 归档校验）+ 正常 backup→restore 往返。
+      # 脚本自起临时控制面、随机端口、不连任何外部服务，退出前确认端口无残留监听。
+      - name: 备份恢复 API 演练（API 层四道关 + 正常往返）
+        run: python scripts/backup_api_smoke.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -79,6 +172,16 @@ jobs:
       - name: Build export
         working-directory: apps/web
         run: npm run build:export
+
+      # 仓库 .npmrc 指向 npmmirror，它没有 audit 端点，必须显式指回官方 registry
+      - name: npm audit 阻断门（high/critical 即失败）
+        working-directory: apps/web
+        run: |
+          if ! npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org; then
+            echo "::error::npm audit 门失败：存在 high/critical 漏洞"
+            exit 1
+          fi
+          echo "npm audit 门通过：0 critical / 0 high"
 
   # 只在 PR 与手动触发跑，不挂 push main 的高频路径
   upstream-check:
