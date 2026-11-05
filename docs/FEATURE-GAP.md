@@ -85,9 +85,9 @@
 
 **U-01 在线更新。** 后端明确「本部署不提供在线更新」，`check-update` 与 `update-status` 共用同一份 `available=False` 摘要。前端 `UpdatePanel` 仍保留了 `manager.has_update` / `upstream.has_update` 分支，服务端永远不会返回 true，属死代码。要补齐，需要先有发布通道、包签名与回滚方案。
 
-> **（2026-11-05 已更正）** `GET /api/system/check-update` 已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由，旧投影 `check_update_legacy` 一并删除），前端对它的调用已是零引用；`manager.has_update` / `upstream.has_update` 是旧壳独有的字段，随端点一起消失，`/api/system/update-status` 只回 `available` / `can_apply` / `latest_version` 等新契约字段。在线更新是否可用改由 `UNIFIED_UPDATE_ENABLED` 与部署能力决定，不再是恒 `false` 的固定摘要。
+> **（2026-11-05 已更正）** `GET /api/system/check-update` 已于 2026-11-05 下线（`apps/control/app/routers/system.py` 不再注册该路由），请求它现在直接 404，前端对它的调用已是零引用；旧投影逻辑只存在于并行会话的未提交工作态，入库前已随端点一并去掉，仓库任何一次提交里都没有 `check_update_legacy`，本块初稿的「旧投影一并删除」即指这件事，不是 `update.py` 里的删除动作。`manager.has_update` / `upstream.has_update` 是旧壳独有的字段，随端点一起消失，`/api/system/update-status` 只回 `available` / `can_apply` / `latest_version` 等新契约字段。在线更新是否可用改由 `UNIFIED_UPDATE_ENABLED` 与部署能力决定，不再是恒 `false` 的固定摘要。
 >
-> **读旧响应会得到的误判**：把 `check-update` 当成仍在服务的「恒无更新」接口，会对着 404 判断「更新通道只是没开」；继续按 `manager.has_update` / `upstream.has_update` 找前端死代码，会去读一个已经被删掉的字段，而真正需要看的是 `available && can_apply && latest_version > current_version` 这条判断。
+> **读旧响应会得到的误判**：把 `check-update` 当成仍在服务的「恒无更新」接口，会对着 404 判断「更新通道只是没开」；继续按 `manager.has_update` / `upstream.has_update` 找前端死代码，会去读一个已经被删掉的字段，而真正需要看的是 `available && can_apply && latest_version > current_version` 这条判断。另：若按早先那句「旧投影 `check_update_legacy` 一并删除」去 `git log` 找这次删除，会一无所获，进而怀疑文档在编造改动——正确事实是它从未入库，只存在于未提交的工作态。
 
 **U-02 token 估算计费。** 现在只把「上游返回全零」和「根本没有 usage」分成 `usage_zero` / `usage_missing` 两种标注，不做估算。`m3-billing-plan.md:161` 写的 `billing.charge_on_missing_usage` 开关在代码里不存在，文档与实现有漂移。要补齐，前提是财务确认要收这条通道的钱，并先给 muse 别名补价格行——否则估出来的 token 套不到价，仍是 0 元。
 

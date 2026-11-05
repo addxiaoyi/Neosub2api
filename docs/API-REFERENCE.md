@@ -883,9 +883,9 @@ PATCH 响应：`{"username", "role", "sessions_revoked", "relogin_required"}`（
 - `GET /api/system/changelog`：解析根目录 `CHANGELOG.md`，返回 `{available: true, path: "CHANGELOG.md", total, versions: [...], truncated, current}`；`versions` 每项 `{version, date, unreleased, sections: [{title, items: [{level, text}]}]}`（`## 版本` / `### 分类` / `- 条目`）。文件缺失或不可读返回 `available: false` + `error` + 空 `versions`，不 500。
 - `GET /api/system/update-status`：与 `check-update` 同源的固定「无更新」结构 + 面板所需字段：`{available: false, current_version, reason: "本部署不提供在线更新", version, running: false, ok: null, step: "", logs: [], updater_found: false, upstream_dir: "", can_update_upstream: false, in_container, upstream_ref: ""}`。
 
-> **（2026-11-05 已更正）** `GET /api/system/check-update` 已于 2026-11-05 下线：`apps/control/app/routers/system.py` 不再注册该路由，旧投影函数 `check_update_legacy` 也从 `apps/control/app/routers/update.py` 删除，请求它现在直接 404。`/api/system/update-status` 不再「与 `check-update` 同源」，它由 `apps/control/app/routers/update.py` 的 `status_payload` 取 `app.state.update_feed.summary()`，与已删除的旧壳没有共享结构。
+> **（2026-11-05 已更正）** `GET /api/system/check-update` 已于 2026-11-05 下线：`apps/control/app/routers/system.py` 不再注册该路由，请求它现在直接 404。旧壳的投影逻辑只存在于并行会话的未提交工作态，入库前已随端点一并去掉；仓库任何一次提交里都没有 `check_update_legacy` 这个函数，`8253f2c` 新增的 `apps/control/app/routers/update.py` 也没有删除动作。本块初稿写的「从 `update.py` 删除 `check_update_legacy`」描述的是一个提交历史里不存在的删除，此前已按事实改写。`/api/system/update-status` 不再「与 `check-update` 同源」，它由 `apps/control/app/routers/update.py` 的 `status_payload` 取 `app.state.update_feed.summary()`，与已删除的旧壳没有共享结构。
 >
-> **读旧响应会得到的误判**：按原文继续请求 `check-update`，会把 404 当成鉴权失效或发布源临时故障去排查，实际是端点已不存在；按「两套外形共用一份探测逻辑」去找旧路径，会误以为 `update_feed` 之外还有一条外呼链路，而默认 `UNIFIED_UPDATE_ENABLED=false` 时 `update-status` 一个外网请求都不发。原文列出的固定字段（`version`、`running`、`step`、`logs`、`upstream_ref` 等）也不是当前返回，照旧键取值只会得到缺键，而不是「无更新」。
+> **读旧响应会得到的误判**：按原文继续请求 `check-update`，会把 404 当成鉴权失效或发布源临时故障去排查，实际是端点已不存在；按「两套外形共用一份探测逻辑」去找旧路径，会误以为 `update_feed` 之外还有一条外呼链路，而默认 `UNIFIED_UPDATE_ENABLED=false` 时 `update-status` 一个外网请求都不发。原文列出的固定字段（`version`、`running`、`step`、`logs`、`upstream_ref` 等）也不是当前返回，照旧键取值只会得到缺键，而不是「无更新」。另：若按早先那句「从 `update.py` 删除 `check_update_legacy`」去 `git log` 找这次删除，会一无所获，进而怀疑文档在编造改动——正确事实是它从未入库，只存在于未提交的工作态。
 
 ### 备份与恢复（`/api/system/*`，三个端点均管理员）
 
