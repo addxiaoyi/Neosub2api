@@ -108,9 +108,65 @@ docker compose start control
 
 ## 6. 升级
 
+### 6.1 手工升级（默认路径，行为与改动前完全一致）
+
 1. 备份 `./data/unified.db`（见上）。
 2. `git pull` 后 `docker compose up -d --build`。
 3. 库结构由控制面启动时的 `CREATE TABLE IF NOT EXISTS` + 轻量补列迁移自动处理（`apps/control/app/db.py`），无需手工跑迁移脚本。
+
+### 6.2 在线更新（需显式开启，默认关闭）
+
+默认 `UNIFIED_UPDATE_ENABLED=false`：`/api/system/update-status` 只回报「未启用」，不发任何外网请求，部署行为与之前一致。
+
+开启后是真替换，不是提示：下载 → 验签 → 逐文件校验 → 解到 `data/updates/<ver>/` → 换目录 → 重启 → 健康检查，失败自动回滚。
+
+**容器部署必须改挂载，否则更新不成立。** 代码原本打在镜像层里，容器内换文件后一旦 `docker compose up -d --build` 重建就整体回退。本仓 `docker-compose.yml` 已改成：
+
+```yaml
+control:
+  restart: unless-stopped
+  volumes:
+    - ./data:/data
+    - ./apps/control:/repo/apps/control   # 换目录在宿主机上生效；挂父目录是因为挂载根不能 rename
+    - ./apps/web/out:/repo/apps/web/out   # 静态产物源，nginx 挂同一份
+    - ./scripts:/repo/scripts
+    - ./deploy:/repo/deploy:ro            # 验签公钥（只读）
+    - ./CHANGELOG.md:/repo/CHANGELOG.md
+web:
+  restart: unless-stopped
+  volumes:
+    - ./apps/web/out:/usr/share/nginx/html:ro
+```
+
+替换完成后进程主动退出，`restart: unless-stopped` 用宿主机上的新代码重新拉起；`apps/web/out` 是挂载根，执行器对它做原地覆盖（rename 挂载根会 EBUSY），nginx 立即读到新静态文件。
+
+`web` 的挂载要求宿主机上先有 `apps/web/out`（在 `apps/web` 下 `npm run build:export` 生成）；目录不存在时 docker 会建空目录，表现为 403/白屏、健康检查 unhealthy，不会悄悄给你一个看起来正常的旧站。
+
+**裸机部署**：设 `UNIFIED_SERVICE_NAME`（Windows 用 `sc`，Linux 用 `systemctl restart`），执行器换完目录后由服务管理器重启。既不在容器内、又没配服务名时 `can_apply=false`，`reason` 会直接说明缺哪一项，不会假装能更新。
+
+**发布源与签名**：
+
+- `UNIFIED_UPDATE_MANIFEST_URL` 指向 HTTPS 上的 `release-manifest.json`；同目录约定还有 `release-manifest.json.sig`（Ed25519 detached，base64）与 `release.zip`。
+- 公钥固定为 `deploy/release-pubkey.pem`（可用 `UNIFIED_UPDATE_PUBKEY` 指向别处，但只读文件路径，不接受 manifest 里自带的公钥）。
+- 校验顺序不可调换：验签 → 拒 `version <= current`、拒 `min_current_version` 不满足、拒未知 `manifest_version`、拒 channel/platform 不符 → 解压前做路径白名单与 `..`/绝对路径/符号链接/大小写冲突/总量超限 → 逐文件 sha256。任一步不符即中止，不进入运行目录。
+- 发布包只含 `apps/control/app/**`、`apps/web/out/**`、`scripts/backup_core.py`、`CHANGELOG.md`；`config/` 与 `data/` 永远不替换。
+- 没有「跳过验签」开关，也没有 `--insecure`。
+
+**两阶段启动看门狗**：换目录前写 `data/updates/pending.json`（`boot_attempted=false`）；新进程启动第一件事置 `true`，健康通过则删除。若新进程根本起不来，下一次启动看到 `true` 就自动把 `*.old-<ts>` 换回去再退出重启——「起不来」不会卡在半坏状态。保留最近 2 个 `app.old-*`。
+
+**回滚**：管理界面提供 `POST /api/system/update/rollback`（admin-only），还原最近一次换目录前的目录并重启。数据不参与回滚，需要回退数据请走第 5 节的恢复。
+
+**发布**：`.github/workflows/release.yml` 在 `v*` tag 上构建前端、打包、生成 manifest、签名并上传三个资产；构建前会校验 `apps/control/app/__init__.py` 的 `__version__` 与 tag 一致，不一致直接失败（否则版本比较不可信）。本地等价命令：
+
+```bash
+python scripts/release_manifest.py build --version 0.2.0 \
+  --private-key /path/to/release.pem --commit "$(git rev-parse HEAD)" --out dist
+python scripts/release_manifest.py verify --zip dist/release.zip \
+  --manifest dist/release-manifest.json --sig dist/release-manifest.json.sig --current 0.1.0
+```
+
+私钥只放 GitHub Secret `UNIFIED_RELEASE_PRIVATE_KEY`，不进仓库。仓库里的 `deploy/release-pubkey.pem` 是配套公钥；**更换密钥对后必须重新发一个比当前版本高的版本**，否则旧公钥验不过新签名，这是有意的失败方向。
+
 
 ## 7. 常见部署故障
 

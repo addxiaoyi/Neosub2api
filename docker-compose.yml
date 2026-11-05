@@ -52,10 +52,24 @@ services:
       QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
       # codar2api（MIT）默认关闭：需自行 clone 上游并在宿主机启动
       CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
+      # 在线更新：默认关闭。开启后容器内执行「下载→验签→换目录→退出进程」，
+      # 由 restart: unless-stopped 用绑挂进来的新代码重新拉起（见下方 volumes）
+      UNIFIED_UPDATE_ENABLED: ${UNIFIED_UPDATE_ENABLED:-false}
+      UNIFIED_UPDATE_MANIFEST_URL: ${UNIFIED_UPDATE_MANIFEST_URL:-}
+      UNIFIED_UPDATE_PUBKEY: ${UNIFIED_UPDATE_PUBKEY:-deploy/release-pubkey.pem}
     volumes:
-      # SQLite 与 admin-password.txt 都落在仓库根 data/，删容器不丢数据；
-      # 只挂数据目录，应用与 config 已在镜像里，不再挂源码改布局
+      # SQLite 与 admin-password.txt 都落在仓库根 data/，删容器不丢数据
       - ./data:/data
+      # 在线更新必须绑挂代码目录：镜像层里的代码一重建就回退，绑挂后换目录才真的生效。
+      # 挂 apps/control 而不是 apps/control/app：目录交换用 rename，挂载根不能被 rename。
+      - ./apps/control:/repo/apps/control
+      # 静态产物：更新器写这里，web 的 nginx 也挂同一份宿主机目录
+      - ./apps/web/out:/repo/apps/web/out
+      - ./scripts:/repo/scripts
+      # 验签公钥（只读）：更新包必须用仓库内固定的公钥验，不能由 manifest 自带
+      - ./deploy:/repo/deploy:ro
+      # 单文件绑挂点不能 rename，更新时按「留副本 + 原地写」处理
+      - ./CHANGELOG.md:/repo/CHANGELOG.md
     ports:
       # 默认只映射到本机；需要局域网/公网访问时显式 UNIFIED_BIND_HOST=0.0.0.0 并前置 TLS
       - "${UNIFIED_BIND_HOST:-127.0.0.1}:8010:8000"
@@ -85,6 +99,12 @@ services:
     ports:
       # 只绑本机：这个入口会同时反代 /api、/v1，别在未加 TLS 时暴露到局域网
       - "${UNIFIED_BIND_HOST:-127.0.0.1}:8080:80"
+    volumes:
+      # 静态产物绑挂：在线更新只覆盖 apps/web/out，nginx 直接读宿主机目录，不重建镜像。
+      # 因为挂载点不能被 rename，执行器对这一项走原地覆盖而不是目录交换。
+      # 前提：宿主机上 apps/web/out 已存在（apps/web 下 npm run build:export 生成）；
+      # 目录不存在时 docker 会建空目录，表现为 403/白屏，健康检查会报 unhealthy。
+      - ./apps/web/out:/usr/share/nginx/html:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
