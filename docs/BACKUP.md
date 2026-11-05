@@ -169,9 +169,24 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 - 需要保留演示数据用于排查时显式 `-IncludeDemo` / `--include-demo`。
 - 演示密钥文件 `data/demo-credentials.txt` 不在归档范围内；恢复不会把它带回来。
 
+## 加密后端（远端备份）：lib 与纯标准库
+
+远端（S3 兼容）备份在上传前做客户端 AES-256-GCM 加密，两组实现对外格式完全一致：`nonce(12) || ciphertext || tag(16)`、AAD 固定为 `unified-2api-backup-v1`，因此装不装 `cryptography` 都不改变归档字节布局，两个后端生成的密文可以互相解开（互通用例见 `apps/control/tests/test_backup_remote.py`）。
+
+选择规则在 `apps/control/app/services/backup_crypto.py:65-109`：
+
+| 条件 | 实际使用 | 状态接口显示 |
+| --- | --- | --- |
+| `cryptography` 可导入且版本 ≥ **41.0** | OpenSSL 后端的 lib 实现 | `implementation=lib`，`library_version` 为实际版本 |
+| 未安装 / 版本 < 41.0 / 安装损坏（缺 `_rust`、缺 `cffi` 等） | 本仓纯标准库实现（NIST SP 800-38D） | `implementation=stdlib`，`reason` 说明回落原因 |
+
+**为什么门槛是 41.0**：这条线不是 API 兼容性下限，而是**安全维护下限**——上游对低于 41 的版本不再发布安全修复。本功能用这个库保护备份加密密钥，继续用不再修漏洞的加密库，风险高于回落到本仓可审计、无二进制依赖的实现。代码保留 `LIB_MIN_VERSION = (41, 0)` 而不是按「装到就算」放行，就是让「库仍在维护」成为唯一放行条件；`tests/test_backup_remote.py` 同时用互通用例保证回落后归档格式不变。
+
+**低于门槛会发生什么**：应用照常启动，第一次用到加密时打一条 warning 日志，之后状态接口一直报告 `stdlib` + 原因；不会崩溃、不会拒绝上传、不会退回明文。生产上如果想确认没走回落，装完依赖后访问管理端的 `GET /api/system/backup-remote`（需管理员），看返回里的 `crypto_backend.implementation` 是否为 `lib`；`reason` 常见取值是「cryptography X.Y 低于最低可用版本 41.0」或「导入 cryptography 失败：…」，前者是版本过旧，后者多半是安装不完整（缺 `cffi`/`_rust` 扩展）。按 `apps/control/requirements.txt` 装齐依赖（当前钉 `cryptography==50.0.2`）即可稳定走 lib。
+
 ## 限制与未覆盖边界
 
-- 不做加密、不上传远端；归档落在本地磁盘，需自行做异地副本。
+- 本地归档本身不加密、不上传远端；远端（S3 兼容）备份是可选能力，默认关闭，开启后只上传客户端加密后的归档（加密后端选择见上一节）。
 - 不是 schema 迁移工具：跨版本恢复依赖应用启动时的建表/迁移逻辑，升级前请先备份。
 - 配置恢复是显式选项；默认不覆盖 `config/`、`providers/`、`upstreams/`。
 - 演示数据识别依赖标记（`demo_local` / `[demo] `）；用户自建的、未打标记的演示数据不会被剔除。
