@@ -732,7 +732,6 @@
     "batchEnable": "批量启用",
     "batchDeleteTitle": "删除选中的 {n} 项？",
     "batchDeleteDesc": "删除后使用这些凭据的调用将立即失效，此操作不可撤销。",
-    "batchConfirm": "执行",
     "batchRunning": "正在执行…",
     "batchSummary": "{ok} 条成功，{fail} 条失败",
     "batchAllOk": "批量操作完成",
@@ -763,6 +762,12 @@
     "colLatency": "总耗时",
     "colTokens": "Token",
     "streamShort": "流",
+    "colTriage": "处理",
+    "resolvedBadge": "已排查",
+    "resolveAction": "标记已排查",
+    "unresolveAction": "撤销标记",
+    "resolved": "已标记排查",
+    "unresolved": "已撤销排查标记",
     "emptyTitle": "暂无日志",
     "emptyDesc": "当有请求通过网关时，这里会显示调用记录",
     "loadFailedTitle": "日志加载失败",
@@ -1367,6 +1372,42 @@
       "session_ttl_sec": {
         "label": "登录会话有效期",
         "desc": "管理端登录会话的有效秒数。只对之后的新登录生效，已登录会话保持原到期时间。默认 86400。"
+      },
+      "alert_provider_failure_enabled": {
+        "label": "服务商连败告警",
+        "desc": "关闭后该规则不参与评估，已有告警保持原状态。"
+      },
+      "alert_provider_failure_streak": {
+        "label": "连败次数阈值",
+        "desc": "同一服务商在窗口内连续失败达到该次数即告警（1–100）。默认 3。"
+      },
+      "alert_provider_failure_window_sec": {
+        "label": "连败回看窗口（秒）",
+        "desc": "统计连续失败时回看的时间长度（60–86400）。默认 86400。"
+      },
+      "alert_quota_remaining_enabled": {
+        "label": "配额剩余告警",
+        "desc": "关闭后不再评估剩余额度阈值。"
+      },
+      "alert_quota_remaining_percent": {
+        "label": "剩余额度阈值（%）",
+        "desc": "用量达到该百分比时告警（1–99；100% 无意义）。默认 20。"
+      },
+      "alert_usage_missing_enabled": {
+        "label": "usage_missing 占比告警",
+        "desc": "关闭后不再评估 usage_missing 占比。"
+      },
+      "alert_usage_missing_ratio_percent": {
+        "label": "usage_missing 占比阈值（%）",
+        "desc": "统计窗口内占比达到该值时告警（1–100）。默认 50。"
+      },
+      "alert_usage_missing_min_requests": {
+        "label": "最少样本数",
+        "desc": "低于该样本量不告警；样本太少时占比会变成噪音，后端下限固定为 10。默认 20。"
+      },
+      "alert_usage_missing_window_sec": {
+        "label": "usage_missing 统计窗口（秒）",
+        "desc": "计算占比的时间窗口（60–86400）。默认 600。"
       }
     },
     "upstashUrlRequired": "请填写 Upstash 地址",
@@ -1546,6 +1587,25 @@
     "alertsEmpty": "暂无告警",
     "alertsEmptyDesc": "用量达到阈值后，这里会记录每次告警。",
     "policyFilter": "策略筛选",
-    "alertsLimit": "条数上限"
+    "alertsLimit": "条数上限",
+    "statusOpen": "待处理",
+    "statusAcked": "已确认",
+    "statusClosed": "已关闭",
+    "statusSilenced": "静默中",
+    "actionAck": "确认",
+    "actionSilence": "静默",
+    "actionClose": "关闭",
+    "actionReopen": "重新打开",
+    "actionDone": "告警状态已更新",
+    "colTriage": "操作",
+    "silenceTitle": "静默这条告警",
+    "silenceDesc": "到期后自动恢复为「待处理」；单条静默最长 30 天，不支持永久静默。",
+    "silenceDuration": "静默时长",
+    "silence1h": "1 小时",
+    "silence1d": "1 天",
+    "silence7d": "7 天",
+    "silence30d": "30 天",
+    "silenceConfirm": "开始静默",
+    "silencedUntil": "到期：{time}"
   }
 }

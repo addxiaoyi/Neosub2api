@@ -756,7 +756,6 @@
     "batchEnable": "Enable selected",
     "batchDeleteTitle": "Delete the selected {n} items?",
     "batchDeleteDesc": "Calls using these credentials stop working immediately. This cannot be undone.",
-    "batchConfirm": "Run",
     "batchRunning": "Running…",
     "batchSummary": "{ok} succeeded, {fail} failed",
     "batchAllOk": "Batch finished",
@@ -787,6 +786,12 @@
     "colLatency": "Latency",
     "colTokens": "Token",
     "streamShort": "stream",
+    "colTriage": "Triage",
+    "resolvedBadge": "Reviewed",
+    "resolveAction": "Mark reviewed",
+    "unresolveAction": "Unmark",
+    "resolved": "Marked as reviewed",
+    "unresolved": "Review mark removed",
     "emptyTitle": "No logs yet",
     "emptyDesc": "Request records appear here once traffic flows through the gateway",
     "loadFailedTitle": "Could not load logs",
@@ -1391,6 +1396,42 @@
       "session_ttl_sec": {
         "label": "Login session lifetime",
         "desc": "Lifetime in seconds for admin sessions. Only new logins are affected; existing sessions keep their original expiry. Default 86400."
+      },
+      "alert_provider_failure_enabled": {
+        "label": "Provider failure streak alert",
+        "desc": "When off, this rule is not evaluated; existing alerts keep their state."
+      },
+      "alert_provider_failure_streak": {
+        "label": "Failure streak threshold",
+        "desc": "Consecutive failures of one provider within the window before alerting (1–100). Default 3."
+      },
+      "alert_provider_failure_window_sec": {
+        "label": "Streak lookback window (sec)",
+        "desc": "Lookback length used to count consecutive failures (60–86400). Default 86400."
+      },
+      "alert_quota_remaining_enabled": {
+        "label": "Remaining quota alert",
+        "desc": "When off, the remaining-quota threshold is not evaluated."
+      },
+      "alert_quota_remaining_percent": {
+        "label": "Remaining quota threshold (%)",
+        "desc": "Alert when usage reaches this percentage (1–99; 100% is meaningless). Default 20."
+      },
+      "alert_usage_missing_enabled": {
+        "label": "usage_missing ratio alert",
+        "desc": "When off, the usage_missing ratio is not evaluated."
+      },
+      "alert_usage_missing_ratio_percent": {
+        "label": "usage_missing ratio threshold (%)",
+        "desc": "Alert when the ratio in the window reaches this value (1–100). Default 50."
+      },
+      "alert_usage_missing_min_requests": {
+        "label": "Minimum samples",
+        "desc": "No alert below this sample size; small samples turn the ratio into noise, so the backend floor is 10. Default 20."
+      },
+      "alert_usage_missing_window_sec": {
+        "label": "usage_missing window (sec)",
+        "desc": "Time window used to compute the ratio (60–86400). Default 600."
       }
     },
     "upstashUrlRequired": "Enter the Upstash URL",
@@ -1775,6 +1816,25 @@
     "alertsEmpty": "No alerts",
     "alertsEmptyDesc": "Each alert is recorded here once usage reaches a threshold.",
     "policyFilter": "Policy",
-    "alertsLimit": "Max rows"
+    "alertsLimit": "Max rows",
+    "statusOpen": "Open",
+    "statusAcked": "Acknowledged",
+    "statusClosed": "Closed",
+    "statusSilenced": "Silenced",
+    "actionAck": "Acknowledge",
+    "actionSilence": "Silence",
+    "actionClose": "Close",
+    "actionReopen": "Reopen",
+    "actionDone": "Alert status updated",
+    "colTriage": "Actions",
+    "silenceTitle": "Silence this alert",
+    "silenceDesc": "It returns to Open automatically when the silence ends. The maximum is 30 days; permanent silence is not supported.",
+    "silenceDuration": "Duration",
+    "silence1h": "1 hour",
+    "silence1d": "1 day",
+    "silence7d": "7 days",
+    "silence30d": "30 days",
+    "silenceConfirm": "Silence",
+    "silencedUntil": "Until {time}"
   }
 }

@@ -38,6 +38,11 @@ export interface QuotaAlert {
   limit_micro: number;
   used_requests: number;
   limit_requests: number;
+  /** 读取端状态：closed 优先，静默期内为 silenced，到期自动回 open */
+  status: 'open' | 'acked' | 'closed' | 'silenced';
+  acked_at: number;
+  closed_at: number;
+  silenced_until: number;
   key_id: number | null;
   provider: string;
   model: string;
@@ -101,4 +106,15 @@ export const quotaApi = {
 
   alerts: (params: {key_id?: number; policy_id?: number; limit?: number}) =>
     get<QuotaAlertPage>('/api/quota/alerts', params),
+
+  /** 以下四个动作 admin-only；ack/close 幂等，静默到期由读取端自动回 open */
+  ackAlert: async (id: number): Promise<{ok: boolean; item: QuotaAlert}> =>
+    (await http.post<{ok: boolean; item: QuotaAlert}>(`/api/quota/alerts/${id}/ack`)).data,
+  silenceAlert: async (id: number, seconds: number): Promise<{ok: boolean; item: QuotaAlert}> =>
+    (await http.post<{ok: boolean; item: QuotaAlert}>(`/api/quota/alerts/${id}/silence`, {seconds}))
+      .data,
+  closeAlert: async (id: number): Promise<{ok: boolean; item: QuotaAlert}> =>
+    (await http.post<{ok: boolean; item: QuotaAlert}>(`/api/quota/alerts/${id}/close`)).data,
+  reopenAlert: async (id: number): Promise<{ok: boolean; item: QuotaAlert}> =>
+    (await http.post<{ok: boolean; item: QuotaAlert}>(`/api/quota/alerts/${id}/reopen`)).data,
 };

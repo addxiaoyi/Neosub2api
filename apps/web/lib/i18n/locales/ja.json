@@ -485,7 +485,6 @@
     "batchEnable": "一括有効化",
     "batchDeleteTitle": "選択した {n} 件を削除しますか？",
     "batchDeleteDesc": "削除すると、この認証情報を使った呼び出しは即座に失敗します。元に戻せません。",
-    "batchConfirm": "実行",
     "batchRunning": "実行中…",
     "batchSummary": "{ok} 件成功、{fail} 件失敗",
     "batchAllOk": "一括操作が完了しました",
@@ -516,6 +515,12 @@
     "colLatency": "合計時間",
     "colTokens": "Token",
     "streamShort": "ストリーム",
+    "colTriage": "対応",
+    "resolvedBadge": "確認済み",
+    "resolveAction": "確認済みにする",
+    "unresolveAction": "マーク解除",
+    "resolved": "確認済みにしました",
+    "unresolved": "確認済みマークを解除しました",
     "emptyTitle": "ログがありません",
     "emptyDesc": "ゲートウェイにリクエストが届くと、ここに記録が表示されます",
     "loadFailedTitle": "ログを読み込めませんでした",
@@ -1079,6 +1084,42 @@
       "session_ttl_sec": {
         "label": "ログインセッションの有効期間",
         "desc": "管理画面セッションの有効秒数。以降の新しいログインにのみ適用され、既存セッションは元の期限を保ちます。既定 86400。"
+      },
+      "alert_provider_failure_enabled": {
+        "label": "プロバイダー連続失敗アラート",
+        "desc": "オフにするとこのルールは評価されません。既存のアラートは状態を維持します。"
+      },
+      "alert_provider_failure_streak": {
+        "label": "連続失敗回数のしきい値",
+        "desc": "同一プロバイダーがウィンドウ内でこの回数連続失敗するとアラート（1–100）。既定 3。"
+      },
+      "alert_provider_failure_window_sec": {
+        "label": "連続失敗の参照ウィンドウ（秒）",
+        "desc": "連続失敗を数える参照期間（60–86400）。既定 86400。"
+      },
+      "alert_quota_remaining_enabled": {
+        "label": "残量アラート",
+        "desc": "オフにすると残量しきい値は評価されません。"
+      },
+      "alert_quota_remaining_percent": {
+        "label": "残量しきい値（%）",
+        "desc": "使用率がこの割合に達するとアラート（1–99。100% は無意味）。既定 20。"
+      },
+      "alert_usage_missing_enabled": {
+        "label": "usage_missing 比率アラート",
+        "desc": "オフにすると usage_missing 比率は評価されません。"
+      },
+      "alert_usage_missing_ratio_percent": {
+        "label": "usage_missing 比率しきい値（%）",
+        "desc": "ウィンドウ内の比率がこの値に達するとアラート（1–100）。既定 50。"
+      },
+      "alert_usage_missing_min_requests": {
+        "label": "最小サンプル数",
+        "desc": "このサンプル数を下回るとアラートしません。サンプルが少ないと比率がノイズになるため、バックエンドの下限は 10 です。既定 20。"
+      },
+      "alert_usage_missing_window_sec": {
+        "label": "usage_missing 集計ウィンドウ（秒）",
+        "desc": "比率を計算する時間ウィンドウ（60–86400）。既定 600。"
       }
     },
     "upstashUrlRequired": "Upstash アドレスを入力してください",
@@ -1464,7 +1505,26 @@
     "alertsEmpty": "アラートはありません",
     "alertsEmptyDesc": "使用量がしきい値に達すると、ここに記録されます。",
     "policyFilter": "ポリシー",
-    "alertsLimit": "最大件数"
+    "alertsLimit": "最大件数",
+    "statusOpen": "未対応",
+    "statusAcked": "確認済み",
+    "statusClosed": "クローズ",
+    "statusSilenced": "サイレント中",
+    "actionAck": "確認",
+    "actionSilence": "サイレント",
+    "actionClose": "クローズ",
+    "actionReopen": "再オープン",
+    "actionDone": "アラート状態を更新しました",
+    "colTriage": "操作",
+    "silenceTitle": "このアラートをサイレント",
+    "silenceDesc": "期限が切れると自動的に「未対応」に戻ります。1 件あたり最長 30 日で、無期限のサイレントはできません。",
+    "silenceDuration": "サイレント期間",
+    "silence1h": "1 時間",
+    "silence1d": "1 日",
+    "silence7d": "7 日",
+    "silence30d": "30 日",
+    "silenceConfirm": "サイレント開始",
+    "silencedUntil": "期限：{time}"
   },
   "quota": {
     "title": "クォータ",

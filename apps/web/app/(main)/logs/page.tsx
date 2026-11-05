@@ -1,7 +1,7 @@
 'use client';
 
 import {Fragment, useCallback, useEffect, useRef, useState} from 'react';
-import {ScrollText, Search, Trash2, ChevronLeft, ChevronRight, Download, Loader2, AlertCircle, RotateCcw} from 'lucide-react';
+import {ScrollText, Search, Trash2, ChevronLeft, ChevronRight, Download, Loader2, AlertCircle, RotateCcw, Check} from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {keyApi, logApi, providerApi, pricingApi, errText, downloadErrText, type LogQuery} from '@/lib/api';
@@ -181,6 +181,7 @@ export default function LogsPage() {
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('all');
   const [days, setDays] = useState('7');
+  const [triageBusyId, setTriageBusyId] = useState<number | null>(null);
 
   const filterParams = useCallback(
     (): LogQuery => ({
@@ -217,6 +218,20 @@ export default function LogsPage() {
 
   // 新请求会不断写入日志；心跳刷新只更新当前筛选下的列表，不会重置筛选条件
   useHeartbeat(load, 60000);
+
+  async function toggleResolved(row: RequestLog) {
+    setTriageBusyId(row.id);
+    try {
+      if (row.resolved) await logApi.unresolve(row.id);
+      else await logApi.resolve(row.id);
+      notify.ok(t(row.resolved ? 'logs.unresolved' : 'logs.resolved'));
+      load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setTriageBusyId(null);
+    }
+  }
 
   useEffect(() => {
     keyApi.list().then(setKeys).catch(() => undefined);
@@ -401,6 +416,11 @@ export default function LogsPage() {
               <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('logs.colCredit')}</TableHead>
               <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('logs.colLatency')}</TableHead>
               <TableHead scope="col" className="hidden pr-4 text-[11px] text-muted-foreground md:table-cell">{t('logs.colTokens')}</TableHead>
+              {isAdmin && (
+                <TableHead scope="col" className="pr-4 text-[11px] text-muted-foreground">
+                  <span className="sr-only">{t('logs.colTriage')}</span>
+                </TableHead>
+              )}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -439,6 +459,11 @@ export default function LogsPage() {
                     </Badge>
                   ) : (
                     <Badge variant="destructive" className="rounded-full">{l.status || 'ERR'}</Badge>
+                  )}
+                  {l.resolved && (
+                    <Badge variant="outline" className="ml-1.5 rounded-full text-[10px]">
+                      {t('logs.resolvedBadge')}
+                    </Badge>
                   )}
                   {/* 窄屏没有金额列，金额与口径压成一行，null 只显示「—」 */}
                   <div className="mt-1 flex items-center gap-1.5 text-[10px] leading-none md:hidden">
@@ -490,10 +515,30 @@ export default function LogsPage() {
                   )}
                   {l.stream && <span className="ml-1 text-xs text-muted-foreground">{t('logs.streamShort')}</span>}
                 </TableCell>
+                {isAdmin && (
+                  <TableCell className="pr-4">
+                    {l.status >= 400 || l.error ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 rounded-full px-2 text-[11px]"
+                        disabled={triageBusyId === l.id}
+                        aria-label={t(l.resolved ? 'logs.unresolveAction' : 'logs.resolveAction')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleResolved(l);
+                        }}
+                      >
+                        {l.resolved ? <RotateCcw className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+                        {t(l.resolved ? 'logs.unresolveAction' : 'logs.resolveAction')}
+                      </Button>
+                    ) : null}
+                  </TableCell>
+                )}
               </TableRow>
               {openCredit?.id === l.id && (
                 <TableRow className="border-b border-border/40 hover:bg-transparent">
-                  <TableCell colSpan={8} className="whitespace-normal bg-background/60 px-4 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                  <TableCell colSpan={9} className="whitespace-normal bg-background/60 px-4 py-2 text-[11px] leading-relaxed text-muted-foreground">
                     <span className="text-foreground/80">{t(CREDIT_NOTE[l.credit_status])}</span>
                     {l.credit_status === 'unpriced' && (
                       <span className="ml-2">

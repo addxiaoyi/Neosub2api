@@ -329,6 +329,15 @@ export const logApi = {
     days?: number;
   }) => get<Page<RequestLog>>('/api/logs', params),
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
+  /** 标记/撤销「已排查」：只动 request_logs 的 triage 列，不碰 billing_ledger */
+  resolve: (id: number) =>
+    post<{ok: boolean; id: number; resolved: boolean; resolved_at: number; resolved_by: string}>(
+      `/api/logs/${id}/resolve`,
+    ),
+  unresolve: async (id: number) =>
+    (await http.delete<{ok: boolean; id: number; resolved: boolean; resolved_at: number; resolved_by: string}>(
+      `/api/logs/${id}/resolve`,
+    )).data,
   /** 导出 CSV：筛选键与列表同源；错误体是 Blob，文案要先用 downloadErrText 解码 */
   exportCsv: async (params: LogQuery) => {
     const res = await http.get('/api/logs/export', {params, responseType: 'blob'});

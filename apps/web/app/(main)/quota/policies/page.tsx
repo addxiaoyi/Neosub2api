@@ -4,12 +4,17 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   AlertCircle,
   AlertTriangle,
+  Check,
+  Clock,
   Coins,
   Gauge,
   Lock,
   Pencil,
   Plus,
+  RotateCcw,
   Trash2,
+  VolumeX,
+  X,
 } from 'lucide-react';
 import {keyApi, errText} from '@/lib/api';
 import {quotaApi, type QuotaAlert, type QuotaPolicy, type QuotaStatusItem} from '@/lib/quota-api';
@@ -133,6 +138,10 @@ function AdminQuotaPolicies() {
   const [loadingAlerts, setLoadingAlerts] = useState(true);
   const [alertsError, setAlertsError] = useState('');
 
+  const [silenceTarget, setSilenceTarget] = useState<QuotaAlert | null>(null);
+  const [silenceSeconds, setSilenceSeconds] = useState('86400');
+  const [alertBusyId, setAlertBusyId] = useState<number | null>(null);
+
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<QuotaPolicy | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -242,6 +251,27 @@ function AdminQuotaPolicies() {
     () => (alertKey === 'all' ? policies : policies.filter((p) => p.key_id === Number(alertKey))),
     [policies, alertKey],
   );
+
+  function alertStatusLabel(status: QuotaAlert['status']) {
+    if (status === 'acked') return t('quotaPolicy.statusAcked');
+    if (status === 'closed') return t('quotaPolicy.statusClosed');
+    if (status === 'silenced') return t('quotaPolicy.statusSilenced');
+    return t('quotaPolicy.statusOpen');
+  }
+
+  async function runAlertAction(id: number, action: () => Promise<unknown>) {
+    setAlertBusyId(id);
+    try {
+      await action();
+      notify.ok(t('quotaPolicy.actionDone'));
+      setReloadToken((v) => v + 1);
+    } catch (e) {
+      // 非法跃迁/越权由后端明确拒绝，这里原样展示原因
+      notify.err(errText(e));
+    } finally {
+      setAlertBusyId(null);
+    }
+  }
 
   function openCreate() {
     setEditing(null);
@@ -662,12 +692,18 @@ function AdminQuotaPolicies() {
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
                   <TableHead scope="col" className="min-w-[160px] pl-4 text-xs text-muted-foreground">{t('quotaPolicy.colTriggeredAt')}</TableHead>
+                  <TableHead scope="col" className="min-w-[100px] text-[11px] text-muted-foreground">{t('quotaPolicy.colStatus')}</TableHead>
                   <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colKey')}</TableHead>
                   <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colScope')}</TableHead>
                   <TableHead scope="col" className="min-w-[88px] text-[11px] text-muted-foreground">{t('quotaPolicy.colThreshold')}</TableHead>
                   <TableHead scope="col" className="hidden text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colMetric')}</TableHead>
                   <TableHead scope="col" className="min-w-[128px] text-right text-[11px] text-muted-foreground">{t('quotaPolicy.colUsed')}</TableHead>
                   <TableHead scope="col" className="hidden pr-4 text-[11px] text-muted-foreground md:table-cell">{t('quotaPolicy.colPeriod')}</TableHead>
+                  {isAdmin && (
+                    <TableHead scope="col" className="pr-4 text-[11px] text-muted-foreground">
+                      <span className="sr-only">{t('quotaPolicy.colTriage')}</span>
+                    </TableHead>
+                  )}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -676,6 +712,30 @@ function AdminQuotaPolicies() {
                   return (
                     <TableRow key={alert.id} className="border-b border-border/40">
                       <TableCell className="min-w-[160px] pl-4 text-xs text-muted-foreground">{fmtDateTime(alert.triggered_at)}</TableCell>
+                      <TableCell className="min-w-[100px]">
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge
+                            variant={
+                              alert.status === 'open'
+                                ? 'destructive'
+                                : alert.status === 'silenced'
+                                  ? 'outline'
+                                  : alert.status === 'acked'
+                                    ? 'default'
+                                    : 'secondary'
+                            }
+                            className="rounded-full"
+                          >
+                            {alertStatusLabel(alert.status)}
+                          </Badge>
+                          {alert.status === 'silenced' && alert.silenced_until > 0 && (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                              <Clock className="h-3 w-3" />
+                              {t('quotaPolicy.silencedUntil', {time: fmtDateTime(alert.silenced_until)})}
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell className="hidden text-xs md:table-cell">{keyName(alert.key_id)}</TableCell>
                       <TableCell className="hidden max-w-[200px] truncate text-xs md:table-cell" title={`${alert.provider} / ${alert.model}`}>
                         {alert.provider || alert.model
@@ -708,6 +768,66 @@ function AdminQuotaPolicies() {
                           ? `${windowText(alert.window)} · ${fmtDateTime(alert.period_start)}`
                           : '—'}
                       </TableCell>
+                      {isAdmin && (
+                        <TableCell className="pr-4">
+                          <div className="flex items-center justify-end gap-1">
+                            {alert.status === 'closed' ? (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 rounded-md"
+                                title={t('quotaPolicy.actionReopen')}
+                                aria-label={t('quotaPolicy.actionReopen')}
+                                disabled={alertBusyId === alert.id}
+                                onClick={() => runAlertAction(alert.id, () => quotaApi.reopenAlert(alert.id))}
+                              >
+                                <RotateCcw className="h-4 w-4" />
+                              </Button>
+                            ) : (
+                              <>
+                                {alert.status !== 'acked' && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 rounded-md"
+                                    title={t('quotaPolicy.actionAck')}
+                                    aria-label={t('quotaPolicy.actionAck')}
+                                    disabled={alertBusyId === alert.id}
+                                    onClick={() => runAlertAction(alert.id, () => quotaApi.ackAlert(alert.id))}
+                                  >
+                                    <Check className="h-4 w-4" />
+                                  </Button>
+                                )}
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 rounded-md"
+                                  title={t('quotaPolicy.actionSilence')}
+                                  aria-label={t('quotaPolicy.actionSilence')}
+                                  disabled={alertBusyId === alert.id}
+                                  onClick={() => {
+                                    setSilenceSeconds('86400');
+                                    setSilenceTarget(alert);
+                                  }}
+                                >
+                                  <VolumeX className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 rounded-md text-destructive"
+                                  title={t('quotaPolicy.actionClose')}
+                                  aria-label={t('quotaPolicy.actionClose')}
+                                  disabled={alertBusyId === alert.id}
+                                  onClick={() => runAlertAction(alert.id, () => quotaApi.closeAlert(alert.id))}
+                                >
+                                  <X className="h-4 w-4" />
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </TableCell>
+                      )}
                     </TableRow>
                   );
                 })}
@@ -716,6 +836,48 @@ function AdminQuotaPolicies() {
           </section>
         )}
       </section>
+
+      {/* ── 静默告警：必须选到期时间，最长 30 天 ── */}
+      <Dialog open={!!silenceTarget} onOpenChange={(open) => !open && setSilenceTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('quotaPolicy.silenceTitle')}</DialogTitle>
+            <DialogDescription>{t('quotaPolicy.silenceDesc')}</DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <div className="space-y-1.5 px-5 pb-4">
+              <Label htmlFor="silence-duration">{t('quotaPolicy.silenceDuration')}</Label>
+              <Select value={silenceSeconds} onValueChange={setSilenceSeconds}>
+                <SelectTrigger id="silence-duration" className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="3600">{t('quotaPolicy.silence1h')}</SelectItem>
+                  <SelectItem value="86400">{t('quotaPolicy.silence1d')}</SelectItem>
+                  <SelectItem value="604800">{t('quotaPolicy.silence7d')}</SelectItem>
+                  <SelectItem value="2592000">{t('quotaPolicy.silence30d')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </DialogBody>
+          <DialogFooter className="border-t border-border/60 px-5 py-3">
+            <Button variant="outline" onClick={() => setSilenceTarget(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              disabled={!silenceTarget || alertBusyId === silenceTarget?.id}
+              onClick={() => {
+                if (!silenceTarget) return;
+                const target = silenceTarget;
+                setSilenceTarget(null);
+                runAlertAction(target.id, () => quotaApi.silenceAlert(target.id, Number(silenceSeconds)));
+              }}
+            >
+              {t('quotaPolicy.silenceConfirm')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── 新建 / 编辑 ── */}
       <Dialog open={formOpen} onOpenChange={setFormOpen}>

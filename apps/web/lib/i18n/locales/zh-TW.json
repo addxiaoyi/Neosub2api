@@ -485,7 +485,6 @@
     "batchEnable": "批次啟用",
     "batchDeleteTitle": "刪除選取的 {n} 項？",
     "batchDeleteDesc": "刪除後使用這些憑證的呼叫將立即失效，此操作不可復原。",
-    "batchConfirm": "執行",
     "batchRunning": "正在執行…",
     "batchSummary": "{ok} 項成功，{fail} 項失敗",
     "batchAllOk": "批次操作完成",
@@ -516,6 +515,12 @@
     "colLatency": "總耗時",
     "colTokens": "Token",
     "streamShort": "串流",
+    "colTriage": "處理",
+    "resolvedBadge": "已排查",
+    "resolveAction": "標記已排查",
+    "unresolveAction": "撤銷標記",
+    "resolved": "已標記排查",
+    "unresolved": "已撤銷排查標記",
     "emptyTitle": "暫無日誌",
     "emptyDesc": "當有請求通過閘道時，這裡會顯示呼叫記錄",
     "loadFailedTitle": "日誌載入失敗",
@@ -1079,6 +1084,42 @@
       "session_ttl_sec": {
         "label": "登入工作階段有效期",
         "desc": "管理端登入工作階段的有效秒數。只對之後的新登入生效，已登入工作階段維持原到期時間。預設 86400。"
+      },
+      "alert_provider_failure_enabled": {
+        "label": "服務商連敗告警",
+        "desc": "關閉後該規則不參與評估，已有告警維持原狀態。"
+      },
+      "alert_provider_failure_streak": {
+        "label": "連敗次數閾值",
+        "desc": "同一服務商在視窗內連續失敗達到該次數即告警（1–100）。預設 3。"
+      },
+      "alert_provider_failure_window_sec": {
+        "label": "連敗回看視窗（秒）",
+        "desc": "統計連續失敗時回看的時間長度（60–86400）。預設 86400。"
+      },
+      "alert_quota_remaining_enabled": {
+        "label": "配額剩餘告警",
+        "desc": "關閉後不再評估剩餘額度閾值。"
+      },
+      "alert_quota_remaining_percent": {
+        "label": "剩餘額度閾值（%）",
+        "desc": "用量達到該百分比時告警（1–99；100% 無意義）。預設 20。"
+      },
+      "alert_usage_missing_enabled": {
+        "label": "usage_missing 佔比告警",
+        "desc": "關閉後不再評估 usage_missing 佔比。"
+      },
+      "alert_usage_missing_ratio_percent": {
+        "label": "usage_missing 佔比閾值（%）",
+        "desc": "統計視窗內佔比達到該值時告警（1–100）。預設 50。"
+      },
+      "alert_usage_missing_min_requests": {
+        "label": "最少樣本數",
+        "desc": "低於該樣本量不告警；樣本太少時佔比會變成雜訊，後端下限固定為 10。預設 20。"
+      },
+      "alert_usage_missing_window_sec": {
+        "label": "usage_missing 統計視窗（秒）",
+        "desc": "計算佔比的時間視窗（60–86400）。預設 600。"
       }
     },
     "upstashUrlRequired": "請填寫 Upstash 位址",
@@ -1464,7 +1505,26 @@
     "alertsEmpty": "暫無告警",
     "alertsEmptyDesc": "用量達到閾值後，這裡會記錄每次告警。",
     "policyFilter": "策略篩選",
-    "alertsLimit": "筆數上限"
+    "alertsLimit": "筆數上限",
+    "statusOpen": "待處理",
+    "statusAcked": "已確認",
+    "statusClosed": "已關閉",
+    "statusSilenced": "靜默中",
+    "actionAck": "確認",
+    "actionSilence": "靜默",
+    "actionClose": "關閉",
+    "actionReopen": "重新開啟",
+    "actionDone": "告警狀態已更新",
+    "colTriage": "操作",
+    "silenceTitle": "靜默這條告警",
+    "silenceDesc": "到期後自動恢復為「待處理」；單條靜默最長 30 天，不支援永久靜默。",
+    "silenceDuration": "靜默時長",
+    "silence1h": "1 小時",
+    "silence1d": "1 天",
+    "silence7d": "7 天",
+    "silence30d": "30 天",
+    "silenceConfirm": "開始靜默",
+    "silencedUntil": "到期：{time}"
   },
   "quota": {
     "title": "配額",

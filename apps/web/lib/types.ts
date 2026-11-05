@@ -313,6 +313,10 @@ export interface RequestLog {
   credit_status: CreditStatus;
   /** 本次实际用的上游账号。后端未采集，恒为 null */
   account: string | null;
+  /** 运维是否已标记排查；只改这一列，不影响计费口径 */
+  resolved: boolean;
+  resolved_at: number | null;
+  resolved_by: string;
 }
 
 /** GET /api/logs 每行的记账口径，取值来自 apps/control/app/routers/logs.py 的 _classify_credit */
