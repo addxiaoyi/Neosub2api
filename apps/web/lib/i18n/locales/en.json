@@ -12,6 +12,7 @@
     "share": "Share",
     "manualCopy": "Long-press to select and copy manually",
     "close": "Close",
+    "tableScrollHint": "This table is wider than the screen — scroll sideways to see all columns",
     "loading": "Loading…",
     "listSeparator": ", ",
     "prevPage": "Previous page",
@@ -191,6 +192,8 @@
     "healthNone": "Not checked",
     "ready": "Ready",
     "needsConfig": "Needs config",
+    "credentialInvalidated": "Credential invalid",
+    "repasteCredential": "Re-paste credential",
     "enabledUnavailable": "Enabled · Unavailable",
     "enabledButUnavailable": "Enabled, but currently unavailable: missing {requires}",
     "requiresPrefix": "Still needs: ",
@@ -571,6 +574,8 @@
     "enabledOn": "Enabled",
     "enabledOff": "Disabled",
     "importNotReadyWarning": "This provider is not ready: missing {requires}. Even if saved, the account will not work in its current state.",
+    "importCredentialInvalidated": "The upstream credential for {provider} is invalid ({reason}). Re-paste the credential before importing accounts.",
+    "repasteProvider": "Re-paste now",
     "upstreamUnavailable": "Upstream unavailable",
     "managed_sidecar": "This provider's accounts are managed by its own sidecar process and cannot be added here; configure them in the sidecar's own console and restart that sidecar for changes to take effect.",
     "opsUnavailable": "Provider capability lookup failed; dependent actions are hidden.",
@@ -833,7 +838,8 @@
     "batchNoReason": "The backend returned no reason",
     "batchTooMany": "At most {max} items per request; reduce the selection",
     "batchSelectRow": "Select {name}",
-    "batchLoadNote": "List reloaded after the action"
+    "batchLoadNote": "List reloaded after the action",
+    "badgeFromWizard": "Created by wizard"
   },
   "logs": {
     "rowCacheHit": "Cache hit tokens",
@@ -958,6 +964,7 @@
     "loginEmpty": "No sign-in failures",
     "loginEmptyDesc": "No failed sign-in attempts within the window",
     "auditLogsClear": "Logs cleared",
+    "auditLogsExport": "Logs exported",
     "clearTitle": "Clear login failure counters",
     "clearOpen": "Clear counters",
     "clearRow": "Clear",
@@ -1741,7 +1748,13 @@
     "mmReasonAborted": "Aborted by other invalid entries",
     "mmReasonInvalidMode": "Invalid import mode",
     "mmReasonWriteFailed": "Write failed, rolled back",
-    "mmReasonOther": "Other reason"
+    "mmReasonOther": "Other reason",
+    "onboardingRerunTitle": "Rerun first-run setup",
+    "onboardingRerunDesc": "Clear the \"completed\" flag and walk through the six steps again; existing keys and accounts are untouched.",
+    "onboardingRerun": "Rerun",
+    "onboardingRerunConfirmTitle": "Rerun first-run setup?",
+    "onboardingRerunConfirmDesc": "This clears the persisted completion flag and opens the wizard immediately. No keys or accounts are deleted.",
+    "onboardingRerunDone": "Reset done, the wizard is open"
   },
   "phrases": {
     "请求失败": "Request failed",
@@ -2048,5 +2061,133 @@
     "silence30d": "30 days",
     "silenceConfirm": "Silence",
     "silencedUntil": "Until {time}"
+  },
+  "onboarding": {
+    "title": "First-run setup",
+    "desc": "Six steps take you through account → provider → credential → self-check → live request → key. Every step can be skipped, and closing the wizard never blocks normal use.",
+    "progress": "Step {n} of {total}",
+    "next": "Next",
+    "prev": "Back",
+    "skip": "Skip this step",
+    "later": "Later",
+    "finish": "Finish setup",
+    "skipMarked": "Step skipped. What is still missing is listed on the dashboard.",
+    "step": {
+      "account": {
+        "title": "Admin account",
+        "desc": "Confirm you are signed in as an admin and sanity-check the password strength."
+      },
+      "provider": {
+        "title": "Pick a provider",
+        "desc": "Start with the easiest one; the demo upstream is built in and needs no external account."
+      },
+      "credential": {
+        "title": "Add a credential",
+        "desc": "Add an account or credential for the selected provider; the demo uses built-in accounts."
+      },
+      "selfcheck": {
+        "title": "Connectivity check",
+        "desc": "Run a one-click probe to confirm the control plane can reach the upstream."
+      },
+      "smoke": {
+        "title": "Live request",
+        "desc": "Call the gateway once with a new key and confirm it returns 200."
+      },
+      "key": {
+        "title": "Key and example",
+        "desc": "Get your first key and a ready-to-copy curl example."
+      }
+    },
+    "account": {
+      "user": "Signed in as",
+      "role": "Role",
+      "admin": "Admin",
+      "passwordLabel": "Password strength check (optional)",
+      "passwordHint": "Type the password you just set",
+      "passwordLocal": "Evaluated locally only; never sent or stored",
+      "passwordScore_0": "Nothing entered yet",
+      "passwordScore_1": "Weak: use at least 8 characters with mixed case, digits and symbols",
+      "passwordScore_2": "Fair: make it longer or add symbols",
+      "passwordScore_3": "Good: length and character variety are fine",
+      "passwordScore_4": "Strong: meets common strength requirements"
+    },
+    "provider": {
+      "recommend": "Recommended first",
+      "readyHint": "Only a credential is needed"
+    },
+    "credential": {
+      "demoNote": "The demo upstream ships with built-in accounts, so no import is required.",
+      "openImport": "Open import form",
+      "imported": "Account imported",
+      "notReady": "Still missing: {requires}. Saving works, but the account will not take effect until this is filled in."
+    },
+    "selfcheck": {
+      "run": "Run check",
+      "running": "Checking…",
+      "ok": "Check passed",
+      "fail": "Check failed",
+      "none": "No check has run yet."
+    },
+    "smoke": {
+      "model": "Model",
+      "run": "Send a live request",
+      "running": "Requesting…",
+      "ok": "Request succeeded (HTTP {status})",
+      "fail": "Request failed (HTTP {status})"
+    },
+    "key": {
+      "label": "Your first gateway key",
+      "once": "The plaintext is shown only here; afterwards only the prefix is visible on the keys page.",
+      "copy": "Copy",
+      "copied": "Copied",
+      "curl": "Example call (curl)",
+      "createFirst": "No key yet; step 5 creates one automatically when you send the request."
+    },
+    "todo": {
+      "title": "First-run setup is not finished",
+      "desc": "No need to finish now; the remaining items are listed below. Click Continue anytime.",
+      "continue": "Continue setup",
+      "done": "Setup complete"
+    },
+    "missing": {
+      "account": "Admin account and password strength not confirmed",
+      "provider": "No provider selected yet",
+      "credential": "No account or credential added yet",
+      "selfcheck": "Connectivity check has not run yet",
+      "smoke": "No live call with a key yet",
+      "key": "No usable first key yet"
+    }
+  },
+  "configTransfer": {
+    "title": "Config & accounts bundle",
+    "desc": "Export provider config, account list and credentials; plaintext secrets are excluded by default.",
+    "includeSecrets": "Include plaintext credentials (dangerous)",
+    "includeSecretsWarn": "←migration only, never commit or share",
+    "download": "Export",
+    "downloading": "Exporting…",
+    "downloaded": "Download started",
+    "pickFile": "Choose import file",
+    "fileHint": "Preview first, write only after confirm",
+    "noFile": "No import file selected",
+    "noFileDesc": "A selected JSON is dry-run validated first: create / overwrite / skip / fail.",
+    "planning": "Validating…",
+    "retry": "Re-validate",
+    "invalidFile": "File is not valid JSON or lacks required fields",
+    "reportTitle": "Validation report",
+    "create": "Create",
+    "overwrite": "Overwrite",
+    "skip": "Skip",
+    "fail": "Fail",
+    "failAt": "Row {index} {column} — {reason}",
+    "modeLabel": "Import mode:",
+    "modeMerge": "merge (keep existing)",
+    "modeOverwrite": "overwrite (file wins)",
+    "apply": "Run import",
+    "applying": "Importing…",
+    "applied": "Imported {n} records",
+    "confirmTitle": "Confirm overwrite import?",
+    "confirmWarn": "overwrite replaces same-key config and accounts, but never deletes records absent from the file.",
+    "confirmApply": "Confirm import",
+    "total": "{n} records in this run"
   }
 }

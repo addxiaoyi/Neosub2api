@@ -12,6 +12,7 @@
     "share": "分享",
     "manualCopy": "可长按选中后手动复制",
     "close": "关闭",
+    "tableScrollHint": "表格较宽，左右滑动可查看全部列",
     "loading": "加载中…",
     "listSeparator": "、",
     "prevPage": "上一页",
@@ -191,6 +192,8 @@
     "healthNone": "未检测",
     "ready": "就绪",
     "needsConfig": "待配置",
+    "credentialInvalidated": "凭据已失效",
+    "repasteCredential": "重新粘贴凭据",
     "enabledUnavailable": "已启用 · 不可用",
     "enabledButUnavailable": "已启用，但当前不可用：缺 {requires}",
     "requiresPrefix": "还需补：",
@@ -547,6 +550,8 @@
     "enabledOn": "已启用",
     "enabledOff": "未启用",
     "importNotReadyWarning": "该服务商尚未就绪：缺 {requires}。即使保存，账号在当前状态下也不会生效。",
+    "importCredentialInvalidated": "「{provider}」的上游凭据已失效（{reason}），先重新粘贴凭据再导入账号。",
+    "repasteProvider": "去重新粘贴",
     "upstreamUnavailable": "上游不可用",
     "managed_sidecar": "该服务商的账号由其 sidecar 进程自身管理，本页无法新增或删除；请在其 sidecar 的控制台配置，改动需按该 sidecar 的方式重启后生效。",
     "opsUnavailable": "服务商能力接口暂不可用，相关操作已隐藏。",
@@ -809,7 +814,8 @@
     "batchNoReason": "后端未返回原因",
     "batchTooMany": "单次最多 {max} 条，请减少选择",
     "batchSelectRow": "选择 {name}",
-    "batchLoadNote": "操作后已重新拉取列表"
+    "batchLoadNote": "操作后已重新拉取列表",
+    "badgeFromWizard": "向导创建"
   },
   "logs": {
     "rowCacheHit": "缓存命中 Token",
@@ -934,6 +940,7 @@
     "loginEmpty": "暂无登录失败记录",
     "loginEmptyDesc": "窗口期内没有失败的登录尝试",
     "auditLogsClear": "清空日志",
+    "auditLogsExport": "导出日志",
     "clearTitle": "清除登录失败计数",
     "clearOpen": "清除失败计数",
     "clearRow": "清除",
@@ -1717,7 +1724,13 @@
     "mmReasonAborted": "因其它非法条目整体中止",
     "mmReasonInvalidMode": "导入模式非法",
     "mmReasonWriteFailed": "写入失败，已整体回滚",
-    "mmReasonOther": "其它原因"
+    "mmReasonOther": "其它原因",
+    "onboardingRerunTitle": "重新运行首次向导",
+    "onboardingRerunDesc": "清除「已完成」标志并重新走一遍六步引导；已建的密钥与账号不受影响。",
+    "onboardingRerun": "重新运行",
+    "onboardingRerunConfirmTitle": "要重新走一遍首次向导吗？",
+    "onboardingRerunConfirmDesc": "会清除库内的完成标志并立即打开向导；不会删除任何密钥或账号。",
+    "onboardingRerunDone": "已重置，向导已打开"
   },
   "quotaPolicy": {
     "title": "配额策略",
@@ -1819,5 +1832,133 @@
     "silence30d": "30 天",
     "silenceConfirm": "开始静默",
     "silencedUntil": "到期：{time}"
+  },
+  "onboarding": {
+    "title": "首次启动向导",
+    "desc": "六步把「账号 → 服务商 → 凭据 → 自检 → 真实请求 → 密钥」走通；每一步都能跳过，随时关掉也不会打断正常使用。",
+    "progress": "第 {n}/{total} 步",
+    "next": "下一步",
+    "prev": "上一步",
+    "skip": "跳过这一步",
+    "later": "稍后再说",
+    "finish": "完成向导",
+    "skipMarked": "已跳过这一步，还差什么会记在首页待办里",
+    "step": {
+      "account": {
+        "title": "管理员账号",
+        "desc": "确认当前登录的是管理员，并自查密码强度。"
+      },
+      "provider": {
+        "title": "选服务商",
+        "desc": "先挑一家最容易跑通的；演示上游已内置，无需外部账号。"
+      },
+      "credential": {
+        "title": "填凭据",
+        "desc": "为选定的服务商添加账号或凭据；演示上游直接使用内置账号。"
+      },
+      "selfcheck": {
+        "title": "连通性自检",
+        "desc": "跑一次一键探测，确认控制面能连上上游。"
+      },
+      "smoke": {
+        "title": "真实请求",
+        "desc": "用一把新密钥真实调用一次网关，确认返回 200。"
+      },
+      "key": {
+        "title": "密钥与示例",
+        "desc": "拿到第一把密钥和可直接复制的 curl 示例。"
+      }
+    },
+    "account": {
+      "user": "当前用户",
+      "role": "角色",
+      "admin": "管理员",
+      "passwordLabel": "密码强度自查（可选）",
+      "passwordHint": "输入刚才设置的密码",
+      "passwordLocal": "仅在本机评估，不会发送或保存",
+      "passwordScore_0": "还没输入",
+      "passwordScore_1": "偏弱：至少 8 位，并混用大小写、数字与符号",
+      "passwordScore_2": "一般：再长一些或补上符号更稳妥",
+      "passwordScore_3": "良好：长度与字符种类都不错",
+      "passwordScore_4": "强：已达到常见强度要求"
+    },
+    "provider": {
+      "recommend": "推荐先跑通",
+      "readyHint": "只需填凭据即可调用"
+    },
+    "credential": {
+      "demoNote": "演示上游已内置账号，无需导入即可直接调用。",
+      "openImport": "打开导入表单",
+      "imported": "已导入账号",
+      "notReady": "该服务商还缺：{requires}。现在保存也能入库，但在补齐前不会生效。"
+    },
+    "selfcheck": {
+      "run": "开始自检",
+      "running": "检测中…",
+      "ok": "自检通过",
+      "fail": "自检失败",
+      "none": "还没跑过自检。"
+    },
+    "smoke": {
+      "model": "模型名",
+      "run": "发一条真实请求",
+      "running": "请求中…",
+      "ok": "请求成功（HTTP {status}）",
+      "fail": "请求失败（HTTP {status}）"
+    },
+    "key": {
+      "label": "你的第一把网关密钥",
+      "once": "明文只显示这一次，之后只能在密钥页看到前缀。",
+      "copy": "复制",
+      "copied": "已复制",
+      "curl": "调用示例（curl）",
+      "createFirst": "还没创建密钥；第 5 步发请求时会自动创建一把。"
+    },
+    "todo": {
+      "title": "首次启动向导未完成",
+      "desc": "不用现在做完；还差的项列在下面，点「继续向导」随时接着走。",
+      "continue": "继续向导",
+      "done": "向导已完成"
+    },
+    "missing": {
+      "account": "未确认管理员账号与密码强度",
+      "provider": "还没选定服务商",
+      "credential": "还没添加账号或凭据",
+      "selfcheck": "还没跑连通性自检",
+      "smoke": "还没用密钥真实调用一次",
+      "key": "还没拿到可用的第一把密钥"
+    }
+  },
+  "configTransfer": {
+    "title": "配置与账号打包",
+    "desc": "导出服务商配置、账号清单与凭据；默认不含明文凭据。",
+    "includeSecrets": "导出时包含明文凭据（危险）",
+    "includeSecretsWarn": "←仅用于迁移，勿提交/外传",
+    "download": "导出",
+    "downloading": "导出中…",
+    "downloaded": "已开始下载",
+    "pickFile": "选择导入文件",
+    "fileHint": "先预览，确认后才写库",
+    "noFile": "还没有选择导入文件",
+    "noFileDesc": "选择 JSON 后会先跑 dry-run 预检，列出新增/覆盖/跳过/失败四类。",
+    "planning": "预检中…",
+    "retry": "重新预检",
+    "invalidFile": "文件不是合法 JSON 或缺少必要字段",
+    "reportTitle": "预检报告",
+    "create": "会新增",
+    "overwrite": "会覆盖",
+    "skip": "会跳过",
+    "fail": "会失败",
+    "failAt": "第{index}条 {column} — {reason}",
+    "modeLabel": "导入模式：",
+    "modeMerge": "merge（同名保留）",
+    "modeOverwrite": "overwrite（以文件为准）",
+    "apply": "执行导入",
+    "applying": "导入中…",
+    "applied": "已导入 {n} 条",
+    "confirmTitle": "确认覆盖导入？",
+    "confirmWarn": "overwrite 会覆盖同键的配置与账号，但不会删除文件里没有的记录。",
+    "confirmApply": "确认导入",
+    "total": "本次预检 {n} 条"
   }
 }

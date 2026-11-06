@@ -12,6 +12,7 @@
     "share": "分享",
     "manualCopy": "可長按選取後手動複製",
     "close": "關閉",
+    "tableScrollHint": "表格較寬，左右滑動可查看全部欄位",
     "loading": "載入中…",
     "listSeparator": "、",
     "prevPage": "上一頁",
@@ -267,6 +268,8 @@
     "enabledOn": "已啟用",
     "enabledOff": "未啟用",
     "importNotReadyWarning": "此服務商尚未就緒：缺少 {requires}。即使儲存，帳號在目前狀態下也不會生效。",
+    "importCredentialInvalidated": "「{provider}」的上游憑據已失效（{reason}），請先重新貼上憑據再匯入帳號。",
+    "repasteProvider": "前往重新貼上",
     "upstreamUnavailable": "上游不可用",
     "managed_sidecar": "該服務商的帳號由其 sidecar 程序自身管理，本頁無法新增或刪除；請在其 sidecar 控制台設定，變更後依該 sidecar 的方式重啟才會生效。",
     "opsUnavailable": "服務商能力介面暫不可用，相關操作已隱藏。",
@@ -529,7 +532,8 @@
     "batchNoReason": "後端未回傳原因",
     "batchTooMany": "單次最多 {max} 項，請減少選取",
     "batchSelectRow": "選取 {name}",
-    "batchLoadNote": "操作後已重新載入清單"
+    "batchLoadNote": "操作後已重新載入清單",
+    "badgeFromWizard": "精靈建立"
   },
   "logs": {
     "rowCacheHit": "快取命中 Token",
@@ -654,6 +658,7 @@
     "loginEmpty": "尚無登入失敗",
     "loginEmptyDesc": "時間窗內沒有失敗的登入嘗試",
     "auditLogsClear": "日誌已清除",
+    "auditLogsExport": "匯出日誌",
     "clearTitle": "清除登入失敗計數",
     "clearOpen": "清除失敗計數",
     "clearRow": "清除",
@@ -1397,7 +1402,13 @@
     "mmReasonAborted": "因其它非法項目整批中止",
     "mmReasonInvalidMode": "匯入模式非法",
     "mmReasonWriteFailed": "寫入失敗，已整批回復",
-    "mmReasonOther": "其它原因"
+    "mmReasonOther": "其它原因",
+    "onboardingRerunTitle": "重新執行首次精靈",
+    "onboardingRerunDesc": "清除「已完成」旗標並重新走一遍六步引導；已建立的金鑰與帳號不受影響。",
+    "onboardingRerun": "重新執行",
+    "onboardingRerunConfirmTitle": "要重新走一遍首次精靈嗎？",
+    "onboardingRerunConfirmDesc": "會清除庫內的完成旗標並立即開啟精靈；不會刪除任何金鑰或帳號。",
+    "onboardingRerunDone": "已重設，精靈已開啟"
   },
   "phrases": {
     "请求失败": "請求失敗",
@@ -1854,6 +1865,8 @@
     "healthNone": "未檢測",
     "ready": "就緒",
     "needsConfig": "需要設定",
+    "credentialInvalidated": "憑據已失效",
+    "repasteCredential": "重新貼上憑據",
     "enabledUnavailable": "已啟用 · 不可用",
     "enabledButUnavailable": "已啟用，但目前不可用：缺 {requires}",
     "requiresPrefix": "尚缺：",
@@ -2024,5 +2037,133 @@
     "importPreviewDesc": "試算：將新增 {added} 列、略過 {skipped} 列、{errors} 個錯誤。確認後寫入。",
     "importConfirm": "匯入",
     "importDone": "已匯入：新增 {added}、略過 {skipped}"
+  },
+  "onboarding": {
+    "title": "首次啟動精靈",
+    "desc": "六步走完「帳號 → 服務商 → 憑證 → 自檢 → 真實請求 → 金鑰」；每一步都能跳過，隨時關掉也不會打斷正常使用。",
+    "progress": "第 {n}/{total} 步",
+    "next": "下一步",
+    "prev": "上一步",
+    "skip": "跳過這一步",
+    "later": "稍後再說",
+    "finish": "完成精靈",
+    "skipMarked": "已跳過這一步，還差什麼會記在首頁待辦裡",
+    "step": {
+      "account": {
+        "title": "管理員帳號",
+        "desc": "確認目前登入的是管理員，並自查密碼強度。"
+      },
+      "provider": {
+        "title": "選服務商",
+        "desc": "先挑一家最容易跑通的；示範上游已內建，無需外部帳號。"
+      },
+      "credential": {
+        "title": "填憑證",
+        "desc": "為選定的服務商加入帳號或憑證；示範上游直接使用內建帳號。"
+      },
+      "selfcheck": {
+        "title": "連通性自檢",
+        "desc": "跑一次一鍵探測，確認控制面能連上上游。"
+      },
+      "smoke": {
+        "title": "真實請求",
+        "desc": "用一把新金鑰真實呼叫一次閘道，確認回傳 200。"
+      },
+      "key": {
+        "title": "金鑰與範例",
+        "desc": "拿到第一把金鑰和可直接複製的 curl 範例。"
+      }
+    },
+    "account": {
+      "user": "目前使用者",
+      "role": "角色",
+      "admin": "管理員",
+      "passwordLabel": "密碼強度自查（選填）",
+      "passwordHint": "輸入剛才設定的密碼",
+      "passwordLocal": "僅在本機評估，不會傳送或儲存",
+      "passwordScore_0": "還沒輸入",
+      "passwordScore_1": "偏弱：至少 8 碼，並混用大小寫、數字與符號",
+      "passwordScore_2": "一般：再長一些或補上符號更穩妥",
+      "passwordScore_3": "良好：長度與字元種類都不錯",
+      "passwordScore_4": "強：已達到常見強度要求"
+    },
+    "provider": {
+      "recommend": "推薦先跑通",
+      "readyHint": "只需填憑證即可呼叫"
+    },
+    "credential": {
+      "demoNote": "示範上游已內建帳號，無需匯入即可直接呼叫。",
+      "openImport": "開啟匯入表單",
+      "imported": "已匯入帳號",
+      "notReady": "該服務商還缺：{requires}。現在儲存也能入庫，但在补齐前不會生效。"
+    },
+    "selfcheck": {
+      "run": "開始自檢",
+      "running": "偵測中…",
+      "ok": "自檢通過",
+      "fail": "自檢失敗",
+      "none": "還沒跑過自檢。"
+    },
+    "smoke": {
+      "model": "模型名稱",
+      "run": "發一條真實請求",
+      "running": "請求中…",
+      "ok": "請求成功（HTTP {status}）",
+      "fail": "請求失敗（HTTP {status}）"
+    },
+    "key": {
+      "label": "你的第一把閘道金鑰",
+      "once": "明文只顯示這一次，之後只能在金鑰頁看到前綴。",
+      "copy": "複製",
+      "copied": "已複製",
+      "curl": "呼叫範例（curl）",
+      "createFirst": "還沒建立金鑰；第 5 步發請求時會自動建立一把。"
+    },
+    "todo": {
+      "title": "首次啟動精靈未完成",
+      "desc": "不用現在做完；還差的項目列在下面，點「繼續精靈」隨時接著走。",
+      "continue": "繼續精靈",
+      "done": "精靈已完成"
+    },
+    "missing": {
+      "account": "未確認管理員帳號與密碼強度",
+      "provider": "還沒選定服務商",
+      "credential": "還沒加入帳號或憑證",
+      "selfcheck": "還沒跑連通性自檢",
+      "smoke": "還沒用金鑰真實呼叫一次",
+      "key": "還沒拿到可用的第一把金鑰"
+    }
+  },
+  "configTransfer": {
+    "title": "設定與帳號打包",
+    "desc": "匯出服務商設定、帳號清單與憑證；預設不含明文憑證。",
+    "includeSecrets": "匯出時包含明文憑證（危險）",
+    "includeSecretsWarn": "←僅供遷移，勿提交/外傳",
+    "download": "匯出",
+    "downloading": "匯出中…",
+    "downloaded": "已開始下載",
+    "pickFile": "選擇匯入檔案",
+    "fileHint": "先預覽，確認後才寫入資料庫",
+    "noFile": "尚未選擇匯入檔案",
+    "noFileDesc": "選擇 JSON 後會先跑 dry-run 預檢，列出新增/覆蓋/跳過/失敗四類。",
+    "planning": "預檢中…",
+    "retry": "重新預檢",
+    "invalidFile": "檔案不是合法 JSON 或缺少必要欄位",
+    "reportTitle": "預檢報告",
+    "create": "會新增",
+    "overwrite": "會覆蓋",
+    "skip": "會跳過",
+    "fail": "會失敗",
+    "failAt": "第{index}條 {column} — {reason}",
+    "modeLabel": "匯入模式：",
+    "modeMerge": "merge（同名保留）",
+    "modeOverwrite": "overwrite（以檔案為準）",
+    "apply": "執行匯入",
+    "applying": "匯入中…",
+    "applied": "已匯入 {n} 筆",
+    "confirmTitle": "確認覆蓋匯入？",
+    "confirmWarn": "overwrite 會覆蓋同鍵的設定與帳號，但不會刪除檔案中沒有的紀錄。",
+    "confirmApply": "確認匯入",
+    "total": "本次預檢 {n} 筆"
   }
 }

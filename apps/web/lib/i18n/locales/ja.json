@@ -12,6 +12,7 @@
     "share": "共有",
     "manualCopy": "長押しで選択して手動でコピーできます",
     "close": "閉じる",
+    "tableScrollHint": "表が画面より広いため、左右にスクロールするとすべての列を確認できます",
     "loading": "読み込み中…",
     "listSeparator": "、",
     "prevPage": "前のページ",
@@ -267,6 +268,8 @@
     "enabledOn": "有効",
     "enabledOff": "無効",
     "importNotReadyWarning": "このプロバイダーは未準備です：{requires} が不足しています。保存しても、現在の状態ではアカウントは機能しません。",
+    "importCredentialInvalidated": "「{provider}」の上流認証情報が無効です（{reason}）。アカウントを取り込む前に認証情報を再貼り付けしてください。",
+    "repasteProvider": "再貼り付けへ",
     "upstreamUnavailable": "上流利用不可",
     "managed_sidecar": "このプロバイダーのアカウントは sidecar プロセス自身で管理しており、本ページでは追加・削除できません。sidecar の管理コンソールで設定し、その sidecar の手順に従って再起動すると反映されます。",
     "opsUnavailable": "プロバイダーの機能取得に失敗したため、関連する操作は非表示です。",
@@ -529,7 +532,8 @@
     "batchNoReason": "バックエンドから理由が返されませんでした",
     "batchTooMany": "1 回につき最大 {max} 件です。選択を減らしてください",
     "batchSelectRow": "{name} を選択",
-    "batchLoadNote": "操作後に一覧を再取得しました"
+    "batchLoadNote": "操作後に一覧を再取得しました",
+    "badgeFromWizard": "ウィザード作成"
   },
   "logs": {
     "rowCacheHit": "キャッシュ命中トークン",
@@ -654,6 +658,7 @@
     "loginEmpty": "サインイン失敗はありません",
     "loginEmptyDesc": "期間内に失敗したサインインはありません",
     "auditLogsClear": "ログを消去しました",
+    "auditLogsExport": "ログをエクスポート",
     "clearTitle": "ログイン失敗回数の消去",
     "clearOpen": "失敗回数を消去",
     "clearRow": "消去",
@@ -1397,7 +1402,13 @@
     "mmReasonAborted": "他の不正項目により全体中止",
     "mmReasonInvalidMode": "インポートモードが不正",
     "mmReasonWriteFailed": "書き込み失敗、全体をロールバック済み",
-    "mmReasonOther": "その他の理由"
+    "mmReasonOther": "その他の理由",
+    "onboardingRerunTitle": "初回セットアップを再実行",
+    "onboardingRerunDesc": "「完了」フラグを消して 6 ステップをもう一度やり直します。既存のキーとアカウントは影響を受けません。",
+    "onboardingRerun": "再実行",
+    "onboardingRerunConfirmTitle": "初回セットアップをやり直しますか？",
+    "onboardingRerunConfirmDesc": "保存済みの完了フラグを消して、すぐにウィザードを開きます。キーやアカウントは削除されません。",
+    "onboardingRerunDone": "リセットしました。ウィザードを開きました"
   },
   "phrases": {
     "请求失败": "リクエストに失敗しました",
@@ -1854,6 +1865,8 @@
     "healthNone": "未確認",
     "ready": "準備完了",
     "needsConfig": "設定が必要",
+    "credentialInvalidated": "認証情報が無効",
+    "repasteCredential": "認証情報を再貼り付け",
     "enabledUnavailable": "有効・利用不可",
     "enabledButUnavailable": "有効にしましたが、現在は利用できません：{requires} が不足",
     "requiresPrefix": "必要な設定: ",
@@ -2024,5 +2037,133 @@
     "importPreviewDesc": "ドライラン: 追加 {added} 行、スキップ {skipped} 行、エラー {errors} 件。確定すると書き込みます。",
     "importConfirm": "取り込む",
     "importDone": "取り込み完了: {added} 追加、{skipped} スキップ"
+  },
+  "onboarding": {
+    "title": "初回セットアップ",
+    "desc": "6 ステップで「アカウント → プロバイダー → 資格情報 → 疎通確認 → 実リクエスト → キー」を一通り。各ステップはスキップでき、閉じても通常利用は妨げません。",
+    "progress": "ステップ {n}/{total}",
+    "next": "次へ",
+    "prev": "戻る",
+    "skip": "このステップをスキップ",
+    "later": "後で",
+    "finish": "セットアップ完了",
+    "skipMarked": "スキップしました。不足分はダッシュボードの ToDo に表示されます。",
+    "step": {
+      "account": {
+        "title": "管理者アカウント",
+        "desc": "管理者でログインしていることを確認し、パスワード強度を自己確認します。"
+      },
+      "provider": {
+        "title": "プロバイダー選択",
+        "desc": "最も簡単なものから。デモ上流は内蔵済みで外部アカウント不要です。"
+      },
+      "credential": {
+        "title": "資格情報を入力",
+        "desc": "選んだプロバイダーのアカウント／資格情報を追加します。デモは内蔵アカウントを使用。"
+      },
+      "selfcheck": {
+        "title": "疎通確認",
+        "desc": "ワンクリックで上流に到達できるか確認します。"
+      },
+      "smoke": {
+        "title": "実リクエスト",
+        "desc": "新しいキーでゲートウェイを 1 回呼び、200 を確認します。"
+      },
+      "key": {
+        "title": "キーとサンプル",
+        "desc": "最初のキーとコピー可能な curl サンプルを取得します。"
+      }
+    },
+    "account": {
+      "user": "ログイン中",
+      "role": "ロール",
+      "admin": "管理者",
+      "passwordLabel": "パスワード強度チェック（任意）",
+      "passwordHint": "設定したパスワードを入力",
+      "passwordLocal": "端末内のみで評価し、送信も保存もしません",
+      "passwordScore_0": "未入力",
+      "passwordScore_1": "弱い：8 文字以上で大小英字・数字・記号を混在",
+      "passwordScore_2": "普通：長さを増やすか記号を追加",
+      "passwordScore_3": "良好：長さと文字種は十分",
+      "passwordScore_4": "強い：一般的な要件を満たします"
+    },
+    "provider": {
+      "recommend": "まずはこれ",
+      "readyHint": "資格情報だけで利用可"
+    },
+    "credential": {
+      "demoNote": "デモ上流にはアカウントが内蔵されており、インポート不要です。",
+      "openImport": "インポート画面を開く",
+      "imported": "アカウントをインポート済み",
+      "notReady": "不足：{requires}。保存は可能ですが、補完まで有効になりません。"
+    },
+    "selfcheck": {
+      "run": "確認を開始",
+      "running": "確認中…",
+      "ok": "確認成功",
+      "fail": "確認失敗",
+      "none": "まだ実行していません。"
+    },
+    "smoke": {
+      "model": "モデル名",
+      "run": "実リクエストを送信",
+      "running": "送信中…",
+      "ok": "成功（HTTP {status}）",
+      "fail": "失敗（HTTP {status}）"
+    },
+    "key": {
+      "label": "最初のゲートウェイキー",
+      "once": "平文はここでのみ表示。以降はキー一覧で接頭辞だけ確認できます。",
+      "copy": "コピー",
+      "copied": "コピーしました",
+      "curl": "呼び出し例（curl）",
+      "createFirst": "キー未作成。ステップ 5 の送信時に自動作成されます。"
+    },
+    "todo": {
+      "title": "初回セットアップ未完了",
+      "desc": "今すぐ完了しなくて大丈夫です。不足分は下に表示され、「続ける」でいつでも再開できます。",
+      "continue": "セットアップを続ける",
+      "done": "セットアップ完了"
+    },
+    "missing": {
+      "account": "管理者アカウントとパスワード強度が未確認",
+      "provider": "プロバイダーが未選択",
+      "credential": "アカウント／資格情報が未追加",
+      "selfcheck": "疎通確認が未実行",
+      "smoke": "キーでの実呼び出しが未実施",
+      "key": "利用可能な最初のキーが未取得"
+    }
+  },
+  "configTransfer": {
+    "title": "設定とアカウントのバンドル",
+    "desc": "プロバイダー設定・アカウント一覧・資格情報をエクスポート。既定では平文の資格情報を含みません。",
+    "includeSecrets": "平文の資格情報を含める（危険）",
+    "includeSecretsWarn": "←移行専用、コミット・共有禁止",
+    "download": "エクスポート",
+    "downloading": "エクスポート中…",
+    "downloaded": "ダウンロードを開始しました",
+    "pickFile": "インポートファイルを選択",
+    "fileHint": "先にプレビュー、確認後に書き込み",
+    "noFile": "インポートファイル未選択",
+    "noFileDesc": "選択した JSON はまず dry-run 検証され、新規/上書き/スキップ/失敗の四種類を表示します。",
+    "planning": "検証中…",
+    "retry": "再検証",
+    "invalidFile": "ファイルが有効な JSON でないか、必須項目が欠けています",
+    "reportTitle": "検証レポート",
+    "create": "新規",
+    "overwrite": "上書き",
+    "skip": "スキップ",
+    "fail": "失敗",
+    "failAt": "{index} 行目 {column} — {reason}",
+    "modeLabel": "インポートモード：",
+    "modeMerge": "merge（同名は既存を保持）",
+    "modeOverwrite": "overwrite（ファイル優先）",
+    "apply": "インポート実行",
+    "applying": "インポート中…",
+    "applied": "{n} 件をインポートしました",
+    "confirmTitle": "上書きインポートを確認？",
+    "confirmWarn": "overwrite は同一キーの設定とアカウントを上書きしますが、ファイルにないレコードは削除しません。",
+    "confirmApply": "インポートを確認",
+    "total": "今回の検証 {n} 件"
   }
 }

@@ -12,6 +12,7 @@
     "share": "공유",
     "manualCopy": "길게 눌러 선택한 뒤 직접 복사할 수 있습니다",
     "close": "닫기",
+    "tableScrollHint": "표가 화면보다 넓습니다. 좌우로 스크롤하면 모든 열을 볼 수 있습니다",
     "loading": "불러오는 중…",
     "listSeparator": ", ",
     "prevPage": "이전 페이지",
@@ -267,6 +268,8 @@
     "enabledOn": "사용 중",
     "enabledOff": "사용 안 함",
     "importNotReadyWarning": "이 공급자는 아직 준비되지 않았습니다: {requires} 누락. 저장해도 현재 상태에서는 계정이 작동하지 않습니다.",
+    "importCredentialInvalidated": "「{provider}」의 업스트림 자격 증명이 무효입니다({reason}). 계정을 가져오기 전에 자격 증명을 다시 붙여넣으세요.",
+    "repasteProvider": "다시 붙여넣기",
     "upstreamUnavailable": "업스트림 사용 불가",
     "managed_sidecar": "이 제공자의 계정은 sidecar 프로세스 자체에서 관리하며 이 페이지에서 추가·삭제할 수 없습니다. sidecar 콘솔에서 설정한 뒤 해당 sidecar를 재시작해야 반영됩니다.",
     "opsUnavailable": "제공자 기능 조회에 실패하여 관련 작업이 숨겨졌습니다.",
@@ -529,7 +532,8 @@
     "batchNoReason": "백엔드가 사유를 반환하지 않았습니다",
     "batchTooMany": "요청당 최대 {max}개입니다. 선택을 줄이세요",
     "batchSelectRow": "{name} 선택",
-    "batchLoadNote": "작업 후 목록을 다시 불러왔습니다"
+    "batchLoadNote": "작업 후 목록을 다시 불러왔습니다",
+    "badgeFromWizard": "마법사에서 생성"
   },
   "logs": {
     "rowCacheHit": "캐시 적중 토큰",
@@ -654,6 +658,7 @@
     "loginEmpty": "로그인 실패가 없습니다",
     "loginEmptyDesc": "시간 창 내 실패한 로그인 시도가 없습니다",
     "auditLogsClear": "로그를 지웠습니다",
+    "auditLogsExport": "로그 내보내기",
     "clearTitle": "로그인 실패 횟수 지우기",
     "clearOpen": "실패 횟수 지우기",
     "clearRow": "지우기",
@@ -1397,7 +1402,13 @@
     "mmReasonAborted": "다른 잘못된 항목으로 전체 중단",
     "mmReasonInvalidMode": "가져오기 모드가 잘못됨",
     "mmReasonWriteFailed": "쓰기 실패, 전체 되돌림",
-    "mmReasonOther": "기타 이유"
+    "mmReasonOther": "기타 이유",
+    "onboardingRerunTitle": "처음 실행 설정 다시 실행",
+    "onboardingRerunDesc": "\"완료\" 플래그를 지우고 6단계를 다시 진행합니다. 기존 키와 계정은 그대로 유지됩니다.",
+    "onboardingRerun": "다시 실행",
+    "onboardingRerunConfirmTitle": "처음 실행 설정을 다시 진행할까요?",
+    "onboardingRerunConfirmDesc": "저장된 완료 플래그를 지우고 즉시 마법사를 엽니다. 키나 계정은 삭제되지 않습니다.",
+    "onboardingRerunDone": "초기화했습니다. 마법사를 열었습니다"
   },
   "phrases": {
     "请求失败": "요청 실패",
@@ -1854,6 +1865,8 @@
     "healthNone": "미점검",
     "ready": "준비됨",
     "needsConfig": "설정 필요",
+    "credentialInvalidated": "자격 증명 무효",
+    "repasteCredential": "자격 증명 다시 붙여넣기",
     "enabledUnavailable": "사용 중 · 사용 불가",
     "enabledButUnavailable": "사용 설정했지만 현재 사용할 수 없습니다: {requires} 누락",
     "requiresPrefix": "아직 필요: ",
@@ -2024,5 +2037,133 @@
     "importPreviewDesc": "드라이런: {added}개 행 추가, {skipped}개 건너뜀, {errors}개 오류. 확인하면 기록합니다.",
     "importConfirm": "가져오기",
     "importDone": "가져왔습니다: {added}개 추가, {skipped}개 건너뜀"
+  },
+  "onboarding": {
+    "title": "처음 실행 설정",
+    "desc": "6단계로 계정 → 공급자 → 자격 증명 → 연결 확인 → 실제 요청 → 키를 마칩니다. 어느 단계든 건너뛸 수 있고, 창을 닫아도 정상 사용을 막지 않습니다.",
+    "progress": "{total}단계 중 {n}단계",
+    "next": "다음",
+    "prev": "이전",
+    "skip": "이 단계 건너뛰기",
+    "later": "나중에",
+    "finish": "설정 완료",
+    "skipMarked": "건너뛰었습니다. 남은 항목은 대시보드 할 일에 표시됩니다.",
+    "step": {
+      "account": {
+        "title": "관리자 계정",
+        "desc": "관리자로 로그인했는지 확인하고 비밀번호 강도를 자체 점검합니다."
+      },
+      "provider": {
+        "title": "공급자 선택",
+        "desc": "가장 쉬운 것부터. 데모 업스트림은 내장되어 외부 계정이 필요 없습니다."
+      },
+      "credential": {
+        "title": "자격 증명 입력",
+        "desc": "선택한 공급자의 계정/자격 증명을 추가합니다. 데모는 내장 계정을 사용합니다."
+      },
+      "selfcheck": {
+        "title": "연결 확인",
+        "desc": "원클릭 점검으로 제어면이 업스트림에 도달하는지 확인합니다."
+      },
+      "smoke": {
+        "title": "실제 요청",
+        "desc": "새 키로 게이트웨이를 한 번 호출해 200을 확인합니다."
+      },
+      "key": {
+        "title": "키와 예시",
+        "desc": "첫 키와 바로 복사할 수 있는 curl 예시를 받습니다."
+      }
+    },
+    "account": {
+      "user": "로그인 계정",
+      "role": "역할",
+      "admin": "관리자",
+      "passwordLabel": "비밀번호 강도 점검(선택)",
+      "passwordHint": "설정한 비밀번호를 입력",
+      "passwordLocal": "기기에서만 평가하며 전송·저장하지 않습니다",
+      "passwordScore_0": "아직 입력 안 됨",
+      "passwordScore_1": "약함: 8자 이상, 대소문자·숫자·기호 혼용 권장",
+      "passwordScore_2": "보통: 더 길게 또는 기호 추가",
+      "passwordScore_3": "양호: 길이와 문자 종류가 충분",
+      "passwordScore_4": "강함: 일반 요구사항 충족"
+    },
+    "provider": {
+      "recommend": "먼저 권장",
+      "readyHint": "자격 증명만 있으면 호출 가능"
+    },
+    "credential": {
+      "demoNote": "데모 업스트림에는 계정이 내장되어 가져올 필요가 없습니다.",
+      "openImport": "가져오기 양식 열기",
+      "imported": "계정 가져옴",
+      "notReady": "아직 부족: {requires}. 저장은 되지만 보완 전에는 적용되지 않습니다."
+    },
+    "selfcheck": {
+      "run": "점검 시작",
+      "running": "점검 중…",
+      "ok": "점검 통과",
+      "fail": "점검 실패",
+      "none": "아직 점검하지 않았습니다."
+    },
+    "smoke": {
+      "model": "모델 이름",
+      "run": "실제 요청 보내기",
+      "running": "요청 중…",
+      "ok": "요청 성공(HTTP {status})",
+      "fail": "요청 실패(HTTP {status})"
+    },
+    "key": {
+      "label": "첫 게이트웨이 키",
+      "once": "평문은 지금만 표시되며 이후에는 키 페이지에서 접두사만 보입니다.",
+      "copy": "복사",
+      "copied": "복사됨",
+      "curl": "호출 예시(curl)",
+      "createFirst": "키가 아직 없습니다. 단계 5에서 요청을 보내면 자동 생성됩니다."
+    },
+    "todo": {
+      "title": "처음 실행 설정이 완료되지 않음",
+      "desc": "지금 다 마칠 필요는 없습니다. 남은 항목은 아래에 표시되며 「계속」을 누르면 이어갑니다.",
+      "continue": "설정 계속",
+      "done": "설정 완료"
+    },
+    "missing": {
+      "account": "관리자 계정과 비밀번호 강도 미확인",
+      "provider": "공급자 미선택",
+      "credential": "계정/자격 증명 미추가",
+      "selfcheck": "연결 확인 미실행",
+      "smoke": "키로 실제 호출 미실시",
+      "key": "사용 가능한 첫 키 미확보"
+    }
+  },
+  "configTransfer": {
+    "title": "설정·계정 번들",
+    "desc": "프로바이더 설정, 계정 목록, 자격 증명을 내보냅니다. 기본적으로 평문 자격 증명은 제외됩니다.",
+    "includeSecrets": "평문 자격 증명 포함(위험)",
+    "includeSecretsWarn": "←마이그레이션 전용, 커밋/공유 금지",
+    "download": "내보내기",
+    "downloading": "내보내는 중…",
+    "downloaded": "다운로드 시작됨",
+    "pickFile": "가져올 파일 선택",
+    "fileHint": "먼저 미리보기, 확인 후 기록",
+    "noFile": "가져올 파일이 선택되지 않음",
+    "noFileDesc": "선택한 JSON은 먼저 dry-run 검증되어 신규/덮어쓰기/건너뛰기/실패 네 가지로 표시됩니다.",
+    "planning": "검증 중…",
+    "retry": "다시 검증",
+    "invalidFile": "파일이 유효한 JSON이 아니거나 필수 항목이 없습니다",
+    "reportTitle": "검증 보고서",
+    "create": "신규",
+    "overwrite": "덮어쓰기",
+    "skip": "건너뛰기",
+    "fail": "실패",
+    "failAt": "{index}번째 {column} — {reason}",
+    "modeLabel": "가져오기 모드:",
+    "modeMerge": "merge(동일 이름은 기존 유지)",
+    "modeOverwrite": "overwrite(파일 우선)",
+    "apply": "가져오기 실행",
+    "applying": "가져오는 중…",
+    "applied": "{n}건 가져옴",
+    "confirmTitle": "덮어쓰기 가져오기 확인?",
+    "confirmWarn": "overwrite는 동일 키의 설정과 계정을 덮어쓰지만 파일에 없는 레코드는 삭제하지 않습니다.",
+    "confirmApply": "가져오기 확인",
+    "total": "이번 검증 {n}건"
   }
 }
