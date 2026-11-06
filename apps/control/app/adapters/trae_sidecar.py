@@ -7,10 +7,10 @@ sidecar 进程里自己管理。unified-2api 只做透明转发。
 
 from ..config import Settings
 from .base import ProviderSpec
-from .openai_compat import OpenAICompatAdapter
+from .sidecar_link import SidecarLink
 
 
-class TraeSidecarAdapter(OpenAICompatAdapter):
+class TraeSidecarAdapter(SidecarLink):
     spec = ProviderSpec(
         id="trae_sidecar",
         name="Trae Solo+Work (trae2api)",

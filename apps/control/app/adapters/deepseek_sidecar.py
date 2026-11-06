@@ -12,13 +12,13 @@ from typing import Any
 
 from ..config import Settings
 from .base import ProviderError, ProviderSpec
-from .openai_compat import OpenAICompatAdapter
+from .sidecar_link import SidecarLink
 
 # 限制声明与 501 报错共用这一句，两处措辞必须一致
 MESSAGES_STREAM_LIMIT = "Deepseek2Go sidecar 只支持非流式 messages"
 
 
-class DeepseekSidecarAdapter(OpenAICompatAdapter):
+class DeepseekSidecarAdapter(SidecarLink):
     spec = ProviderSpec(
         id="deepseek_sidecar",
         name="DeepSeek (Deepseek2Go)",
@@ -55,7 +55,7 @@ class DeepseekSidecarAdapter(OpenAICompatAdapter):
         """sidecar 的 Anthropic 端点路径非标准（/anthropic/v1/messages），做一层重写。"""
         if stream:
             raise ProviderError(501, MESSAGES_STREAM_LIMIT)
-        return await self._client().forward("/anthropic/v1/messages", payload, stream=False)
+        return await self._sidecar_forward("/anthropic/v1/messages", payload, stream=False)
 
 
 def build(settings: Settings, base_url: str = "") -> DeepseekSidecarAdapter:

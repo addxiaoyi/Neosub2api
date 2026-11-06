@@ -12,10 +12,10 @@ from typing import Any
 
 from ..config import Settings
 from .base import ProviderSpec
-from .openai_compat import OpenAICompatAdapter
+from .sidecar_link import SidecarLink
 
 
-class QoderSidecarAdapter(OpenAICompatAdapter):
+class QoderSidecarAdapter(SidecarLink):
     spec = ProviderSpec(
         id="qoder_sidecar",
         name="Qoder Switch (PolyForm-NC)",
@@ -50,11 +50,11 @@ class QoderSidecarAdapter(OpenAICompatAdapter):
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         """标准 Anthropic 路径 /v1/messages，非流式与流式都支持。"""
-        return await self._client().forward("/v1/messages", payload, stream=stream)
+        return await self._sidecar_forward("/v1/messages", payload, stream=stream)
 
     async def responses(self, payload: dict[str, Any], *, stream: bool):
         """标准 OpenAI 路径 /v1/responses，非流式与流式都支持。"""
-        return await self._client().forward("/v1/responses", payload, stream=stream)
+        return await self._sidecar_forward("/v1/responses", payload, stream=stream)
 
 
 def build(settings: Settings, base_url: str = "") -> QoderSidecarAdapter:

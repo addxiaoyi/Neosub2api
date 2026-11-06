@@ -64,7 +64,8 @@ def test_sidecar_does_not_advertise_unimplemented_account_ops(admin):
     assert ts["ops"]["oauth"] is False
     assert ts["ops"]["credits"] is False
     assert ts["ops"]["checkin"] is False
-    assert ts["ops"]["list"] is False
+    # 账号列表改为只读代理（GET sidecar /api/accounts），其余写操作仍未实现
+    assert ts["ops"]["list"] is True
     assert ts["managed"] == "sidecar"
 
 

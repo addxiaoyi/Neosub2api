@@ -13,10 +13,12 @@ from typing import Any
 
 from ..config import Settings
 from .base import ProviderSpec, stub_capabilities
-from .openai_compat import OpenAICompatAdapter
+from .sidecar_link import SidecarLink
 
 
-class CodarSidecarAdapter(OpenAICompatAdapter):
+class CodarSidecarAdapter(SidecarLink):
+    requires_api_key = True
+
     spec = ProviderSpec(
         id="codar_sidecar",
         name="Codar (codar2api)",
@@ -48,15 +50,15 @@ class CodarSidecarAdapter(OpenAICompatAdapter):
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         """标准 Anthropic 路径 /v1/messages；流式与非流式都由 sidecar 处理。"""
-        return await self._client().forward("/v1/messages", payload, stream=stream)
+        return await self._sidecar_forward("/v1/messages", payload, stream=stream)
 
     async def responses(self, payload: dict[str, Any], *, stream: bool):
         """OpenAI Responses 同路径透传；sidecar 端点契约见 codar2api.md:55、:283。"""
-        return await self._client().forward("/v1/responses", payload, stream=stream)
+        return await self._sidecar_forward("/v1/responses", payload, stream=stream)
 
     async def count_tokens(self, payload: dict[str, Any], *, stream: bool):
         """Anthropic token 计数透传；端点契约见 codar2api.md:57。"""
-        return await self._client().forward("/v1/messages/count_tokens", payload, stream=stream)
+        return await self._sidecar_forward("/v1/messages/count_tokens", payload, stream=stream)
 
 
 def build(settings: Settings, base_url: str = "") -> CodarSidecarAdapter:
