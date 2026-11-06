@@ -1,0 +1,6 @@
+# 行尾契约：仓库内统一存 LF，检出时按扩展名转换
+# start.sh 在 core.autocrlf=true 的机器上会被检出成 CRLF，bash 跑到
+# `set -o pipefail` 会报 invalid option name；固定成 LF 才能跨平台直跑。
+*.sh text eol=lf
+# PowerShell 侧保持 Windows 习惯行尾；仓库内仍是 LF，只影响检出
+*.ps1 text eol=crlf
