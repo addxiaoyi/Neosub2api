@@ -11,6 +11,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {WIZARD_KEY_NAME} from '@/lib/onboarding';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
 import {useT} from '@/lib/i18n/provider';
@@ -339,7 +340,14 @@ export default function KeysPage() {
                     />
                   </TableCell>
                 )}
-                <TableCell className={`text-sm font-medium ${isAdmin ? 'pl-1' : 'pl-4'}`}>{k.name}</TableCell>
+                <TableCell className={`text-sm font-medium ${isAdmin ? 'pl-1' : 'pl-4'}`}>
+                  {k.name}
+                  {k.name === WIZARD_KEY_NAME && (
+                    <Badge variant="secondary" className="ml-1.5 rounded-full text-[10px]">
+                      {t('keys.badgeFromWizard')}
+                    </Badge>
+                  )}
+                </TableCell>
                 <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{k.prefix}…</TableCell>
                 <TableCell>
                   {!k.enabled ? (

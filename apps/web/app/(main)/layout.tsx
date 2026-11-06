@@ -1,12 +1,15 @@
 'use client';
 
-import {Children, memo, useEffect} from 'react';
+import {Children, memo, useEffect, useState} from 'react';
 import {useRouter} from 'next/navigation';
 import {ManagementBar} from '@/components/common/layout/ManagementBar';
 import {LanguageToggle} from '@/components/common/layout/LanguageToggle';
 import {RealmToggle} from '@/components/common/layout/RealmToggle';
+import {OnboardingWizard} from '@/components/common/onboarding/OnboardingWizard';
 import {RealmProvider} from '@/lib/realm-context';
 import {useAuth} from '@/lib/auth-context';
+import {onboardingApi} from '@/lib/api';
+import {ONBOARDING_OPEN_EVENT, isOnboardingSnoozed} from '@/lib/onboarding';
 
 const MemoizedManagementBar = memo(ManagementBar);
 
@@ -29,11 +32,37 @@ export default function MainLayout({
 }) {
   const {me, loading} = useAuth();
   const router = useRouter();
+  const [wizardOpen, setWizardOpen] = useState(false);
 
   // 仅在确认未登录时跳转；不阻塞内容渲染，避免每次切页闪一下
   useEffect(() => {
     if (!loading && !me) router.replace('/login');
   }, [loading, me, router]);
+
+  // 首次进站自动打开一次：以库内标志为准，已完成的实例永远不再弹
+  useEffect(() => {
+    if (loading || !me || me.role !== 'admin') return;
+    let cancelled = false;
+    onboardingApi
+      .get()
+      .then((saved) => {
+        if (cancelled || saved.completed || isOnboardingSnoozed()) return;
+        setWizardOpen(true);
+      })
+      .catch(() => {
+        /* 读不到状态就当作不可用，不阻塞正常使用 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, me]);
+
+  // 首页待办条通过事件把向导调起来，避免再挂一层 context
+  useEffect(() => {
+    const open = () => setWizardOpen(true);
+    window.addEventListener(ONBOARDING_OPEN_EVENT, open);
+    return () => window.removeEventListener(ONBOARDING_OPEN_EVENT, open);
+  }, []);
 
   return (
     <RealmProvider>
@@ -63,6 +92,8 @@ export default function MainLayout({
           </div>
         </div>
       </main>
+      {/* 非管理员连组件都不挂载：即便有人误发事件也不会弹出 */}
+      {me?.role === 'admin' && <OnboardingWizard open={wizardOpen} onOpenChange={setWizardOpen} />}
     </RealmProvider>
   );
 }

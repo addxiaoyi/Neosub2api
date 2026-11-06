@@ -303,6 +303,22 @@ export const keyApi = {
     post<BatchKeyResponse>('/api/keys/batch', {action, ids: ids.map(String)}),
 };
 
+/* ── 首次启动向导（状态落库，前端只做展示）──────────────── */
+export type OnboardingState = {
+  completed: boolean;
+  current_step: number;
+  skipped_steps: string[];
+  updated_at: number | null;
+};
+
+export const onboardingApi = {
+  get: () => get<OnboardingState>('/api/onboarding'),
+  save: (patch: Partial<Pick<OnboardingState, 'completed' | 'current_step' | 'skipped_steps'>>) =>
+    post<OnboardingState>('/api/onboarding', patch),
+  /** 仅用于「重新走一遍向导」；完成后标志在库内，重建库也会自然重置 */
+  reset: () => post<OnboardingState>('/api/onboarding/reset'),
+};
+
 /* ── 访问令牌（管理面作用域化 API Token）──────────────────
  * 与 keyApi 是两套：那个是给下游调模型的网关密钥，这个授权管理接口。
  * 明文只在创建时返回一次。 */
@@ -665,4 +681,49 @@ export const promptApi = {
   update: (id: number, body: Partial<PromptInput>) =>
     patch<PromptDetail>(`/api/prompts/${id}`, body),
   remove: (id: number) => del<{ok: boolean}>(`/api/prompts/${id}`),
+};
+
+/* ── 配置与账号打包导入导出（admin）──────────────────── */
+export type ConfigTransferEntry = {
+  path: string;
+  key: string;
+  action: string;
+  reason: string;
+  diff: string[];
+};
+
+export type ConfigTransferIssue = {
+  path: string;
+  index: number;
+  column: string;
+  level: string;
+  reason: string;
+};
+
+export type ConfigTransferReport = {
+  mode: string;
+  create: ConfigTransferEntry[];
+  overwrite: ConfigTransferEntry[];
+  skip: ConfigTransferEntry[];
+  fail: ConfigTransferEntry[];
+  issues: ConfigTransferIssue[];
+  totals: {create: number; overwrite: number; skip: number; fail: number; issues: number};
+  ok: boolean;
+  written: number;
+};
+
+export const configTransferApi = {
+  /** 导出：responseType=blob，前端自行触发下载；X-Contains-Secrets 头表示是否含明文 */
+  download: (includeSecrets: boolean) =>
+    http.get<Blob>('/api/config/export', {params: {include_secrets: includeSecrets}, responseType: 'blob'}),
+  /** 预检（dry-run）：只出报告，不落库 */
+  plan: (bundle: unknown, mode: 'merge' | 'overwrite') =>
+    post<ConfigTransferReport>('/api/config/import/plan', {bundle, mode}),
+  /** 真正写库；校验失败返 400，响应体带 report */
+  apply: async (bundle: unknown, mode: 'merge' | 'overwrite') => {
+    const r = await http.post<ConfigTransferReport>(
+      '/api/config/import', {bundle, mode, confirm: true}, {validateStatus: () => true},
+    );
+    return {status: r.status, data: r.data};
+  },
 };

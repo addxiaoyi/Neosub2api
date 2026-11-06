@@ -31,11 +31,13 @@ from .routers import (
     auth,
     backup,
     backup_remote,
+    config_transfer,
     grok,
     health,
     keys,
     logs,
     models,
+    onboarding,
     pricing,
     prompts,
     provider_credentials,
@@ -319,7 +321,8 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
     for module in (health, auth, providers, provider_credentials, accounts, keys, tokens, models, stats, settings_router,
-                   sub2api, pricing, quota, grok, update, system, backup, backup_remote, v1, logs, prompts, security_router, qoder_sessions):
+                   sub2api, pricing, quota, grok, update, system, backup, backup_remote, config_transfer, v1, logs, prompts, security_router, qoder_sessions,
+                   onboarding):
         app.include_router(module.router)
 
     @app.get("/healthz")

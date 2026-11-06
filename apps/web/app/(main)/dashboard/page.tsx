@@ -44,6 +44,7 @@ import {
   type AvailabilityTier,
 } from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
+import {OnboardingTodo} from '@/components/common/onboarding/OnboardingTodo';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -314,6 +315,8 @@ export default function DashboardPage() {
         title={t('dashboard.title')}
         description={t('dashboard.description', {realm: realmName})}
       />
+
+      <OnboardingTodo />
 
       {loadFailed && !pending && (
         <div className="flex flex-wrap items-start justify-between gap-3 rounded-[20px] border border-destructive/30 bg-destructive/5 p-4">
