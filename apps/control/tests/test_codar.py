@@ -130,7 +130,7 @@ async def test_no_token_raises_401(fake_base: str, tmp_path: Path) -> None:
     with pytest.raises(ProviderError) as caught:
         await adapter.chat_completion({"model": "fake-chat-1"}, stream=False)
     assert caught.value.status_code == 401
-    assert "未配置账号 token" in caught.value.message
+    assert "JWT" in caught.value.message and "sidecar" in caught.value.message
 
 
 async def test_multi_token_rotation(fake_base: str, tmp_path: Path) -> None:

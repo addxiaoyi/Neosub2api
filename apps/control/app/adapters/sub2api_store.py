@@ -289,7 +289,10 @@ class QuotaStore:
         group = self.get_group(group_id)
         if group is None:
             raise ProviderError(
-                503, f"sub2api 配额分组未配置：{group_id}；先调用 /api/sub2api/groups 创建分组并加入账号"
+                503,
+                f"sub2api 缺少可用的配额分组「{group_id}」：请打开「配额」页 → 新建分组 → "
+                "在分组下添加账号（填上游地址与 api_key），保存后重试。"
+                "（技术细节：也可直接 POST /api/sub2api/groups 与 /api/sub2api/accounts）",
             )
         if not group["enabled"]:
             raise ProviderError(403, f"sub2api 分组已停用：{group_id}")

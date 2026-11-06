@@ -92,6 +92,21 @@ class Sub2ApiAdapter(ProviderAdapter):
     def store(self) -> QuotaStore:
         return self._store
 
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        group = str((options or {}).get("group") or "default").strip() or "default"
+        return "needs_config", (
+            f"账号池就绪需读取配额库：分组 {group} 有无可用账号、额度是否耗尽只能查配额页或等请求时判定；"
+            "列表渲染阶段不访问库、不探测上游，故无法判定（缺账号时请求直接 503）",
+        )
+
     def _group_id(self) -> str:
         return str(self.options.get("group") or "default").strip() or "default"
 
@@ -134,7 +149,11 @@ class Sub2ApiAdapter(ProviderAdapter):
     def _pick(self, group_id: str) -> dict[str, Any]:
         account = self._store.pick_account_credentials(group_id)
         if account is None:
-            raise ProviderError(429, f"sub2api 分组 {group_id} 账号池无可用账号（全部冷却或额度耗尽）")
+            raise ProviderError(
+                429,
+                f"sub2api 分组 {group_id} 没有可用账号：打开「配额」页 → 账号 tab → "
+                "添加账号，或清除冷却/重置额度后重试。（技术细节：POST /api/sub2api/accounts）",
+            )
         return account
 
     async def _forward(self, capability: str, payload: dict[str, Any], *, stream: bool):
@@ -242,13 +261,21 @@ class Sub2ApiAdapter(ProviderAdapter):
     async def fetch_models(self) -> list[dict[str, Any]]:
         groups = self._store.list_groups()
         if not groups:
-            raise ProviderError(503, "尚未创建配额分组（/api/sub2api/groups）")
+            raise ProviderError(
+                503,
+                "sub2api 尚未创建配额分组：请打开「配额」页 → 新建分组 → 添加账号后重试。"
+                "（技术细节：POST /api/sub2api/groups）",
+            )
         group_id = self._group_id()
         account = self._store.peek_account_credentials(group_id) if any(
             item["id"] == group_id for item in groups
         ) else None
         if account is None:
-            raise ProviderError(503, f"分组 {group_id} 无可用账号")
+            raise ProviderError(
+                503,
+                f"sub2api 分组 {group_id} 没有可用账号：请打开「配额」页 → 账号 tab → 添加账号后重试。"
+                "（技术细节：POST /api/sub2api/accounts）",
+            )
         data = await self._client(account).get_json("/v1/models")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):

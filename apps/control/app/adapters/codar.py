@@ -9,8 +9,12 @@
 """
 
 import asyncio
+import base64
+import json
 import logging
 import re
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from ..config import Settings
@@ -43,6 +47,76 @@ def _clean_token(value: Any) -> str:
     return token
 
 
+_MISSING_REASON = "尚未导入 Codar JWT"
+_MISSING_NEXT = "在 codar2api sidecar 完成扫码/短信登录后，复制账号 JWT 到这里"
+_INVALID_NEXT = "确认粘贴的是 Codar 账号 JWT，而不是其他 token 或半截字符串"
+_EXPIRED_NEXT = "重新粘贴新的 Codar JWT（可先在 codar2api sidecar 重新登录）"
+
+
+def _invalid(reason: str, next_step: str = _INVALID_NEXT) -> dict[str, Any]:
+    return {
+        "state": "invalid",
+        "expires_at": None,
+        "expires_in": None,
+        "reason": reason,
+        "next_step": next_step,
+    }
+
+
+def inspect_token(value: Any) -> dict[str, Any]:
+    """只解码不验签：Codar 私有 JWT 没有可用公钥，验签无意义。"""
+    token = _clean_token(value)
+    if not token:
+        return {
+            "state": "missing",
+            "expires_at": None,
+            "expires_in": None,
+            "reason": _MISSING_REASON,
+            "next_step": _MISSING_NEXT,
+        }
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return _invalid("不是标准 JWT（应为三段 base64url）")
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("ascii"))
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return _invalid("JWT payload 无法解码")
+    if not isinstance(data, dict):
+        return _invalid("JWT payload 不是对象")
+    exp = data.get("exp")
+    if exp is None:
+        return {
+            "state": "valid",
+            "expires_at": None,
+            "expires_in": None,
+            "reason": "JWT 未声明到期时间，只能由上游判定",
+            "next_step": "",
+        }
+    try:
+        expires_at = int(exp)
+    except (TypeError, ValueError):
+        return _invalid("JWT 的 exp 字段不是整数时间戳")
+    now = int(time.time())
+    if expires_at <= now:
+        at = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat()
+        return {
+            "state": "expired",
+            "expires_at": expires_at,
+            "expires_in": 0,
+            "reason": f"JWT 已过期（到期时间 {at}）",
+            "next_step": _EXPIRED_NEXT,
+        }
+    return {
+        "state": "valid",
+        "expires_at": expires_at,
+        "expires_in": expires_at - now,
+        "reason": "",
+        "next_step": "",
+    }
+
+
 class CodarAdapter(OpenAICompatAdapter):
     spec = ProviderSpec(
         id="codar",
@@ -62,7 +136,12 @@ class CodarAdapter(OpenAICompatAdapter):
         readiness="needs_config",
         requires=(
             "Codar 账号 JWT（扫码/短信登录仍需 codar2api sidecar）",
+            "扫码/短信登录只能走 codar2api sidecar，本页不支持；本页只导入登录后拿到的 JWT",
         ),
+        limitations={
+            "scan_login": "本页不能扫码：微信扫码/短信登录必须在 codar2api sidecar 完成，再把拿到的 JWT 导入这里",
+            "checkin": "每日签到、领取免费模型只在 codar2api sidecar 提供，本页不提供",
+        },
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -89,6 +168,38 @@ class CodarAdapter(OpenAICompatAdapter):
             if token and token not in tokens:
                 tokens.append(token)
         return tokens
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        options = options or {}
+        collected: list[Any] = [credential, options.get("token")]
+        raw = options.get("tokens")
+        if isinstance(raw, str):
+            collected.extend(_TOKEN_SPLIT.split(raw))
+        elif isinstance(raw, (list, tuple)):
+            collected.extend(raw)
+        tokens = [token for token in (_clean_token(item) for item in collected) if token]
+        if not tokens:
+            missing = [
+                "Codar 账号 JWT（服务商页 api_key 或 options.tokens；扫码/短信登录仍需 codar2api sidecar）"
+            ]
+            if credential_problem:
+                missing.append(credential_problem)
+            return "needs_config", tuple(missing)
+        states = [inspect_token(token) for token in tokens]
+        if any(state["state"] == "valid" for state in states):
+            return "ready", ()
+        if all(state["state"] == "expired" for state in states):
+            return "needs_config", (f"Codar 账号 JWT 已过期：{states[0]['reason']}；{_EXPIRED_NEXT}",)
+        bad = next(state for state in states if state["state"] != "valid")
+        return "needs_config", (f"Codar 账号 JWT 无法使用：{bad['reason']}；{_INVALID_NEXT}",)
 
     async def _rotation(self) -> list[int]:
         """按配置指纹同步 token 列表，返回本次请求的轮询顺序（索引）。"""
@@ -172,7 +283,8 @@ class CodarAdapter(OpenAICompatAdapter):
         if not order:
             raise ProviderError(
                 401,
-                "Codar 未配置账号 token：请在服务商页 api_key 或 options.tokens 填入 Codar JWT",
+                "Codar 尚未导入账号 JWT：请在服务商页凭据库粘贴 Codar 账号 JWT；"
+                "扫码/短信登录只能走 codar2api sidecar，本页不支持。",
             )
         attempts = 0
         while order and attempts < MAX_TOKEN_ATTEMPTS:
@@ -197,14 +309,18 @@ class CodarAdapter(OpenAICompatAdapter):
             if reply.status_code != 401:
                 return reply
             await reply.aclose()
-        raise ProviderError(401, "Codar token 全部失效，且续期未成功")
+        raise ProviderError(
+            401,
+            "Codar JWT 全部失效：过期请重新粘贴新的 JWT；无效请确认粘贴的是 Codar 账号 JWT（不是其他 token）。",
+        )
 
     async def _json_with_tokens(self, path: str) -> dict[str, Any]:
         order = await self._rotation()
         if not order:
             raise ProviderError(
                 401,
-                "Codar 未配置账号 token：请在服务商页 api_key 或 options.tokens 填入 Codar JWT",
+                "Codar 尚未导入账号 JWT：请在服务商页凭据库粘贴 Codar 账号 JWT；"
+                "扫码/短信登录只能走 codar2api sidecar，本页不支持。",
             )
         attempts = 0
         last_error: ProviderError | None = None
@@ -230,7 +346,14 @@ class CodarAdapter(OpenAICompatAdapter):
                     last_error = inner
                     if inner.status_code != 401:
                         raise
-        raise last_error or ProviderError(401, "Codar token 全部失效，且续期未成功")
+        raise last_error or ProviderError(
+            401,
+            "Codar JWT 全部失效：过期请重新粘贴新的 JWT；无效请确认粘贴的是 Codar 账号 JWT（不是其他 token）。",
+        )
+
+    def validate_token(self, token: str = "") -> dict[str, Any]:
+        """本地判断 JWT 有效/过期/无效/未配置；不发起网络请求。"""
+        return inspect_token(token)
 
     async def fetch_models(self) -> list[dict[str, Any]]:
         data = await self._json_with_tokens(CATALOG_PATH)
