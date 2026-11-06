@@ -4,8 +4,32 @@ Neosub2api 把多家 2api / 注册上游收敛成**一个控制面 + 14 家 prov
 
 - 控制面：FastAPI + SQLite，负责账号、服务商、网关密钥、配额、定价、用量、日志、安全与运行参数。
 - 网关：`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1/models`，流式与非流式都支持。
-- 前端：Next.js 15 静态导出，由控制面直接托管，不需要单独跑 Node 服务。
+- 前端：Next.js 15 静态导出，可由控制面直接托管；一键启动默认把页面与控制面分成两个端口（Node 静态服务把 `/api` 反代到控制面）。
 - 许可证：主仓 MIT；可 clean-room 重写的上游只依据公开 README / 协议 / 实测 HTTP 行为实现，不复制源码；需要独立进程的上游保留 sidecar 边界。逐家许可证与商用限制见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 与 [docs/compliance.md](docs/compliance.md)。
+
+## 快速开始（从零到打开页面）
+
+前提：Python 3.11+、Node.js 20+、npm。
+
+第一次按顺序执行（在仓库根）：
+
+```powershell
+cd apps\web; npm ci; npm run build:export; cd ..\..
+powershell -File scripts\start.ps1
+```
+
+之后日常启动就一条命令：
+
+```powershell
+powershell -File scripts\start.ps1
+```
+
+- 脚本自动检测页面端口 18100 与控制面端口 18101；被占用就顺延到下一个可用端口，并在输出里写清楚换成了哪个。
+- 起来后用打印的地址打开页面。全新数据库播种的账号是 `addxiaoyi` / `Lsc123456`；已有数据库沿用现有管理员，脚本会打印实际账号与口令来源。**首次登录后立刻在「设置 → 用户」改密。**
+- 停止也是一条命令：`powershell -File scripts\start.ps1 -Stop`，不需要记 PID。
+- 脚本可重复执行：已经在运行只提示，不会再起第二份。
+- Linux / macOS：`bash scripts/start.sh`，停止用 `bash scripts/start.sh --stop`。
+- 失败会直接给结论和下一步，不糊 traceback：缺 Python/依赖、端口全占、数据库迁移失败、`apps/web/out` 不存在各自有明确提示；日志在 `.run/`。
 
 ## 十分钟上手
 
