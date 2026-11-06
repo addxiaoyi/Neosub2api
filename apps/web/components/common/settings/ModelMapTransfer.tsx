@@ -183,7 +183,7 @@ export function ModelMapTransfer({onChanged}: {onChanged: () => void}) {
         {rollbackNote && <span className="text-[11px] text-muted-foreground">{rollbackNote}</span>}
       </div>
 
-      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-[1fr_200px]">
+      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-[minmax(0,1fr)_280px]">
         <div className="space-y-2">
           <div className="text-[11px] text-muted-foreground">{t('settings.mmInput')}</div>
           <Textarea

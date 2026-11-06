@@ -61,7 +61,7 @@ export function StatCard({
       className="min-h-[88px] sm:min-h-[96px] rounded-[20px] bg-muted px-3.5 py-3 sm:px-4"
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-[11px] font-medium text-gray-600 dark:text-gray-400 truncate">
+        <div className="text-[11px] font-medium text-gray-600 dark:text-gray-400 min-w-0 break-words">
           {label}
         </div>
         {Icon && (

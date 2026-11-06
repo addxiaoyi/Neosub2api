@@ -3,11 +3,16 @@
 import * as React from 'react';
 
 import {cn} from '@/lib/utils';
+import {useT} from '@/lib/i18n/provider';
+
+const SCROLL_HINT_MIN_REST = 24;
 
 function Table({className, ...props}: React.ComponentProps<'table'>) {
   const boxRef = React.useRef<HTMLDivElement>(null);
+  const [rest, setRest] = React.useState(0);
+  const t = useT();
 
-  // 记录还有多少没露出来，供 globals.css 画边缘渐隐；只写 dataset，不触发重渲染
+  // 记录还有多少没露出来，供 globals.css 画边缘渐隐；只在跨过阈值时更新状态
   React.useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
@@ -18,6 +23,7 @@ function Table({className, ...props}: React.ComponentProps<'table'>) {
       const atEnd = box.scrollLeft >= rest - 1;
       box.dataset.overflow =
         rest <= 1 || (atStart && atEnd) ? 'none' : atStart ? 'end' : atEnd ? 'start' : 'both';
+      setRest(rest > SCROLL_HINT_MIN_REST ? rest : 0);
     };
     sync();
 
@@ -32,16 +38,23 @@ function Table({className, ...props}: React.ComponentProps<'table'>) {
   }, []);
 
   return (
-    <div
-      ref={boxRef}
-      data-slot="table-container"
-      className="scroll-slim relative w-full overflow-x-auto"
-    >
-      <table
-        data-slot="table"
-        className={cn('w-full caption-bottom text-sm', className)}
-        {...props}
-      />
+    <div className="w-full min-w-0">
+      <div
+        ref={boxRef}
+        data-slot="table-container"
+        className="scroll-slim relative w-full overflow-x-auto"
+      >
+        <table
+          data-slot="table"
+          className={cn('w-full caption-bottom text-sm', className)}
+          {...props}
+        />
+      </div>
+      {rest > 0 && (
+        <p className="text-muted-foreground mt-1 text-[11px] select-none" data-slot="table-scroll-hint">
+          {t('common.tableScrollHint')}
+        </p>
+      )}
     </div>
   );
 }

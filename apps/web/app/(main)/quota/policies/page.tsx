@@ -548,7 +548,7 @@ function AdminQuotaPolicies() {
             </div>
             <p className="text-xs text-muted-foreground">{t('quotaPolicy.usageDesc')}</p>
           </div>
-          <div className="w-full sm:w-56">
+          <div className="w-full sm:w-80">
             <Label htmlFor="usage-key" className="mb-1.5 block text-[11px] text-muted-foreground">{t('quotaPolicy.usageKey')}</Label>
             <Select value={usageKey} onValueChange={setUsageKey} disabled={!keys.length}>
               <SelectTrigger id="usage-key" className="h-9">

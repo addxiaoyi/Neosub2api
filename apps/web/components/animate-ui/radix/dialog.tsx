@@ -194,7 +194,7 @@ function DialogContent({
                   // 背景使用不透明色：半透明会让背后遮罩透出，与不透明的 header/footer
                   // 形成明暗分界，看起来像「双层边框」。同时只保留一条 border，
                   // 不再叠加 ring，避免边框外侧多出一圈描边。
-                  'fixed left-[50%] top-[50%] z-50 grid w-[calc(100%-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] gap-0 overflow-hidden rounded-[24px] border border-border/60 bg-background shadow-[0_24px_60px_rgba(15,23,42,0.10)] duration-200 sm:max-w-lg dark:border-border/70 dark:bg-background dark:shadow-[0_24px_60px_rgba(0,0,0,0.42)]',
+                  'fixed left-[50%] top-[50%] z-50 grid w-[calc(100%-2rem)] max-w-lg max-h-[calc(100dvh-1rem)] translate-x-[-50%] translate-y-[-50%] gap-0 overflow-x-hidden overflow-y-auto overscroll-contain rounded-[24px] border border-border/60 bg-background shadow-[0_24px_60px_rgba(15,23,42,0.10)] duration-200 sm:max-w-lg dark:border-border/70 dark:bg-background dark:shadow-[0_24px_60px_rgba(0,0,0,0.42)]',
                   className,
               )}
               {...props}
