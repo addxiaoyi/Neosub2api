@@ -41,6 +41,12 @@ def clear_last():
 def last_request():
     return RECENT[-1] if RECENT else {}
 
+
+@app.get("/__fake/recent")
+def recent_requests(path: str = ""):
+    """按路径过滤最近的真实外呼；换号/多阶段链路要断言多次请求时用它。"""
+    return [item for item in RECENT if not path or item["path"] == path]
+
 # codar 假上游的 token 约定：expired 触发 401（续期后换成 fresh），forbidden 触发 403
 CODAR_EXPIRED = "codar-expired"
 CODAR_FRESH = "codar-fresh-1"
@@ -460,6 +466,172 @@ async def grok_chat(request: Request):
         yield json.dumps({"result": {"response": {"isSoftStop": True}, "finalMetadata": {}}}).encode() + b"\n"
 
     return StreamingResponse(gen(), media_type="application/json")
+
+
+# ---------------------------------------------------------------------------
+# Trae（Solo / Work）假上游
+# 契约取自 app/adapters/trae.py：Solo 单端点 SSE；Work 分「流式」与
+# 「create_agent_task → workflow/start → query/sync_history_state」有状态桥。
+# 注入约定：authorization 的 Cloud-IDE-JWT 命中固定值时返回对应失败；
+# model/config_name 里带 trae-err-<code> 时返回该状态码。
+# ---------------------------------------------------------------------------
+
+TRAE_CHAT = "/api/agent/v3/llm_utils_chat"
+TRAE_MODELS = "/api/ide/v1/get_detail_param"
+TRAE_CREATE_TASK = "/api/agent/v3/create_agent_task"
+TRAE_WORKFLOW_START = "/api/agent/v3/workflow/start"
+TRAE_QUERY_HISTORY = "/api/agent/v3/query_history_state"
+TRAE_SYNC_HISTORY = "/api/agent/v3/sync_history_state"
+
+# 换号用例固定使用的 JWT；真实 Trae 用 Cloud-IDE-JWT 头，这里按同一形状取值
+TRAE_JWT_429 = "trae-jwt-429"
+TRAE_JWT_PLAN = "trae-jwt-plan"
+TRAE_JWT_500 = "trae-jwt-500"
+TRAE_JWT_503 = "trae-jwt-503"
+TRAE_JWT_OK = "trae-jwt-ok"
+
+
+def _trae_token(request: Request) -> str:
+    raw = request.headers.get("authorization", "").strip()
+    if raw.lower().startswith("cloud-ide-jwt "):
+        return raw[len("cloud-ide-jwt "):].strip()
+    return request.headers.get("x-cloudide-token", "").strip()
+
+
+def _trae_model(payload: dict) -> str:
+    return str(payload.get("model") or payload.get("config_name") or payload.get("model_name") or "?")
+
+
+def _trae_reject(request: Request, payload: dict) -> JSONResponse | None:
+    token = _trae_token(request)
+    model = _trae_model(payload)
+    if token == TRAE_JWT_429:
+        # 不带 Retry-After：适配器应立刻换号，而不是原地睡等
+        return JSONResponse({"code": 4011, "message": "soft rate limited"}, status_code=429)
+    if token == TRAE_JWT_PLAN or "trae-plan" in model:
+        return JSONResponse({"code": 1005, "message": "plan credits exhausted"}, status_code=402)
+    if token == TRAE_JWT_500 or "trae-err-500" in model:
+        return JSONResponse({"error": {"message": "fake trae boom", "code": 500}}, status_code=500)
+    if token == TRAE_JWT_503 or "trae-err-503" in model:
+        return JSONResponse({"error": {"message": "fake trae unavailable", "code": 503}}, status_code=503)
+    if "trae-err-401" in model:
+        return JSONResponse({"code": 401, "message": "session expired"}, status_code=401)
+    if "trae-err-url" in model:
+        # 模拟真实上游把请求端点写进错误体：用于验证网关对外脱敏
+        host = request.headers.get("host", "127.0.0.1")
+        port = host.rsplit(":", 1)[-1]
+        return JSONResponse(
+            {"error": {"message": f"upstream POST http://{host}{TRAE_CHAT} failed on port {port}",
+                       "code": 403}},
+            status_code=403,
+        )
+    return None
+
+
+def _trae_sse(event: str, payload: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+def _trae_echo(request: Request) -> str:
+    return _echo(request, "authorization", "x-cloudide-token", "x-uid", "x-app-id", "x-ide-version")
+
+
+@app.post(TRAE_CHAT)
+async def trae_chat(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    denied = _trae_reject(request, payload)
+    if denied is not None:
+        return denied
+    model = _trae_model(payload)
+    if "trae-sse-plan" in model:
+        async def denied_stream():
+            yield _trae_sse("error", {"code": 1005, "message": "no credits"})
+
+        return StreamingResponse(denied_stream(), media_type="text/event-stream")
+    text = f"[fake] trae model={model} system={_first_system(payload)!r} {_trae_echo(request)}"
+    parts = [text[:12], text[12:24], text[24:]]
+
+    async def gen():
+        for index, piece in enumerate(parts):
+            if not piece:
+                continue
+            body = {"response": piece}
+            if index == 0:
+                body["reasoning_content"] = "think"
+            yield _trae_sse("output", body)
+            await asyncio.sleep(0)
+        yield _trae_sse("token_usage", {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18})
+        yield _trae_sse("done", {"finish_reason": "stop"})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post(TRAE_MODELS)
+async def trae_models(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    return {"models": [
+        {"id": "glm-5.2"},
+        "glm-5.1",
+        {"config_name": "DeepSeek-V4-Flash-Official"},
+    ]}
+
+
+@app.post(TRAE_CREATE_TASK)
+async def trae_create_task(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    denied = _trae_reject(request, payload)
+    if denied is not None:
+        return denied
+    model = _trae_model(payload)
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" not in accept:
+        # 有状态桥：先拿会话/任务 id，再走 workflow/start 与轮询端点
+        return {"data": {
+            "conversation_id": payload.get("conversation_id") or "fake-conv",
+            "session_id": payload.get("session_id") or "fake-sess",
+            "task_id": "fake-task",
+        }}
+    if "work-plan" in model:
+        async def credit_limited():
+            yield b'data: {"code":1005,"message":"credits not enough"}\n\n'
+            await asyncio.sleep(0)
+
+        return StreamingResponse(credit_limited(), media_type="text/event-stream")
+    text = f"[fake] trae work model={model} {_trae_echo(request)}"
+    parts = [text[:10], text[10:]]
+
+    async def gen():
+        yield _trae_sse("plan_item", {"thought": ""})
+        for piece in parts:
+            if piece:
+                yield _trae_sse("output", {"choices": [{"text": piece}]})
+                await asyncio.sleep(0)
+        yield _trae_sse("token_usage", {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})
+        yield _trae_sse("done", {"last_assistant_response": json.dumps([text], ensure_ascii=False)})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post(TRAE_WORKFLOW_START)
+async def trae_workflow_start(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    return {"ok": True, "task_id": payload.get("task_id") or "fake-task"}
+
+
+@app.post(TRAE_QUERY_HISTORY)
+@app.post(TRAE_SYNC_HISTORY)
+async def trae_history_state(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    return {
+        "status": "done",
+        "last_assistant_response": json.dumps(["[fake] trae work stateful"], ensure_ascii=False),
+        "token_usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+    }
 
 
 if __name__ == "__main__":

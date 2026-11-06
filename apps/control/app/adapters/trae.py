@@ -210,6 +210,36 @@ class TraeAdapter(ProviderAdapter):
             return ProviderError(429, f"Trae {len(keys)} 个账号全部不可用：{last.message}")
         return ProviderError(429, f"Trae {len(keys)} 个账号全部处于冷却中，请稍后重试")
 
+    def _tracked_stream(
+        self, source: AsyncIterator[bytes], key: str, keys: list[str], sticky: str
+    ) -> AsyncIterator[bytes]:
+        """流式响应只有读到正常收尾才算成功；中途报错按非流式同一口径登记账号池。
+
+        流对象一返回就给账号记成功，会把随后上游在流里下发的 error 事件掩盖掉：
+        该冷却的账号不会被冷却，后续请求还会继续撞同一把坏号。
+        """
+
+        async def body():
+            completed = False
+            try:
+                async for chunk in source:
+                    yield chunk
+                completed = True
+            except ProviderError as exc:
+                if self._rotatable(exc.status_code):
+                    await self._note_failure(key, exc.status_code, keys)
+                raise
+            except Exception:  # noqa: BLE001 - 读流失败多是连接/出口问题，不判死账号
+                await self._pool.report_network_error(key)
+                raise
+            finally:
+                if completed:
+                    await self._pool.report_success(key)
+                    if sticky:
+                        await self._pool.bind_sticky(sticky, key)
+
+        return body()
+
     def _decode_claims(self) -> dict[str, Any]:
         parts = self._jwt().split(".")
         if len(parts) < 2:
@@ -949,6 +979,10 @@ class TraeAdapter(ProviderAdapter):
                 await self._note_failure(pick.key, exc.status_code, keys)
                 continue
             else:
+                stream_obj = getattr(result, "_stream", None) if stream else None
+                if stream_obj is not None:
+                    result._stream = self._tracked_stream(stream_obj, pick.key, keys, sticky)
+                    return result
                 await self._pool.report_success(pick.key)
                 if sticky:
                     await self._pool.bind_sticky(sticky, pick.key)
