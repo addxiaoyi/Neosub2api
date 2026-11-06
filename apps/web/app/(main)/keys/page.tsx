@@ -216,16 +216,23 @@ export default function KeysPage() {
               <span className="mr-1 text-xs font-medium tabular-nums">
                 {batchBusy ? t('keys.batchRunning') : t('keys.batchSelected', {n: selected.length})}
               </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 rounded-full text-[11px]"
-                disabled={batchBusy}
-                onClick={() => runBatch('disable')}
-              >
-                <Pause className="mr-1 h-3 w-3" />
-                {t('keys.batchDisable')}
-              </Button>
+              <ConfirmDialog
+                title={t('keys.batchDisableTitle', {n: selected.length})}
+                description={t('keys.batchDisableDesc')}
+                confirmText={t('keys.batchDisable')}
+                onConfirm={() => runBatch('disable')}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px]"
+                    disabled={batchBusy}
+                  >
+                    <Pause className="mr-1 h-3 w-3" />
+                    {t('keys.batchDisable')}
+                  </Button>
+                }
+              />
               <Button
                 size="sm"
                 variant="outline"
@@ -407,11 +414,15 @@ export default function KeysPage() {
             description={t('keys.emptyDesc')}
             className="flex flex-col items-center justify-center py-16 text-center"
           >
-            {isAdmin && (
+            {isAdmin ? (
               <Button className="mt-4 rounded-full" onClick={openCreate}>
                 <Plus />
                 {t('keys.newKey')}
               </Button>
+            ) : (
+              <p className="mt-4 max-w-[30rem] text-xs leading-relaxed text-muted-foreground">
+                {t('keys.emptyViewerHint')}
+              </p>
             )}
           </EmptyState>
         )}

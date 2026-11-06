@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import {useT} from '@/lib/i18n/provider';
+import {useI18n} from '@/lib/i18n/provider';
 import {buildChecklist, type ChecklistStep} from '@/lib/provider-checklist';
-import type {ProviderInfo} from '@/lib/providers';
+import {localizedRequires, type ProviderInfo} from '@/lib/providers';
 import {cn} from '@/lib/utils';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
@@ -31,8 +31,10 @@ const ACTION_LABELS: Record<NonNullable<ChecklistStep['action']>, string> = {
 const EDIT_ACTIONS = new Set<NonNullable<ChecklistStep['action']>>(['enable', 'credential', 'option', 'health']);
 
 export function ProviderChecklist({provider, healthStatus, healthError, canEdit, onEnable, onRunHealth, onPick}: Props) {
-  const t = useT();
-  const state = buildChecklist(provider, healthStatus);
+  const {t, tp} = useI18n();
+  // requires 是服务端中文短句：先按 phrases 本地化，再进清单，避免步骤说明直接透出中文
+  const localized = {...provider, requires: localizedRequires(provider, t, tp)};
+  const state = buildChecklist(localized, healthStatus);
   const lockedTitle = t('providers.requiresAdmin');
   const ready = provider.readiness === 'ready';
 
@@ -133,7 +135,9 @@ export function ProviderChecklist({provider, healthStatus, healthError, canEdit,
                 {i + 1}
               </span>
               <div className="min-w-0 flex-1 text-[11px] leading-4">
-                <span className={cn('whitespace-normal', isDone && 'line-through')}>{t(step.detail)}</span>
+                <span className={cn('whitespace-normal', isDone && 'line-through')}>
+                  {step.detail.startsWith('providers.') ? t(step.detail) : tp(step.detail)}
+                </span>
                 {failed && healthError ? (
                   <div className="mt-1 whitespace-normal text-[10px] text-destructive">{healthError}</div>
                 ) : null}

@@ -210,3 +210,77 @@ export function providerLabel(providers: ProviderInfo[], providerId?: string): s
   if (!providerId || providerId === 'codebuddy') return 'CodeBuddy';
   return providers.find((p) => p.id === providerId)?.label || providerId;
 }
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/** sidecar 状态由后端给出结构化字段，文案在前端组装——避免把中文运行时消息直接透传到其他语言界面。 */
+export function sidecarMessage(
+  status: NonNullable<ProviderInfo['sidecar_status']>,
+  t: Translate,
+): string {
+  const port = status.port;
+  switch (status.state) {
+    case 'alive':
+      return t('providers.sidecar.alive', {port, ms: status.latency_ms ?? 0});
+    case 'auth':
+      return t('providers.sidecar.auth', {
+        port,
+        path: status.path,
+        code: status.http_status ?? '',
+      });
+    case 'timeout':
+      return t('providers.sidecar.timeout', {port});
+    case 'refused':
+      return t('providers.sidecar.refused', {port});
+    case 'http_error':
+      return status.http_status
+        ? t('providers.sidecar.httpError', {
+            port,
+            path: status.path,
+            code: status.http_status,
+          })
+        : t('providers.sidecar.probeFailed', {port});
+  }
+}
+
+/**
+ * 上游数据里的短句（requires / limitations / risk_note / vendor）是服务端中文原文，
+ * 显示前统一过 phrases；未收录的新句子回退原文，不会显示英文键名。
+ */
+export function localizedRequires(p: ProviderInfo, t: Translate, tp: Translate): string[] {
+  if (p.sidecar_status && p.sidecar_status.state !== 'alive') {
+    return [sidecarMessage(p.sidecar_status, t)];
+  }
+  return p.requires.map((item) => tp(item));
+}
+
+/** 后端拼好的「前缀 + 详情」中文串，只能按前缀拆开重拼，否则整句永远对不上短语表。 */
+const REASON_PREFIXES: {prefix: string; key: string}[] = [
+  {prefix: '凭据已失效，需要重新粘贴：', key: 'providers.credentialReasonInvalidated'},
+  {prefix: '凭据不可用，需要重新粘贴：', key: 'providers.credentialReasonUnusable'},
+  {prefix: '上次探活失败：', key: 'providers.credentialReasonProbeFailed'},
+];
+
+function reasonDetail(detail: string, t: Translate): string {
+  if (detail === '上游判定凭据被拒') return t('providers.upstreamRejected');
+  const status = /^上游返回 (\d+)$/.exec(detail);
+  if (status) return t('providers.upstreamStatus', {code: status[1]});
+  return detail;
+}
+
+/** 凭据说明本地化：固定句查短语表，带动态详情的前缀句用结构化字段重拼。 */
+export function credentialNote(p: ProviderInfo, t: Translate, tp: Translate): string {
+  const raw = p.credential_state_note || p.credential_state_reason;
+  if (!raw) return '';
+  for (const item of REASON_PREFIXES) {
+    if (raw.startsWith(item.prefix)) {
+      return t(item.key, {detail: reasonDetail(raw.slice(item.prefix.length), t)});
+    }
+  }
+  return tp(raw);
+}
+
+/** 历史默认地址提示是后端拼好的中文串，这里只用它当信号，正文按结构化字段重拼。 */
+export function legacyBaseWarning(p: ProviderInfo, t: Translate): string {
+  return p.base_url_warning ? t('providers.legacyBaseWarning', {url: p.base_url}) : '';
+}

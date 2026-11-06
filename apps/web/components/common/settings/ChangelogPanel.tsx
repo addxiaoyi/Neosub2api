@@ -7,7 +7,7 @@ import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {systemApi} from '@/lib/api';
 import {RichText} from '@/lib/i18n/rich-text';
-import {useT} from '@/lib/i18n/provider';
+import {useI18n} from '@/lib/i18n/provider';
 import {cn} from '@/lib/utils';
 import type {Changelog, ChangelogItem} from '@/lib/types';
 
@@ -27,8 +27,8 @@ const SECTION_STYLE: Record<string, string> = {
  * 分类标题 → i18n 键。
  *
  * 分类名来自服务端解析 CHANGELOG.md 的小标题（固定的几个），属**数据**；
- * 按原值映射到译文。条目正文仍按仓库里写的中文原样展示——那是文档内容，
- * 翻译它属于改 CHANGELOG.md 本身，不在界面适配范围内。
+ * 按原值映射到译文，新增分类走 phrases 短语表。条目正文同样按原文走短语表，
+ * 未收录的新条目回退中文原文，不会显示空行。
  */
 const SECTION_LABEL_KEYS: Record<string, string> = {
   安全: 'changelog.sectionSecurity',
@@ -39,9 +39,13 @@ const SECTION_LABEL_KEYS: Record<string, string> = {
   计划中: 'changelog.sectionPlanned',
 };
 
-function sectionLabel(title: string, t: (key: string) => string): string {
+function sectionLabel(
+  title: string,
+  t: (key: string) => string,
+  tp: (source: string) => string,
+): string {
   const key = SECTION_LABEL_KEYS[title];
-  return key ? t(key) : title;
+  return key ? t(key) : tp(title);
 }
 
 /**
@@ -74,6 +78,7 @@ function InlineText({text}: {text: string}) {
 }
 
 function ItemList({items}: {items: ChangelogItem[]}) {
+  const {tp} = useI18n();
   const hasSub = items.some((it) => it.level > 0);
   return (
     <ul className={cn('space-y-1.5', hasSub && 'space-y-2')}>
@@ -92,7 +97,7 @@ function ItemList({items}: {items: ChangelogItem[]}) {
             )}
           />
           <span className="min-w-0 flex-1 break-words">
-            <InlineText text={it.text} />
+            <InlineText text={tp(it.text)} />
           </span>
         </li>
       ))}
@@ -121,7 +126,7 @@ function VersionBlock({
   onToggle: () => void;
   sections: Changelog['versions'][number]['sections'];
 }) {
-  const t = useT();
+  const {t, tp} = useI18n();
   const count = sections.reduce((n, s) => n + s.items.length, 0);
   // 当前版本置顶时也默认展开，方便一眼看到最新改了什么
   return (
@@ -180,7 +185,7 @@ function VersionBlock({
                     SECTION_STYLE[sec.title] ?? 'border-border bg-muted text-muted-foreground',
                   )}
                 >
-                  {sectionLabel(sec.title, t)}
+                  {sectionLabel(sec.title, t, tp)}
                 </span>
                 <span className="text-[10px] text-muted-foreground/70">
                   {t('changelog.items', {count: sec.items.length, n: sec.items.length})}
@@ -206,7 +211,7 @@ function VersionBlock({
 }
 
 export function ChangelogPanel() {
-  const t = useT();
+  const {t} = useI18n();
   const [data, setData] = useState<Changelog | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -219,7 +224,8 @@ export function ChangelogPanel() {
       .then((d) => {
         if (!alive) return;
         setData(d);
-        if (!d.available) setError(d.error || t('changelog.unavailable'));
+        // 后端的 error 是中文诊断串（含文件名/系统错误），界面只用本地化的标题与提示
+        if (!d.available) setError('');
         else if (d.versions.length) setOpen(d.versions[0].version);
       })
       .catch(() => alive && setError(t('changelog.loadFailed')))
@@ -244,7 +250,7 @@ export function ChangelogPanel() {
         <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning-text" />
         <div className="space-y-1 text-xs">
           <div className="font-medium">{t('changelog.unavailable')}</div>
-          <div className="text-muted-foreground">{error || data?.error}</div>
+          {error && <div className="text-muted-foreground">{error}</div>}
           <div className="text-muted-foreground">
             <RichText text={t('changelog.unavailableHint')} />
           </div>

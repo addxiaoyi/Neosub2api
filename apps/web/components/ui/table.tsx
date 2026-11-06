@@ -39,6 +39,11 @@ function Table({className, ...props}: React.ComponentProps<'table'>) {
 
   return (
     <div className="w-full min-w-0">
+      {rest > 0 && (
+        <p className="text-muted-foreground mb-1 text-[11px] select-none" data-slot="table-scroll-hint">
+          {t('common.tableScrollHint')}
+        </p>
+      )}
       <div
         ref={boxRef}
         data-slot="table-container"
@@ -50,11 +55,6 @@ function Table({className, ...props}: React.ComponentProps<'table'>) {
           {...props}
         />
       </div>
-      {rest > 0 && (
-        <p className="text-muted-foreground mt-1 text-[11px] select-none" data-slot="table-scroll-hint">
-          {t('common.tableScrollHint')}
-        </p>
-      )}
     </div>
   );
 }

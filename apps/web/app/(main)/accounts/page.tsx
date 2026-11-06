@@ -1416,17 +1416,24 @@ export default function AccountsPage() {
                   ? t('accounts.batchRunning')
                   : t('accounts.batchSelected', {n: selected.length})}
               </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 rounded-full text-[11px]"
-                disabled={batchBusy || !!blockerDisable}
-                title={blockHint(blockerDisable)}
-                onClick={() => runBatch('disable', true)}
-              >
-                <Pause className="mr-1 h-3 w-3" />
-                {t('accounts.batchDisable')}
-              </Button>
+              <ConfirmDialog
+                title={t('accounts.batchDisableTitle', {n: selected.length})}
+                description={t('accounts.batchDisableDesc')}
+                confirmText={t('accounts.batchConfirm')}
+                onConfirm={() => runBatch('disable', true)}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px]"
+                    disabled={batchBusy || !!blockerDisable}
+                    title={blockHint(blockerDisable)}
+                  >
+                    <Pause className="mr-1 h-3 w-3" />
+                    {t('accounts.batchDisable')}
+                  </Button>
+                }
+              />
               <Button
                 size="sm"
                 variant="outline"

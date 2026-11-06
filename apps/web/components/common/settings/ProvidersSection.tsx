@@ -18,14 +18,18 @@ import {
 import {credentialApi, errText, gatewayApi, providerApi, runtimeConfigApi} from '@/lib/api';
 import {notify} from '@/lib/toast';
 import {useAuth} from '@/lib/auth-context';
-import {useT} from '@/lib/i18n/provider';
-import type {
-  ProviderCredential,
-  ProviderCredentialInput,
-  ProviderCredentialStateSupport,
-  ProviderHealth,
-  ProviderInfo,
-  ProviderTokenCheck,
+import {useI18n} from '@/lib/i18n/provider';
+import {
+  credentialNote,
+  legacyBaseWarning,
+  localizedRequires,
+  sidecarMessage,
+  type ProviderCredential,
+  type ProviderCredentialInput,
+  type ProviderCredentialStateSupport,
+  type ProviderHealth,
+  type ProviderInfo,
+  type ProviderTokenCheck,
 } from '@/lib/providers';
 import {formatDateTime} from '@/lib/utils';
 import {CAPABILITY_LABELS, exposedOptionFields, STATUS_LABEL_KEY} from '@/lib/provider-schema';
@@ -94,7 +98,7 @@ function draftOfCred(c: ProviderCredential): CredDraft {
 
 /** 服务商接入：列表沿用本页表格样式，单条配置在行内展开。 */
 export function ProvidersSection() {
-  const t = useT();
+  const {t, tp} = useI18n();
   const {isAdmin} = useAuth();
   const [items, setItems] = useState<ProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -188,11 +192,11 @@ export function ProvidersSection() {
       if (body.enabled === true && updated.readiness === 'needs_config') {
         notify.warn(
           t('providers.enabledButUnavailable', {
-            requires: updated.requires.join(t('common.listSeparator')),
+            requires: updated.requires.map((item) => tp(item)).join(t('common.listSeparator')),
           }),
         );
       } else {
-        notify.ok(t('providers.saved'), t('providers.savedDetail', {name: updated.label}));
+        notify.ok(t('providers.saved'), t('providers.savedDetail', {name: tp(updated.label)}));
       }
     } catch (e) {
       notify.err(errText(e));
@@ -309,7 +313,7 @@ export function ProvidersSection() {
       await credentialApi.create(body);
       setAddDrafts((prev) => ({...prev, [p.id]: EMPTY_CRED}));
       setAdding((prev) => ({...prev, [p.id]: false}));
-      notify.ok(t('providers.credSaved'), p.label);
+      notify.ok(t('providers.credSaved'), tp(p.label));
       await load();
     } catch (e) {
       notify.err(errText(e));
@@ -569,8 +573,8 @@ export function ProvidersSection() {
                         {expanded[p.id] ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
                       </Button>
                       <div>
-                        <div className="text-sm font-medium">{p.label}</div>
-                        <div className="text-[10px] text-muted-foreground">{p.vendor} · {p.id}</div>
+                        <div className="text-sm font-medium">{tp(p.label)}</div>
+                        <div className="text-[10px] text-muted-foreground">{tp(p.vendor)} · {p.id}</div>
                       </div>
                     </div>
                   </TableCell>
@@ -590,7 +594,7 @@ export function ProvidersSection() {
                         <Badge
                           variant="secondary"
                           className="rounded-full text-[10px]"
-                          title={p.credential_state_note || p.credential_state_reason}
+                          title={credentialNote(p, t, tp)}
                         >
                           {t('providers.credentialUnknown')}
                         </Badge>
@@ -602,7 +606,7 @@ export function ProvidersSection() {
                         <Badge
                           variant="destructive"
                           className="rounded-full text-[10px]"
-                          title={p.credential_state_reason}
+                          title={credentialNote(p, t, tp)}
                         >
                           {t('providers.credentialInvalidated')}
                         </Badge>
@@ -611,7 +615,7 @@ export function ProvidersSection() {
                           variant="outline"
                           className="h-6 rounded-full px-2 text-[10px]"
                           disabled={!isAdmin}
-                          title={p.credential_state_reason}
+                          title={credentialNote(p, t, tp)}
                           onClick={() => focusRepaste(p)}
                         >
                           {t('providers.repasteCredential')}
@@ -624,9 +628,9 @@ export function ProvidersSection() {
                         <Badge
                           variant="secondary"
                           className="rounded-full bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-400"
-                          title={p.sidecar_status.message}
+                          title={sidecarMessage(p.sidecar_status, t)}
                         >
-                          {p.sidecar_status.message}
+                          {sidecarMessage(p.sidecar_status, t)}
                         </Badge>
                       </div>
                     )}
@@ -636,7 +640,7 @@ export function ProvidersSection() {
                         <Badge
                           variant="secondary"
                           className="rounded-full bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
-                          title={p.requires.join('；')}
+                          title={localizedRequires(p, t, tp).join('；')}
                         >
                           {t('providers.enabledUnavailable')}
                         </Badge>
@@ -669,13 +673,13 @@ export function ProvidersSection() {
                       .join(' / ') || '—'}
                     {Object.entries(p.limitations).map(([key, text]) => (
                       <div key={key} className="mt-0.5">
-                        {key}: {text}
+                        {key}: {tp(text)}
                       </div>
                     ))}
                   </TableCell>
                   <TableCell className="max-w-[220px] whitespace-normal text-[11px] text-muted-foreground">
                     <div className="font-mono">{p.license}</div>
-                    {p.risk_note && <div className="mt-0.5">{p.risk_note}</div>}
+                    {p.risk_note && <div className="mt-0.5">{tp(p.risk_note)}</div>}
                   </TableCell>
                   <TableCell className="pr-4 text-right">
                     <ConfirmDialog
@@ -687,7 +691,7 @@ export function ProvidersSection() {
                         />
                       }
                       title={t(p.enabled ? 'providers.disableConfirmTitle' : 'providers.enableConfirmTitle', {
-                        name: p.label,
+                        name: tp(p.label),
                       })}
                       description={t(p.enabled ? 'providers.disableConfirmDesc' : 'providers.enableConfirmDesc')}
                       confirmText={t(p.enabled ? 'providers.disable' : 'providers.enable')}
@@ -716,7 +720,7 @@ export function ProvidersSection() {
                     <TableCell colSpan={5} className="px-6 py-2">
                       <div className="flex items-start gap-2 rounded-xl bg-muted/60 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
                         <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span className="whitespace-normal">{p.base_url_warning}</span>
+                        <span className="whitespace-normal">{legacyBaseWarning(p, t)}</span>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -794,7 +798,7 @@ export function ProvidersSection() {
                             <div className="flex min-w-0 flex-col gap-0.5">
                               <span className="whitespace-normal">
                                 <span className="text-foreground/80">{t('providers.credentialNoteWhy')}</span>
-                                {p.credential_state_note || p.credential_state_reason}
+                                {credentialNote(p, t, tp)}
                               </span>
                               <span className="whitespace-normal">
                                 <span className="text-foreground/80">{t('providers.credentialNoteNext')}</span>

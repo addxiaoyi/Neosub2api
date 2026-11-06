@@ -127,8 +127,9 @@ export function TokensPanel() {
         <div className="mb-3 text-[11px] text-muted-foreground">{t('settings.tokensNewDesc')}</div>
         <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">{t('settings.tokensName')}</Label>
+            <Label htmlFor="token-name" className="text-[11px] text-muted-foreground">{t('settings.tokensName')}</Label>
             <Input
+              id="token-name"
               value={form.name}
               onChange={(e) => setForm({name: e.target.value})}
               className="bg-background"
@@ -203,16 +204,23 @@ export function TokensPanel() {
               <span className="mr-1 text-xs font-medium tabular-nums">
                 {batchBusy ? t('keys.batchRunning') : t('keys.batchSelected', {n: selected.length})}
               </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 rounded-full text-[11px]"
-                disabled={batchBusy}
-                onClick={() => runBatch('disable')}
-              >
-                <Pause className="mr-1 h-3 w-3" />
-                {t('keys.batchDisable')}
-              </Button>
+              <ConfirmDialog
+                title={t('keys.batchDisableTitle', {n: selected.length})}
+                description={t('keys.batchDisableDesc')}
+                confirmText={t('keys.batchDisable')}
+                onConfirm={() => runBatch('disable')}
+                trigger={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-full text-[11px]"
+                    disabled={batchBusy}
+                  >
+                    <Pause className="mr-1 h-3 w-3" />
+                    {t('keys.batchDisable')}
+                  </Button>
+                }
+              />
               <Button
                 size="sm"
                 variant="outline"

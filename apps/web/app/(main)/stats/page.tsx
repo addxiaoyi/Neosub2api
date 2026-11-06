@@ -101,6 +101,17 @@ export default function StatsPage() {
   const todayFailed =
     (summary?.failures?.today_4xx ?? 0) + (summary?.failures?.today_5xx ?? 0);
 
+  /** 汇总已加载且窗口内没有任何调用：给全零数字一句标注，避免被当成页面故障 */
+  const noUsage =
+    summary !== null &&
+    (summary.today_requests ?? 0) === 0 &&
+    (summary.week_requests ?? 0) === 0 &&
+    (summary.today_tokens ?? 0) === 0 &&
+    (summary.week_tokens ?? 0) === 0 &&
+    (summary.today_credit ?? 0) === 0 &&
+    todayFailed === 0 &&
+    chartData.every((d) => d.tokens === 0 && d.requests === 0 && d.failed === 0);
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -139,6 +150,13 @@ export default function StatsPage() {
           </div>
         </div>
       )}
+
+      {noUsage ? (
+        <div className="flex items-start gap-2 rounded-[16px] bg-muted px-3.5 py-3">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="text-[11px] leading-5 text-muted-foreground">{t('stats.noUsageNote')}</div>
+        </div>
+      ) : null}
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 md:gap-4">
         <StatCard

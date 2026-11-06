@@ -271,7 +271,21 @@
     "qoderExportNote": "导出完成：包在 sidecar 主机的 {path}",
     "qoderExportDone": "导出已提交",
     "qoderImportDone": "导入已提交",
-    "qoderFailed": "sidecar 返回 {status}"
+    "qoderFailed": "sidecar 返回 {status}",
+    "sidecar": {
+      "alive": "sidecar 在线（端口 {port}，{ms}ms）",
+      "auth": "sidecar 在线（端口 {port}），但 {path} 返回 {code}：API Key 未配置或不匹配",
+      "timeout": "侧车无响应（端口 {port}）：探测超时，进程可能卡死或仍在启动",
+      "refused": "侧车未运行（端口 {port}）：连接被拒绝，请先启动对应进程",
+      "httpError": "端口 {port} 有服务在监听，但 {path} 返回 {code}：可能不是目标 sidecar",
+      "probeFailed": "端口 {port} 的 sidecar 探测失败：可能被占用或进程异常"
+    },
+    "credentialReasonInvalidated": "凭据已失效，需要重新粘贴：{detail}",
+    "credentialReasonUnusable": "凭据不可用，需要重新粘贴：{detail}",
+    "credentialReasonProbeFailed": "上次探活失败：{detail}",
+    "upstreamStatus": "上游返回 {code}",
+    "upstreamRejected": "上游判定凭据被拒",
+    "legacyBaseWarning": "{url} 是历史默认地址（Deepseek2Go 上游实际为 5001），可能是旧库残留的种子值；已保留原值，确认后请改成 http://127.0.0.1:5001"
   },
   "grok": {
     "title": "注册任务",
@@ -544,7 +558,8 @@
     "usageHealthTitle": "用量统计可能没有正常累计",
     "usageHealthDetail": "今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有正常写入，请查看服务端日志。",
     "failedHint": "今日失败 {n} 次（不计入上方请求数）",
-    "unavailableNote": "按模型与按密钥的分解、上游官方统计、统计修复在当前后端版本没有对应接口，暂不可用。"
+    "unavailableNote": "按模型与按密钥的分解、上游官方统计、统计修复在当前后端版本没有对应接口，暂不可用。",
+    "noUsageNote": "当前统计窗口内没有任何调用记录，所有用量指标均为 0。产生调用后这里会按天累计；若长期为 0，请确认密钥已启用。"
   },
   "accounts": {
     "lastUsedShort": "最近使用 {ago}",
@@ -766,7 +781,9 @@
     "sourceSidecarEmpty": "该服务商的账号由侧车管理，请到 {address} 对应的控制台添加；侧车不可达时这里本来就没有账号。缺失前置：{requires}",
     "sourceDemoEmptyTitle": "内置演示账号",
     "sourceDemoEmpty": "演示环境自带种子账号，只读展示；这里没有账号时请检查演示数据源，而不是在本页添加。",
-    "sourceIndependenceNote": "就绪与启用是两件独立的事：就绪看前置是否齐，启用看本仓是否把请求路由给这家；已启用不代表当前可用。"
+    "sourceIndependenceNote": "就绪与启用是两件独立的事：就绪看前置是否齐，启用看本仓是否把请求路由给这家；已启用不代表当前可用。",
+    "batchDisableTitle": "停用选中的 {n} 个账号？",
+    "batchDisableDesc": "停用后这些账号会立即从网关调度中移除，可随时重新启用。"
   },
   "keys": {
     "title": "API 密钥",
@@ -824,7 +841,10 @@
     "batchTooMany": "单次最多 {max} 条，请减少选择",
     "batchSelectRow": "选择 {name}",
     "batchLoadNote": "操作后已重新拉取列表",
-    "badgeFromWizard": "向导创建"
+    "badgeFromWizard": "向导创建",
+    "emptyViewerHint": "密钥由管理员创建与分配。请联系管理员为你的账号开通访问密钥，密钥启用后这里会显示用量与状态。",
+    "batchDisableTitle": "停用选中的 {n} 个密钥？",
+    "batchDisableDesc": "停用后这些密钥会立即停止转发，可随时重新启用。"
   },
   "logs": {
     "rowCacheHit": "缓存命中 Token",
