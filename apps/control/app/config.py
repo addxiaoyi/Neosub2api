@@ -34,6 +34,10 @@ LEGACY_PROVIDER_BASES = {
 # 在线更新：发布物最大字节数（默认 256 MiB，解压后总量同样受它约束）
 UPDATE_MAX_BYTES_DEFAULT = 268435456
 
+# /v1 JSON 入口的请求体字节上限（默认 8 MiB）：超限直接 413，不把超大体读进内存
+GATEWAY_MAX_BODY_BYTES_DEFAULT = 8 * 1024 * 1024
+GATEWAY_MAX_BODY_BYTES_MIN = 1024
+
 
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -133,6 +137,8 @@ class Settings:
     allow_private_upstreams: bool = False
     # 流式响应单请求最大时长（秒），0 表示不限制
     sse_max_seconds: int = 600
+    # /v1 JSON 入口单请求体字节上限；超限 413，不静默截断
+    gateway_max_body_bytes: int = GATEWAY_MAX_BODY_BYTES_DEFAULT
     # codar2api sidecar 地址；默认值便于 Settings(...) 在测试里省略该字段
     codar_sidecar_base: str = "http://127.0.0.1:8801"
     # 其余三家 sidecar 同链路；默认值与 .env.example 一致
@@ -154,6 +160,11 @@ class Settings:
     demo_mode: bool = False
     # 自助注册：默认关闭；开启后 /api/auth/register 才创建账号（role=user）
     allow_registration: bool = False
+    # 登录失败节流：按 (来源 IP, 用户名) 滑动窗口计数，超限后指数退避冷却
+    login_max_failures: int = 5
+    login_window_sec: int = 900
+    login_cooldown_sec: int = 60
+    login_cooldown_max_sec: int = 3600
     # 运维告警：每条规则可独立开关，关闭时真的不评估；阈值/窗口由设置页钳制区间
     alert_provider_failure_enabled: bool = True
     alert_provider_failure_streak: int = 3
@@ -229,6 +240,14 @@ def load_settings() -> Settings:
         port=int(os.getenv("UNIFIED_PORT", "8010")),
         allow_private_upstreams=_bool("UNIFIED_ALLOW_PRIVATE_UPSTREAMS", False),
         sse_max_seconds=int(os.getenv("UNIFIED_SSE_MAX_SECONDS", "600")),
+        gateway_max_body_bytes=max(
+            GATEWAY_MAX_BODY_BYTES_MIN,
+            int(
+                os.getenv(
+                    "UNIFIED_GATEWAY_MAX_BODY_BYTES", str(GATEWAY_MAX_BODY_BYTES_DEFAULT)
+                )
+            ),
+        ),
         enable_docs=_bool("UNIFIED_ENABLE_DOCS", False),
         # 失败请求限流：窗口长度与窗内失败上限，两个都 >0 才生效
         failure_window_sec=int(os.getenv("UNIFIED_FAILURE_WINDOW_SEC", "60")),
@@ -238,6 +257,11 @@ def load_settings() -> Settings:
         model_fallback_first=_bool("UNIFIED_MODEL_FALLBACK_FIRST", False),
         demo_mode=_bool("UNIFIED_DEMO_MODE", False),
         allow_registration=_bool("UNIFIED_ALLOW_REGISTRATION", False),
+        # 登录失败节流：窗口内失败上限、窗口长度、首次冷却基数与冷却上限（秒）
+        login_max_failures=int(os.getenv("UNIFIED_LOGIN_MAX_FAILURES", "5")),
+        login_window_sec=int(os.getenv("UNIFIED_LOGIN_WINDOW_SEC", "900")),
+        login_cooldown_sec=int(os.getenv("UNIFIED_LOGIN_COOLDOWN_SEC", "60")),
+        login_cooldown_max_sec=int(os.getenv("UNIFIED_LOGIN_COOLDOWN_MAX_SEC", "3600")),
         alert_provider_failure_enabled=_bool("UNIFIED_ALERT_PROVIDER_FAILURE_ENABLED", True),
         alert_provider_failure_streak=int(os.getenv("UNIFIED_ALERT_PROVIDER_FAILURE_STREAK", "3")),
         alert_provider_failure_window_sec=int(

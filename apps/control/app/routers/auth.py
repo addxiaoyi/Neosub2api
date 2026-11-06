@@ -3,12 +3,14 @@ import secrets
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..api_utils import now
+from ..config import Settings
 from ..security import (
     SESSION_COOKIE,
     admin_user,
@@ -32,17 +34,16 @@ from ..totp import (
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
-# 登录失败节流：同一 IP + 用户名窗口内失败过多就短暂拒绝（S-12）
+# 登录失败节流：按 (来源 IP, 用户名) 做滑动窗口计数，超限后指数退避冷却（S-12）。
+# 只按用户名计数会让攻击者用一个 IP 的坏请求锁死任意账号（正确的口令也进不来），
+# 所以维度必须带上来源 IP；窗口/冷却阈值由 settings 提供（见 LoginGuard）。
+# 库内 failed_login_count 的封顶值，只作留痕，不参与冷却判定
 LOGIN_MAX_FAILURES = 5
-LOGIN_WINDOW_SEC = 900
+# 退避步数上限：2^10 已远超默认冷却上限，钳住只是防止极端配置下 2**n 溢出
+COOLDOWN_BACKOFF_MAX_STEPS = 10
 _login_failures: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
 
-# 已知账号的冷却：连续 5 次失败后冷却 60 秒。
-# 取 60 秒的依据：只挡自动化撞库的节奏，不制造「忘记密码被锁半天」的运维事故；
-# 阈值与上面的窗口计数保持一致，用户看到的数字不会前后矛盾。
-LOGIN_COOLDOWN_MAX_FAILURES = 5
-LOGIN_COOLDOWN_SEC = 60
 # 2FA 挑战有效期与尝试上限：5 次错误即作废，避免 6 位码被在线暴力枚举
 CHALLENGE_TTL_SEC = 300
 CHALLENGE_MAX_ATTEMPTS = 5
@@ -57,22 +58,54 @@ def _login_key(ip: str, username: str) -> str:
     return f"{ip}|{username.strip().lower()}"
 
 
-def _login_wait(key: str) -> int:
-    now_ts = time.time()
+@dataclass(frozen=True)
+class LoginGuard:
+    """登录节流阈值的不可变快照；单测可直接构造，不必起完整 app。"""
+
+    max_failures: int
+    window_sec: int
+    cooldown_sec: int
+    cooldown_max_sec: int
+
+
+def _login_guard(settings: Settings) -> LoginGuard:
+    return LoginGuard(
+        max_failures=max(1, int(settings.login_max_failures)),
+        window_sec=max(1, int(settings.login_window_sec)),
+        cooldown_sec=max(1, int(settings.login_cooldown_sec)),
+        cooldown_max_sec=max(1, int(settings.login_cooldown_max_sec)),
+    )
+
+
+def _prune_failures(key: str, now_ts: float, window_sec: int) -> list[float]:
+    stamps = [ts for ts in _login_failures.get(key, ()) if now_ts - ts < window_sec]
+    if stamps:
+        _login_failures[key] = stamps
+    else:
+        _login_failures.pop(key, None)
+    return stamps
+
+
+def _login_wait(key: str, guard: LoginGuard, at: float | None = None) -> int:
+    """窗口内失败达上限后返回剩余冷却秒数，否则 0。
+
+    冷却从「窗口内最后一次失败」起算，并按超出上限的失败次数翻倍退避。
+    429 拒绝不写失败记录，所以客户端在冷却期反复重试不会把冷却一直往后推。
+    """
+    now_ts = time.time() if at is None else float(at)
     with _login_lock:
-        stamps = [ts for ts in _login_failures.get(key, ()) if now_ts - ts < LOGIN_WINDOW_SEC]
-        if stamps:
-            _login_failures[key] = stamps
-        else:
-            _login_failures.pop(key, None)
-        if len(stamps) < LOGIN_MAX_FAILURES:
+        stamps = _prune_failures(key, now_ts, guard.window_sec)
+        if len(stamps) < guard.max_failures:
             return 0
-        return max(1, int(LOGIN_WINDOW_SEC - (now_ts - stamps[0])))
+        steps = min(len(stamps) - guard.max_failures, COOLDOWN_BACKOFF_MAX_STEPS)
+        span = min(guard.cooldown_sec * (2 ** steps), guard.cooldown_max_sec)
+        left = span - (now_ts - stamps[-1])
+    return max(1, int(left)) if left > 0 else 0
 
 
-def _login_failed(key: str) -> None:
+def _login_failed(key: str, at: float | None = None) -> None:
     with _login_lock:
-        _login_failures.setdefault(key, []).append(time.time())
+        _login_failures.setdefault(key, []).append(time.time() if at is None else float(at))
 
 
 def _login_ok(key: str) -> None:
@@ -102,22 +135,12 @@ def _user_row(conn, username: str):
     return conn.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE username = ?", (username,)).fetchone()
 
 
-def _cooldown_left(row, now_ts: float) -> int:
-    """已知账号的冷却剩余秒数；管理员豁免，未知账号交给 IP+用户名窗口节流。"""
-    if row["role"] == ADMIN_ROLE:
-        return 0
-    count = int(row["failed_login_count"] or 0)
-    if count < LOGIN_COOLDOWN_MAX_FAILURES:
-        return 0
-    left = LOGIN_COOLDOWN_SEC - (now_ts - int(row["last_failed_at"] or 0))
-    return max(0, int(left))
-
-
 def _record_failure(conn, username: str) -> None:
+    """库里的计数只作失败留痕，不参与冷却判定（冷却维度是 IP+用户名，见 _login_wait）。"""
     conn.execute(
         "UPDATE users SET failed_login_count = MIN(failed_login_count + 1, ?), last_failed_at = ? "
         "WHERE username = ?",
-        (LOGIN_COOLDOWN_MAX_FAILURES, now(), username),
+        (LOGIN_MAX_FAILURES, now(), username),
     )
     conn.commit()
 
@@ -213,20 +236,22 @@ def login(body: LoginBody, request: Request, response: Response):
     ip = request.client.host if request.client else ""
     username = body.username.strip()
     key = _login_key(ip, username)
+    guard = _login_guard(request.app.state.settings)
     try:
         row = _user_row(conn, username)
-        # 未知用户名沿用原来的 IP+用户名窗口节流；已知账号改用库里的连续失败冷却，
-        # 这样「冷却多久」对用户是可解释的 60 秒，而不是内存窗口的 15 分钟。
-        if row is None:
-            wait = _login_wait(key)
+        # 冷却只按 (来源 IP, 用户名) 计数：同名账号在别的 IP 上被撞库，
+        # 不能把这里拿正确口令的用户锁死。未知与已知账号走同一条判定，
+        # 因此 retry_after 不会成为区分账号是否存在的信号。管理员豁免。
+        is_admin = row is not None and row["role"] == ADMIN_ROLE
+        if not is_admin:
+            wait = _login_wait(key, guard)
             if wait:
                 return _login_throttled(wait)
-        else:
-            left = _cooldown_left(row, time.time())
-            if left:
-                return _login_throttled(left)
         if row is None or not verify_password(body.password, row["password_hash"]):
-            _login_failed(key)
+            # 429 拒绝在冷却判定处就返回了，不会走到这里；失败窗口只累计真实的口令错误。
+            # 管理员豁免冷却，连失败计数也不落，免得安全页把运维账号显示成「已锁」。
+            if not is_admin:
+                _login_failed(key)
             if row is not None:
                 _record_failure(conn, row["username"])
             audit(conn, username or "anonymous", "login_failed", "", "用户名或密码错误", ip)

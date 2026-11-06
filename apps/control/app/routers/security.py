@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from ..billing import period_bounds
 from ..net_guard import BLOCKED_ADDRESSES, BLOCKED_HOSTNAMES
 from ..security import PermissionDenied, admin_user, audit_event, current_user
-from .auth import LOGIN_MAX_FAILURES, LOGIN_WINDOW_SEC, _login_failures, _login_lock
+from .auth import LoginGuard, _login_failures, _login_guard, _login_lock, _login_wait
 
 router = APIRouter(prefix="/api", tags=["security"])
 
@@ -37,32 +37,32 @@ def _day_start() -> int:
     return period_bounds("day", int(time.time()))[0]
 
 
-def _active_throttle(now_ts: float) -> list[dict[str, Any]]:
+def _active_throttle(now_ts: float, guard: LoginGuard) -> list[dict[str, Any]]:
     """窗口内仍在计数的 IP+用户名组合；只给 admin 用，含 IP 与用户名。"""
     with _login_lock:
         snapshot = {key: list(stamps) for key, stamps in _login_failures.items()}
 
     active: list[dict[str, Any]] = []
     for key, stamps in snapshot.items():
-        fresh = [ts for ts in stamps if now_ts - ts < LOGIN_WINDOW_SEC]
+        fresh = [ts for ts in stamps if now_ts - ts < guard.window_sec]
         if not fresh:
             continue
+        paused = _login_wait(key, guard, at=now_ts)
         ip, _, username = key.partition("|")
-        locked = len(fresh) >= LOGIN_MAX_FAILURES
         active.append({
             "ip": ip,
             "username": username,
             "failures": len(fresh),
             "first_ts": int(fresh[0]),
             "last_ts": int(fresh[-1]),
-            "locked": locked,
-            "retry_after": max(1, int(LOGIN_WINDOW_SEC - (now_ts - fresh[0]))) if locked else 0,
+            "locked": paused > 0,
+            "retry_after": paused,
         })
     active.sort(key=lambda item: item["last_ts"], reverse=True)
     return active
 
 
-def _own_window_failures(owner: str, now_ts: float) -> int:
+def _own_window_failures(owner: str, now_ts: float, guard: LoginGuard) -> int:
     """把节流桶按用户名归并成单个数字，避免把撞库 IP 暴露给普通用户。
 
     节流键里的用户名是 lower() 过的（见 auth._login_key），这里按同样规则比较。
@@ -76,7 +76,7 @@ def _own_window_failures(owner: str, now_ts: float) -> int:
             _, _, username = key.partition("|")
             if username != target:
                 continue
-            total += len([ts for ts in stamps if now_ts - ts < LOGIN_WINDOW_SEC])
+            total += len([ts for ts in stamps if now_ts - ts < guard.window_sec])
     return total
 
 
@@ -111,10 +111,11 @@ def login_failures(request: Request, limit: int = 50, user: dict = Depends(curre
     """登录失败视图：admin 看全站，其他人只看自己账号的聚合。
 
     内存里只有"窗口内还在计数"的 IP+用户名组合；窗口一过就清掉，
-    所以这里也按 LOGIN_WINDOW_SEC 过滤一遍，避免展示已经失效的记录。
+    所以这里也按配置的窗口长度过滤一遍，避免展示已经失效的记录。
     """
     limit = max(1, min(limit, 200))
     now_ts = time.time()
+    guard = _login_guard(request.app.state.settings)
     is_admin = user.get("role") == "admin"
     owner = (user.get("username") or "").strip()
 
@@ -133,9 +134,9 @@ def login_failures(request: Request, limit: int = 50, user: dict = Depends(curre
             ).fetchall()
             return {
                 "scope": SCOPE_ALL,
-                "window_sec": LOGIN_WINDOW_SEC,
-                "max_failures": LOGIN_MAX_FAILURES,
-                "active": _active_throttle(now_ts),
+                "window_sec": guard.window_sec,
+                "max_failures": guard.max_failures,
+                "active": _active_throttle(now_ts, guard),
                 "stats": {"total": int(counts["total"] or 0), "today": int(counts["today"] or 0)},
                 "recent": [_audit_row(row) for row in recent],
             }
@@ -159,13 +160,13 @@ def login_failures(request: Request, limit: int = 50, user: dict = Depends(curre
 
         return {
             "scope": SCOPE_SELF,
-            "window_sec": LOGIN_WINDOW_SEC,
-            "max_failures": LOGIN_MAX_FAILURES,
+            "window_sec": guard.window_sec,
+            "max_failures": guard.max_failures,
             "active": [],
             "stats": {"total": total, "today": today},
             "recent": [],
             # 只对自己的账号有意义、且不含任何第三方标识的两个数
-            "window_failures": _own_window_failures(owner, now_ts),
+            "window_failures": _own_window_failures(owner, now_ts, guard),
             "last_failed_ts": last_ts,
         }
     finally:
