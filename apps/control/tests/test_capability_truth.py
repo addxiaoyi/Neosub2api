@@ -400,13 +400,17 @@ def test_extension_read_endpoints_forward_or_501(
     patched = admin.patch("/api/providers/sub2api", json={"enabled": True, "options": {"group": gid}})
     assert patched.status_code == 200, patched.text
     try:
-        for path in ("/v1/images/tasks/it-9", "/v1/videos/vt-9"):
-            reply = _provider_get(anon, bearer_key, "sub2api", path)
-            assert reply.status_code == 501, f"{path} {reply.status_code} {reply.text}"
-            error = reply.json()["error"]
-            assert error["code"] == "capability_unsupported"
-            assert error["provider"] == "sub2api"
-            assert error["message"]
+        # images 只有创建没有查询：读端点必须 501 capability_unsupported，不许 500/空响应
+        reply = _provider_get(anon, bearer_key, "sub2api", "/v1/images/tasks/it-9")
+        assert reply.status_code == 501, f"{reply.status_code} {reply.text}"
+        error = reply.json()["error"]
+        assert error["code"] == "capability_unsupported"
+        assert error["provider"] == "sub2api"
+        assert error["message"]
+        # videos 查询改由本地台账兜底：没登记过就是 404，不再是 501
+        reply = _provider_get(anon, bearer_key, "sub2api", "/v1/videos/vt-9")
+        assert reply.status_code == 404, f"{reply.status_code} {reply.text}"
+        assert reply.json()["error"]["code"] == "video_task_not_found"
     finally:
         restored = admin.patch(
             "/api/providers/sub2api",

@@ -1,6 +1,8 @@
 import asyncio
+import fnmatch
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import posixpath
@@ -9,7 +11,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..adapters.base import ProviderAdapter, ProviderError
 from ..adapters.stream_util import DONE, sse_error
@@ -35,6 +37,7 @@ from ..model_resolve import (
     resolve_targets,
     retryable_status,
 )
+from ..services import video_tasks
 from ..usage_estimate import StreamText, estimate_from_body, estimate_from_text
 
 router = APIRouter(tags=["gateway"])
@@ -86,7 +89,7 @@ def _gateway_key(request: Request, conn, *, allow_anonymous: bool = False) -> di
     if not auth_header and not api_key:
         # allow_anonymous 只给签名媒体这类上游本就免鉴权的路径用，不改变全局匿名开关
         if allow_anonymous or _anonymous_allowed(request, conn):
-            return {"id": None, "name": "anonymous", "prefix": None}
+            return {"id": None, "name": "anonymous", "prefix": None, "model_allow": ""}
         raise GatewayError(
             401,
             "缺少 Authorization: Bearer <key> 或 x-api-key",
@@ -97,10 +100,17 @@ def _gateway_key(request: Request, conn, *, allow_anonymous: bool = False) -> di
     digest = hashlib.sha256(token.encode()).hexdigest()
     row = conn.execute(
         # prefix 随行带出：日志写入时固化，删 key 后 join 不到仍可溯源
-        "SELECT id, name, prefix FROM api_keys WHERE key_hash = ? AND enabled = 1", (digest,)
+        "SELECT id, name, prefix, model_allow, ip_allow FROM api_keys "
+        "WHERE key_hash = ? AND enabled = 1",
+        (digest,),
     ).fetchone()
     if row is None:
         raise GatewayError(401, "无效的 API Key", type_="authentication_error", code="invalid_api_key")
+    if not _ip_allowed(row["ip_allow"], request.client.host if request.client else ""):
+        raise GatewayError(
+            403, "来源 IP 不在该密钥的白名单内",
+            type_="permission_error", code="ip_not_allowed",
+        )
     updated = conn.execute(
         "UPDATE api_keys SET last_used_at = ? WHERE id = ? "
         "AND (last_used_at IS NULL OR last_used_at < ?)",
@@ -112,7 +122,54 @@ def _gateway_key(request: Request, conn, *, allow_anonymous: bool = False) -> di
         # 节流窗口内命中 0 行不提交（省一次纯写事务）；连接是准入段共用的，
         # 必须回滚掉隐式 BEGIN，后面的配额/价格检查不能读进这条空写事务
         conn.rollback()
-    return {"id": row["id"], "name": row["name"], "prefix": row["prefix"]}
+    return {"id": row["id"], "name": row["name"], "prefix": row["prefix"],
+            "model_allow": row["model_allow"]}
+
+
+def _allow_entries(allow: str | None) -> list[str] | None:
+    """白名单列 → 条目列表；空 = 未配置，坏值返回 None（调用方按拒绝处理，配置坏了别放行）。"""
+    if not allow:
+        return []
+    try:
+        entries = json.loads(allow)
+    except (TypeError, ValueError):
+        return None
+    return [str(item).strip() for item in entries] if isinstance(entries, list) else None
+
+
+def _ip_allowed(allow: str | None, remote: str) -> bool:
+    """IP 白名单：单 IP 或 CIDR；来源地址取不到时按拒绝（不拿 X-Forwarded-For 顶替）。"""
+    entries = _allow_entries(allow)
+    if entries is None:
+        return False
+    if not entries:
+        return True
+    try:
+        addr = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return False
+    for text in entries:
+        if not text:
+            continue
+        try:
+            if addr in ipaddress.ip_network(text, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _model_allowed(allow: str | None, model: str) -> bool:
+    """模型白名单：支持 * 通配（fnmatch 口径）；没有模型维度的端点直接放行。"""
+    entries = _allow_entries(allow)
+    if entries is None:
+        return False
+    if not entries:
+        return True
+    target = (model or "").strip().lower()
+    if not target:
+        return True
+    return any(fnmatch.fnmatchcase(target, item.lower()) for item in entries if item)
 
 
 def _price_snapshot(conn, provider: str, model: str, at: int) -> dict[str, Any] | None:
@@ -226,10 +283,15 @@ def _record(
     error: str | None,
     pricing: dict[str, Any] | None = None,
     estimated_usage: dict[str, Any] | None = None,
-) -> None:
-    """写 request_logs（汇总列）+ usage_records（原始 usage 直通）+ billing_ledger（金额定格）。"""
+    seconds: int | None = None,
+) -> dict[str, Any] | None:
+    """写 request_logs（汇总列）+ usage_records（原始 usage 直通）+ billing_ledger（金额定格）。
+
+    返回 settle 结果（含 billed_micro / snapshot_id），供视频台账回填金额；未落账时为 None。
+    """
     prompt_tokens, completion_tokens = totals(usage)
     ts = now()
+    booked: dict[str, Any] | None = None
     conn = request.app.state.db.connect()
     try:
         log_cur = conn.execute(
@@ -253,7 +315,7 @@ def _record(
         )
         # 同一 conn、同一 commit：正常情况下流水与日志一起落
         try:
-            settle(
+            booked = settle(
                 conn,
                 ts=ts,
                 key_id=key.get("id"),
@@ -265,6 +327,7 @@ def _record(
                 pricing=pricing,
                 failed=bool(error),
                 estimated_usage=estimated_usage,
+                seconds=seconds,
                 # 日志行 id 即关联键：流水按它精确挂到本请求上，日志接口无需猜关联
                 log_id=int(log_cur.lastrowid),
             )
@@ -273,15 +336,16 @@ def _record(
         conn.commit()
     finally:
         conn.close()
+    return booked
 
 
-async def _record_safe(request: Request, **fields: Any) -> None:
+async def _record_safe(request: Request, **fields: Any) -> dict[str, Any] | None:
     """sqlite 写盘丢线程池，不占事件循环。
 
     shield 让写盘在客户端断开（响应任务被取消）时也继续跑完，三种路径都不丢记录，
     也不会因为取消再补写而重复落库。
     """
-    await asyncio.shield(asyncio.to_thread(_record, request, **fields))
+    return await asyncio.shield(asyncio.to_thread(_record, request, **fields))
 
 
 def _usage_for_ledger(capability: str, usage: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -289,6 +353,114 @@ def _usage_for_ledger(capability: str, usage: dict[str, Any] | None) -> dict[str
     if capability in EXTENSION_CAPABILITIES and not any(totals(usage)):
         return None
     return usage
+
+
+def _video_snapshot(adapter: ProviderAdapter, body: bytes) -> dict[str, Any]:
+    """取任务快照：适配器有自家解析钩子就用它，否则按统一口径解析响应体。"""
+    hook = getattr(adapter, "video_snapshot", None)
+    try:
+        return hook(body) if callable(hook) else video_tasks.parse_snapshot(body)
+    except Exception:  # noqa: BLE001 - 台账旁路，解析失败退回通用口径
+        logger.warning("视频快照解析失败 provider=%s，退回通用解析", adapter.spec.id, exc_info=True)
+        return video_tasks.parse_snapshot(body)
+
+
+def _payload_seconds(payload: dict[str, Any]) -> int:
+    """客户端指定的视频时长：seconds 优先，兼容 duration；非法值按 0（不猜）。"""
+    for name in ("seconds", "duration"):
+        try:
+            value = int(payload.get(name) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _video_touch(
+    request: Request,
+    *,
+    provider: str,
+    task_id: str,
+    status: str,
+    seconds: int = 0,
+    key: dict[str, Any] | None = None,
+    request_id: str = "",
+    model: str = "",
+) -> int | None:
+    """把一次上游快照落到台账，返回本次首次进入终态时的秒数（这一请求的计费依据）。
+
+    台账是计费旁路：读库/写库失败只记日志，不影响上游响应。
+    """
+    conn = request.app.state.db.connect()
+    try:
+        entry = video_tasks.get(conn, provider=provider, upstream_task_id=task_id)
+        if entry is None:
+            entry = video_tasks.register(
+                conn,
+                provider=provider,
+                upstream_task_id=task_id,
+                model=model,
+                key_id=(key or {}).get("id"),
+                key_name=(key or {}).get("name") or "",
+                request_id=request_id,
+                ts=now(),
+            )
+        if entry["status"] in video_tasks.TERMINAL_STATUSES:
+            return None  # 终态已定格：后续轮询不改写、也不再计费
+        # 上游没给状态时按 pending 兜底，但不能把已 running 的任务倒推回 pending
+        target = entry["status"] if status == "pending" and entry["status"] != "pending" else status
+        if target != entry["status"] or (seconds and seconds != entry["seconds"]):
+            entry = video_tasks.mark(
+                conn,
+                provider=provider,
+                upstream_task_id=task_id,
+                status=target,
+                ts=now(),
+                seconds=seconds or None,
+            )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - 台账失败不能打挂视频请求
+        conn.rollback()
+        logger.warning("视频台账写入失败 provider=%s task=%s：%s", provider, mask_text(task_id), exc)
+        return None
+    finally:
+        conn.close()
+    return int(entry["seconds"] or 0) if entry["status"] in video_tasks.TERMINAL_STATUSES else None
+
+
+def _video_book(
+    request: Request,
+    *,
+    provider: str,
+    task_id: str,
+    booked: dict[str, Any] | None,
+) -> None:
+    """把 settle 定格出的金额回填到台账的终态行；台账失败只记日志，不影响账本。"""
+    if not booked or not booked.get("written"):
+        return
+    billed_micro = int(booked.get("billed_micro") or 0)
+    if billed_micro <= 0:
+        return
+    conn = request.app.state.db.connect()
+    try:
+        entry = video_tasks.get(conn, provider=provider, upstream_task_id=task_id)
+        if entry is None or entry["status"] not in video_tasks.TERMINAL_STATUSES:
+            return
+        video_tasks.book(
+            conn,
+            provider=provider,
+            upstream_task_id=task_id,
+            billed_micro=billed_micro,
+            snapshot_id=booked.get("snapshot_id"),
+            ts=now(),
+        )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - 回填金额是旁路
+        conn.rollback()
+        logger.warning("视频台账回填金额失败 provider=%s task=%s：%s", provider, mask_text(task_id), exc)
+    finally:
+        conn.close()
 
 
 def _estimate_on(request: Request, capability: str) -> bool:
@@ -472,6 +644,13 @@ async def _proxy(request: Request, capability: str, method: str | None = None, *
         targets = await _resolve(request, payload, capability, conn, request_id)
         primary_adapter, primary_effective, _ = targets[0]
         payload["model"] = primary_effective
+        # 模型白名单先于额度：被拒请求不产生流水/快照，与 401/403 口径一致
+        if not _model_allowed(key.get("model_allow"), primary_effective):
+            raise GatewayError(
+                403, f"模型 {mask_text(primary_effective)} 不在该密钥的白名单内",
+                type_="permission_error", code="model_not_allowed",
+                provider=primary_adapter.spec.id,
+            )
         # 先校验额度再冻结价格：被拒请求不产生快照与流水，通过后仍按原逻辑冻结价格
         _quota_guard(conn, key, primary_adapter.spec.id, primary_effective)
         _failure_guard(request, conn, key, primary_adapter.spec.id, primary_effective)
@@ -624,13 +803,36 @@ async def _proxy(request: Request, capability: str, method: str | None = None, *
         if (estimate_on and not raw_usage)
         else None
     )
-    await _record_safe(
+    # 视频任务先落台账：创建响应里若能读到终态，就在这一次请求里按秒计费
+    seconds: int | None = None
+    video_task_id = ""
+    if capability == "videos":
+        snap = _video_snapshot(final_adapter, body)
+        video_task_id = str(snap["task_id"] or "")
+        if video_task_id:
+            seconds = await asyncio.to_thread(
+                _video_touch,
+                request,
+                provider=final_adapter.spec.id,
+                task_id=video_task_id,
+                status=snap["status"],
+                seconds=int(snap["seconds"] or 0) or _payload_seconds(payload),
+                key=key,
+                request_id=request_id,
+                model=final_effective,
+            )
+    booked = await _record_safe(
         request, key=key, provider=final_adapter.spec.id, model=final_effective,
         status=reply.status_code, usage=usage,
         latency_ms=int((time.perf_counter() - started) * 1000),
         stream=False, error=None, pricing=final_pricing,
-        estimated_usage=estimated,
+        estimated_usage=estimated, seconds=seconds,
     )
+    if video_task_id and seconds is not None:
+        await asyncio.to_thread(
+            _video_book, request, provider=final_adapter.spec.id,
+            task_id=video_task_id, booked=booked,
+        )
     return Response(
         content=body,
         status_code=reply.status_code,
@@ -841,23 +1043,43 @@ async def _client_compat(
 async def _proxy_get(request: Request, capability: str, method: str, *path_args: str) -> Response:
     """GET 端点（任务轮询、媒体取回）：鉴权/配额/失败限流/记账与 POST 同一套。"""
     conn = request.app.state.db.connect()
+    local_view: dict[str, Any] | None = None
+    started = time.perf_counter()
     try:
         key = _gateway_key(request, conn)
         adapter = _pick_capable(request, capability, conn)
-        # 家级能力位为真但未实现读取方法（如 sub2api 只有建视频任务没有查询）：
-        # 明确 501，别让 getattr 炸成 500
         if getattr(adapter, method, None) is None:
-            raise GatewayError(
-                501, f"{adapter.spec.name} 不支持 {capability} 的读取端点 {method}",
-                type_="invalid_request_error", code="capability_unsupported",
-                provider=adapter.spec.id,
+            # 上游没有按 id 查询（如 sub2api 只有 POST /v1/videos）：改读本地台账，
+            # 响应体带 source=local_ledger，调用方一眼能看出这不是上游状态
+            if capability != "videos" or not path_args:
+                raise GatewayError(
+                    501, f"{adapter.spec.name} 不支持 {capability} 的读取端点 {method}",
+                    type_="invalid_request_error", code="capability_unsupported",
+                    provider=adapter.spec.id,
+                )
+            task = video_tasks.get(
+                conn, provider=adapter.spec.id, upstream_task_id=str(path_args[0])
             )
+            if task is None:
+                raise GatewayError(
+                    404, f"本地台账没有视频任务 {mask_text(str(path_args[0]))}",
+                    type_="invalid_request_error", code="video_task_not_found",
+                    provider=adapter.spec.id,
+                )
+            local_view = video_tasks.ledger_view(task)
         # 无 model 的读取端点：配额与失败限流按 provider 维度判（model 级策略不适用）
         _quota_guard(conn, key, adapter.spec.id, "")
         _failure_guard(request, conn, key, adapter.spec.id, "")
     finally:
         conn.close()
-    started = time.perf_counter()
+    if local_view is not None:
+        await _record_safe(
+            request, key=key, provider=adapter.spec.id, model="",
+            status=200, usage=None,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            stream=False, error=None, pricing=None,
+        )
+        return JSONResponse(local_view)
     try:
         reply = await getattr(adapter, method)(*path_args)
     except ProviderError as exc:
@@ -881,11 +1103,30 @@ async def _proxy_get(request: Request, capability: str, method: str, *path_args:
         raise from_upstream_reply(
             status_code=reply.status_code, body=body, headers=reply.headers, provider=adapter.spec.id
         )
-    await _record_safe(
+    # 视频轮询：用上游快照推进台账，首次进终态的那次请求按台账秒数计费
+    seconds: int | None = None
+    video_task_id = ""
+    if capability == "videos" and path_args:
+        snap = _video_snapshot(adapter, body)
+        video_task_id = str(snap["task_id"] or path_args[0])
+        seconds = await asyncio.to_thread(
+            _video_touch,
+            request,
+            provider=adapter.spec.id,
+            task_id=video_task_id,
+            status=snap["status"],
+            seconds=int(snap["seconds"] or 0),
+            key=key,
+        )
+    booked = await _record_safe(
         request, key=key, provider=adapter.spec.id, model="",
         status=reply.status_code, usage=None, latency_ms=latency_ms,
-        stream=False, error=None, pricing=None,
+        stream=False, error=None, pricing=None, seconds=seconds,
     )
+    if video_task_id and seconds is not None:
+        await asyncio.to_thread(
+            _video_book, request, provider=adapter.spec.id, task_id=video_task_id, booked=booked,
+        )
     return Response(
         content=body,
         status_code=reply.status_code,

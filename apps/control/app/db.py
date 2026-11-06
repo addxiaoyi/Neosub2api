@@ -66,7 +66,10 @@ CREATE TABLE IF NOT EXISTS api_keys(
   last_used_at INTEGER,
   -- 归属：users 的主键是 username（TEXT），所以这里存用户名而不是数字 id。
   -- NULL = 无主（老库存量），非 admin 不可见
-  owner_user_id TEXT
+  owner_user_id TEXT,
+  -- 白名单：JSON 数组字符串，'' 或不填 = 不限制
+  model_allow TEXT NOT NULL DEFAULT '',
+  ip_allow TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS request_logs(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,6 +168,42 @@ CREATE TABLE IF NOT EXISTS price_books(
 );
 CREATE INDEX IF NOT EXISTS idx_price_books_lookup ON price_books(token_class, provider, model, effective_from);
 
+-- 按次／按秒／长上下文倍率：与 token 价正交，独立表而不是往 price_books 的 token_class 里塞新值
+CREATE TABLE IF NOT EXISTS price_rules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL DEFAULT '*',              -- 适配器 id；'*' = 通配
+  model TEXT NOT NULL DEFAULT '*',                 -- 解析后的模型名；'*' = 通配
+  kind TEXT NOT NULL CHECK (kind IN ('per_call','per_second','long_context')),
+  unit_micro INTEGER NOT NULL DEFAULT 0 CHECK (unit_micro >= 0),               -- 每次/每秒单价（micro-USD）
+  threshold INTEGER NOT NULL DEFAULT 0 CHECK (threshold >= 0),                 -- long_context 的输入 token 阈值
+  multiplier_milli INTEGER NOT NULL DEFAULT 1000 CHECK (multiplier_milli >= 0),-- 倍率 ×1000，1000 = 原价
+  effective_from INTEGER NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  UNIQUE (provider, model, kind, effective_from)
+);
+CREATE INDEX IF NOT EXISTS idx_price_rules_lookup ON price_rules(kind, provider, model, effective_from);
+
+-- 视频任务本地台账：上游 task_id 只是外部键，本地 id / 状态机 / 计费钩子都挂这里
+CREATE TABLE IF NOT EXISTS video_tasks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  upstream_task_id TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  key_id INTEGER,
+  key_name TEXT NOT NULL DEFAULT '',
+  request_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed')),
+  seconds INTEGER NOT NULL DEFAULT 0 CHECK (seconds >= 0),
+  billed_micro INTEGER NOT NULL DEFAULT 0 CHECK (billed_micro >= 0),
+  snapshot_id INTEGER,
+  error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (provider, upstream_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status, created_at);
+
 -- 每请求价格快照：准入时解析一次，整行冻结，ledger 只引用快照 id
 CREATE TABLE IF NOT EXISTS price_book_snapshots(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,6 +250,7 @@ CREATE TABLE IF NOT EXISTS quota_policies(
   window TEXT NOT NULL CHECK (window IN ('day','month')),
   limit_micro INTEGER NOT NULL DEFAULT 0,         -- 金额上限 micro-USD，0 = 不设
   limit_requests INTEGER NOT NULL DEFAULT 0,      -- 请求数上限，0 = 不设
+  limit_tokens INTEGER NOT NULL DEFAULT 0,        -- token 上限（五类 token 合计），0 = 不设
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -235,11 +275,13 @@ CREATE TABLE IF NOT EXISTS quota_alerts(
   window TEXT NOT NULL,
   period_start INTEGER NOT NULL,                  -- 触发时所在周期的起点，周期翻转后自然允许新告警
   triggered_at INTEGER NOT NULL,
-  metric TEXT NOT NULL DEFAULT '',                -- micro / requests，说明是哪类额度跨阈值
+  metric TEXT NOT NULL DEFAULT '',                -- micro / requests / tokens，说明是哪类额度跨阈值
   used_micro INTEGER NOT NULL DEFAULT 0,
   limit_micro INTEGER NOT NULL DEFAULT 0,
   used_requests INTEGER NOT NULL DEFAULT 0,
   limit_requests INTEGER NOT NULL DEFAULT 0,
+  used_tokens INTEGER NOT NULL DEFAULT 0,
+  limit_tokens INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL DEFAULT 'quota',              -- quota / provider_failure / usage_missing_ratio
   subject TEXT NOT NULL DEFAULT '',                -- 全局规则的对象（如 provider id），配额规则留空
   -- 状态机：open -> acked -> closed，closed 只能 reopen 回 open；
@@ -287,7 +329,7 @@ CREATE TABLE IF NOT EXISTS provider_credentials(
   provider TEXT NOT NULL,                    -- 适配器 id（对应 providers.id）
   label TEXT NOT NULL DEFAULT '',            -- 人可读名称，如「主账号 / 备用号」
   base_url TEXT NOT NULL DEFAULT '',         -- 留空则回落到 providers.base_url → env → spec 默认
-  secret TEXT NOT NULL DEFAULT '',           -- 上游密钥（明文落库，理由见交付说明）
+  secret TEXT NOT NULL DEFAULT '',           -- 上游密钥（已封装为 u2a-enc:v1，读时解封）
   enabled INTEGER NOT NULL DEFAULT 1,        -- 0 = 保留但暂不参与轮换
   sort_order INTEGER NOT NULL DEFAULT 0,     -- 越小越先取；同值按 id 升序
   note TEXT NOT NULL DEFAULT '',
@@ -377,6 +419,13 @@ class Database:
             # 归属列：老库没有，启动时幂等补列；补完再建索引，避免旧库上索引先于列失败
             _ensure_column(conn, "api_keys", "owner_user_id", "TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_owner ON api_keys(owner_user_id)")
+            # 密钥级白名单：老库补列，'' = 不限制，行为与现状一致
+            _ensure_column(conn, "api_keys", "model_allow", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "api_keys", "ip_allow", "TEXT NOT NULL DEFAULT ''")
+            # token 配额：老策略默认 0（不设），不改变已有策略的拦截口径
+            _ensure_column(conn, "quota_policies", "limit_tokens", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "quota_alerts", "used_tokens", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "quota_alerts", "limit_tokens", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "request_logs", "key_id", "INTEGER")
             _ensure_column(conn, "request_logs", "key_name", "TEXT NOT NULL DEFAULT ''")
             # 前缀写时固化：删 key 后历史日志仍要能回答「这条请求是哪个 key 发的」；

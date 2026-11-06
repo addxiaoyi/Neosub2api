@@ -428,3 +428,29 @@ unpriced:
     reason: "trae 侧的模型标识（docs.trae.cn 子智能体文档中 DeepSeek-V4-Flash 正式版对应的调用值，也是 apps/control/app/adapters/trae.py 的 DEFAULT_WORK_MODEL）。Trae 国际站美元刊例价表只列 DeepSeek-V4-Flash 一行、未单列该 id；Trae 企业版价目表有 DeepSeek-V4-Flash 正式版（3/9/0.1 元/百万，2026-08-25 起）但只有人民币价。两处都无法直接确认为该 id 的美元结算价。"
     source: "https://docs.trae.cn/enterprise_billing-items"
     checked_at: "2026-11-04"
+
+# 与 token 价正交的计费规则：kind ∈ per_call（每次）/ per_second（每秒）/ long_context（输入超阈值倍率）。
+# 金额单位仍是 micro-USD；倍率用 multiplier_milli（×1000，1000 = 原价）。
+# 只收录能从官方价目表直接推出数字的规则，推不出的放 rules_pending，不编价。
+rules:
+  - provider: "*"
+    model: grok-4.6
+    kind: long_context
+    threshold: 200000
+    multiplier_milli: 2000
+    effective_from: 1793548800
+    source: "https://docs.x.ai/developers/pricing"
+    note: "≥200k 输入时输入 2.00→4.00、输出 6.00→12.00、缓存 0.50→1.00，三档同倍率；按 2 倍统一乘 token 金额。"
+
+rules_pending:
+  - provider: "*"
+    model: "*"
+    kind: per_call
+    reason: "图片按张计价，价格取决于尺寸与质量档（OpenAI 价目页按 low/medium/high × 尺寸分档），没有单一美元/张价；待计费负责人给定档位后再导入。"
+    checked_at: "2026-11-06"
+
+  - provider: "*"
+    model: "*"
+    kind: per_second
+    reason: "视频按秒计价（sora-2 等），厂商价目页按分辨率与时长分档，没有公布单一美元/秒价；待产品负责人给数字后再导入。"
+    checked_at: "2026-11-06"

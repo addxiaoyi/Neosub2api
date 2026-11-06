@@ -484,7 +484,7 @@ def test_usage_forwards_aggregate_and_lands_usage_missing(
     assert _credit_status(admin, "sub2api", "") == "usage_missing"
 
 
-def test_sub2api_videos_create_and_unimplemented_reads_answer_501(
+def test_sub2api_videos_create_ledgers_and_images_reads_answer_501(
     anon: httpx.Client, admin: httpx.Client, bearer_key: str, sub2api_on_stub: None
 ) -> None:
     STUB_HITS.clear()
@@ -498,12 +498,15 @@ def test_sub2api_videos_create_and_unimplemented_reads_answer_501(
     assert STUB_HITS[-1]["path"] == "/v1/videos"
     assert _credit_status(admin, "sub2api", "fake-chat-1") == "usage_missing"
 
-    # 上游只注册了 POST /v1/videos（gateway.go:107-109）：查询明确 501 而不是 500
+    # 上游只注册了 POST /v1/videos（gateway.go:107-109）：改读本地台账，
+    # source=local_ledger 明说这不是上游状态，不再 501
     task = anon.get("/v1/videos/vt-9", headers=_auth(bearer_key, "sub2api"))
-    assert task.status_code == 501, task.text
-    error = task.json()["error"]
-    assert error["code"] == "capability_unsupported"
-    assert error["provider"] == "sub2api"
+    assert task.status_code == 200, task.text
+    ledger = task.json()
+    assert ledger["id"] == "vt-9"
+    assert ledger["status"] == "pending"  # stub 创建响应是 queued，本地不会再变
+    assert ledger["source"] == "local_ledger"
+    assert STUB_HITS[-1]["path"] != "/v1/videos/vt-9"
 
     # images 同理：声明了创建但没有任务查询，读取端点也必须 501
     images_task = anon.get("/v1/images/tasks/it-9", headers=_auth(bearer_key, "sub2api"))
