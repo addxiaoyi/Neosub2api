@@ -17,12 +17,13 @@ with_config=0
 ready_url=""
 ready_timeout=20
 require_sidecar=0
+force=0
 core="${repo}/scripts/backup_core.py"
 
 usage() {
   cat <<'EOF'
 usage: restore.sh (--archive PATH | --latest) [--db PATH] [--backups-dir DIR]
-                  [--with-config] [--ready-url URL] [--ready-timeout SEC] [--require-sidecar]
+                  [--with-config] [--ready-url URL] [--ready-timeout SEC] [--require-sidecar] [--force]
 
   --archive PATH       .zip archive to restore (alias: --backup)
   --latest             use the newest archive in --backups-dir
@@ -31,6 +32,7 @@ usage: restore.sh (--archive PATH | --latest) [--db PATH] [--backups-dir DIR]
   --with-config        also restore config/, providers/, upstreams/
   --ready-url URL      poll /api/health/ready after restore, require checks.database.ok
   --require-sidecar    fail when the archive has no .sha256 sidecar
+  --force              skip the in-use guard (service must still be stopped on Windows)
 
 env: PYTHON=/path/to/python3 to override interpreter discovery
 EOF
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --ready-url) ready_url="$2"; shift 2 ;;
     --ready-timeout) ready_timeout="$2"; shift 2 ;;
     --require-sidecar) require_sidecar=1; shift ;;
+    --force) force=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -85,4 +88,5 @@ args=(restore --archive "$archive" --db "$db" --backups "$backups_dir" --repo "$
 (( with_config )) && args+=(--with-config)
 [[ -n "${ready_url}" ]] && args+=(--ready-url "$ready_url")
 (( require_sidecar )) && args+=(--require-sidecar)
+(( force )) && args+=(--force)
 exec "$py" "$core" "${args[@]}"

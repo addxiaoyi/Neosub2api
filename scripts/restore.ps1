@@ -28,6 +28,8 @@
   恢复后要验证的就绪地址，如 http://127.0.0.1:8010/api/health/ready
 .PARAMETER RequireSidecar
   归档没有 .sha256 旁注时直接失败（默认降级为 manifest 成员校验并告警）
+.PARAMETER Force
+  跳过「库仍被占用」的前置检查强行替换；正常停服后恢复不需要它
 .EXAMPLE
   powershell -File scripts\restore.ps1 -Latest
 .EXAMPLE
@@ -43,7 +45,8 @@ param(
     [switch]$WithConfig,
     [string]$ReadyUrl = "",
     [int]$ReadyTimeout = 20,
-    [switch]$RequireSidecar
+    [switch]$RequireSidecar,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +88,7 @@ try {
     if ($WithConfig) { $args += "--with-config" }
     if ($ReadyUrl) { $args += @("--ready-url", $ReadyUrl) }
     if ($RequireSidecar) { $args += "--require-sidecar" }
+    if ($Force) { $args += "--force" }
     & $exe @args
     exit $LASTEXITCODE
 } catch {

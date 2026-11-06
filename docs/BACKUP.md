@@ -31,6 +31,25 @@ manifest 关键字段：
 | `database.integrity_check` | 快照生成时的 `PRAGMA integrity_check` |
 | `tables` / `totals` | 每表行数与总行数，恢复后逐表比对 |
 | `demo.excluded` / `demo.found_rows` / `demo.removed_rows` | 演示数据处理结果 |
+| `secrets.policy` / `secrets.settings_fields` / `secrets.provider_credentials_rows` | 上游密钥处理策略（`encrypted` / `stripped` / `none`）与处理数量；旧归档没有该字段 |
+
+## 上游密钥在归档里怎么放
+
+归档里的 `db/unified.db` 会带上游密钥，所以本地归档不保留明文：`scripts/backup_core.py` 在打包前对快照副本调用 `protect_secrets`（`scripts/backup_core.py:419-505`），逐字段处理三类位置：
+
+| 位置 | 处理 |
+| --- | --- |
+| `settings` 的 `provider_config` | 名字像密钥的字段（`api_key`、`*_token`、`*_secret`、`*_key`、`extra_keys` 等）逐个封装；provider 的其余配置原样保留 |
+| `settings` 的 `upstream_config` | 同上，覆盖 upstash 一类上游密钥 |
+| `provider_credentials.secret` | 每行单独封装（行保留，恢复后凭据条目还在） |
+
+封装格式是 `u2a-enc:v1:` + base64(`nonce(12) || ciphertext || tag(16)`)，AES-256-GCM，AAD 固定为 `unified-2api-provider-secret-v1`，与归档文件加密（AAD `unified-2api-backup-v1`）分开。密钥只来自环境变量 `UNIFIED_BACKUP_ENCRYPTION_KEY`（32 字节 base64，与远端备份共用），模板见 `.env.example` / `deploy/.env.example`。
+
+**没配密钥时**：备份照常成功，但会把这些字段清空（行还在），在 stderr 打一条 `warning: 未配置 UNIFIED_BACKUP_ENCRYPTION_KEY…归档已清空上游密钥字段`，`manifest.json` 里记 `secrets.policy=stripped`，备份输出也会打印 `secrets: policy=stripped`。恢复这类归档时会再提示一次：provider 需要在「服务商」/「凭据」页重新粘贴密钥，否则不可用。不会出现「静默产出带明文密钥的归档」这条路径。
+
+**恢复时**：`unseal_secrets`（`scripts/backup_core.py:507-575`）只改解压出来的副本，在动目标库之前完成；`secrets.policy=encrypted` 的归档缺同一把密钥或密钥不匹配时直接失败（CLI 退出码 2；管理界面 400），目标库与服务不受影响。管理界面恢复成功后响应里多一个 `secrets` 字段，写明 `policy` 与还原数量。旧版本生成的归档没有 `secrets` 字段，`verify` 与恢复都会打印「旧版本归档，内含明文上游密钥」的告警。
+
+**残留边界**：`pre-restore-*` 是对当前库的字节级现场拷贝（`unified.db.bak`），刻意不做改写——它的用途就是坏库回滚，写入任何东西都可能毁掉现场。这个文件含明文上游密钥，请把它和归档一样按敏感文件保管（仅本机、权限 0600 的目录、不进版本库）。容器备份（`-UseContainer`）在打包前会短暂在宿主机留下未封装的 `.db` 快照，脚本在 `finally` 里删除；中断退出时请手工确认 `data/backups` 下没有残留的 `unified-snapshot-*.db`。
 
 ## 备份
 
@@ -54,7 +73,7 @@ PYTHON=/usr/bin/python3 ./scripts/backup.sh --db /var/lib/unified/unified.db --o
 | `-IncludeDemo` / `--include-demo` | 关闭 | 保留演示数据 |
 | `-UseContainer` | 关闭 | 仅 ps1：在 control 容器内 `VACUUM INTO`，再 `docker compose cp` 出来打包 |
 
-输出包含归档路径、归档 sha256、数据库 sha256、每表行数、demo 剔除数量、配置成员数与应用版本。
+输出包含归档路径、归档 sha256、数据库 sha256、每表行数、demo 剔除数量、密钥处理策略（`secrets: policy=...`）、配置成员数与应用版本。
 
 只校验不恢复：
 
@@ -78,7 +97,7 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 
 顺序（任一步失败就停止，不碰目标库）：
 
-1. **校验归档**：若 `.sha256` 存在，先比对归档本身；再逐个成员比对 manifest 里的 sha256、大小；对解压出的库再跑一次 `PRAGMA integrity_check`。
+1. **校验归档**：若 `.sha256` 存在，先比对归档本身；再逐个成员比对 manifest 里的 sha256、大小；对解压出的库再跑一次 `PRAGMA integrity_check`。归档带封装密钥时，本步还会用 `UNIFIED_BACKUP_ENCRYPTION_KEY` 把解压副本还原成明文；缺密钥或密钥不匹配就直接中止，不进入后续步骤（见「上游密钥在归档里怎么放」）。
 2. **留存现场**：当前库与 `-wal` / `-shm` 原样拷贝到 `data/backups/pre-restore-<时间戳>/unified.db.bak`（含 `pre-restore.json` 记录指纹）。
    这里刻意不用在线快照，因为“库已经坏了”正是最常见的恢复场景。
    目标库本来就不存在时跳过这一步：输出 `rows before restore: <unreadable/absent>`，也不生成 `pre-restore-*` 目录——没有现场可留，属正常分支，不是失败。
@@ -113,18 +132,18 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 | `POST /api/system/backup` | 管理员 | 立即备份，返回 `{ok, name, size_bytes, duration_ms, sha256, created_at}` |
 | `POST /api/system/restore` | 管理员 | body `{"name": "...", "confirm": true}`；`confirm` 缺省或 false → 400 |
 
-恢复门槛（`apps/control/app/routers/backup.py:227-238`）：`confirm=true`；`name` 必须命中 `ARCHIVE_RE` 白名单，不接受任意路径；归档必须存在；同一时间只允许一个备份/恢复，占锁失败 409。
+恢复门槛（`apps/control/app/routers/backup.py:262-269`）：`confirm=true`；`name` 必须命中 `ARCHIVE_RE` 白名单，不接受任意路径；归档必须存在；同一时间只允许一个备份/恢复，占锁失败 409。
 
 一次调用里走完的六道关：
 
-1. `core.load_archive`：zip 可读 + manifest 结构 + 成员 sha256/大小 + 解出库的 `PRAGMA integrity_check`（`backup.py:243`）。
-2. `_verify_archive`：在静止的归档库上跑 `core.selfcheck`，逐表行数与 manifest 严格相等（`backup.py:315-325`，调用点 260）。行数漂移在这里就被拦下。
-3. `_restore_pre_snapshot`：先给当前库出一份完整归档，失败即中止（`backup.py:298-306`，调用点 261）；响应里的 `pre_restore_backup` 就是它。
-4. `_snapshot_live`：给活库出一致性回滚快照，放在临时目录（`backup.py:328-338`，调用点 262）。
-5. `_backup_into` + `_ensure_wal`：SQLite 在线备份把归档页写进活库，再把 `journal_mode` 钉回 `wal`（`backup.py:341-362`、`:365-379`）。
-6. `_structure_check`：表集合、只增表行数下限、admin 账号、`integrity_check`、`foreign_key_check`、demo 残留（`backup.py:410-467`）；不过就 `_rollback_db`（`:400-407`）。
+1. `core.load_archive`：zip 可读 + manifest 结构 + 成员 sha256/大小 + 解出库的 `PRAGMA integrity_check`（`backup.py:202`）。
+2. `_verify_archive`：在静止的归档库上跑 `core.selfcheck`，逐表行数与 manifest 严格相等（`backup.py:305-316`，调用点 219）。行数漂移在这里就被拦下。
+3. `_restore_pre_snapshot`：先给当前库出一份完整归档，失败即中止（`backup.py:288-304`，调用点 227）；响应里的 `pre_restore_backup` 就是它。
+4. `_snapshot_live`：给活库出一致性回滚快照，放在临时目录（`backup.py:318-330`，调用点 228）。
+5. `_backup_into` + `_ensure_wal`：SQLite 在线备份把归档页写进活库，再把 `journal_mode` 钉回 `wal`（`backup.py:331-354`、`:355-371`）。
+6. `_structure_check`：表集合、只增表行数下限、admin 账号、`integrity_check`、`foreign_key_check`、demo 残留（`backup.py:400-459`）；不过就 `_rollback_db`（`:390-399`）。
 
-成功响应：`{ok, restored, path, pre_restore_backup, pre_restore_path, duration_ms, selfcheck_ok, rows_after}`，并写 `audit_logs`（action `backup.restore`）。
+成功响应：`{ok, restored, path, pre_restore_backup, pre_restore_path, duration_ms, selfcheck_ok, rows_after, secrets}`（`secrets` 里是 `policy` / `restored_fields` / `provider_credentials_rows`），并写 `audit_logs`（action `backup.restore`）。
 
 **能力边界**（和 CLI 的差别）：
 
@@ -144,6 +163,16 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 | 要一并恢复配置文件 | CLI（`--with-config`） |
 | 只有管理界面可用（无 shell / 无 Python 脚本环境） | 管理界面 |
 
+## 恢复的副作用：整库替换，在线会话全部失效
+
+两条恢复路径都是**整库整体替换**，不是按表合并：CLI 换文件、管理界面用 SQLite 在线备份把归档页写回活库，`sessions` 表都会回到归档时刻。因此恢复完成的那一刻：
+
+- 恢复时刻之后签发的会话全部消失，任何已登录的浏览器（包括管理员自己）在下一次请求都会被判未登录，必须重新登录；会话不区分用户，不存在「只踢普通用户」的选项。
+- 归档越旧，丢的会话越多；这是预期行为，不是登录功能故障。
+- 恢复前 `pre-restore-*` / 响应里的 `pre_restore_backup` 只用于回滚数据库内容，回滚同样是整库替换，会再次把 `sessions` 打回当时的快照——两次恢复各踢一次登录。
+- 网关调用所用的 API Key 在 `api_keys` 表里，随库一起回滚，不受会话失效影响；但恢复窗口内新签发的 API Key 会丢失。
+- 操作建议：把「所有人需要重新登录」写进恢复步骤，避免在长时间任务中途恢复；管理界面路径的并发窗口约 231–390 ms（见上文能力边界），窗口内新登录的会话同样可能丢。
+
 ## sha256 语义
 
 - 每个成员（数据库、配置）都有独立 sha256，写在 `manifest.json` 里；恢复时逐个重算。
@@ -153,7 +182,11 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 
 **（2026-11-05 已更正）**
 
-本句只对 CLI 路径成立：`scripts/restore.sh` / `restore.ps1` → `scripts/backup_core.py` 仍以字节拷贝留存现场、再换文件（`backup_core.py:618-657`、`712-725`），所以必须先停服务。管理界面的 `POST /api/system/restore` 已改为 SQLite 在线备份（`apps/control/app/routers/backup.py:341-362`），不停服务也能恢复，且不受 Windows 打开句柄限制；代价是应用中途失败只能回滚到一致性快照（内容一致，文件字节不同，快照之后的并发写丢失），不是字节级还原。**这条为什么重要**：按本节操作的人若把「必须停服务」当成所有恢复方式的硬前提，会在管理界面恢复时白停一次服务；反过来以为 CLI 也不用停机，会在 Windows 上反复失败。
+本句只对 CLI 路径成立：`scripts/restore.sh` / `restore.ps1` → `scripts/backup_core.py` 仍以字节拷贝留存现场、再换文件（`backup_core.py:1065-1104`、`:1346-1360`），所以必须先停服务。管理界面的 `POST /api/system/restore` 已改为 SQLite 在线备份（`apps/control/app/routers/backup.py:341-362`），不停服务也能恢复，且不受 Windows 打开句柄限制；代价是应用中途失败只能回滚到一致性快照（内容一致，文件字节不同，快照之后的并发写丢失），不是字节级还原。**这条为什么重要**：按本节操作的人若把「必须停服务」当成所有恢复方式的硬前提，会在管理界面恢复时白停一次服务；反过来以为 CLI 也不用停机，会在 Windows 上反复失败。
+
+**（2026-11-06 已更正）**
+
+「停服」不再是只写在文档里的约定：`cmd_restore` 在解压归档之前先跑 `assert_restore_target_idle`（`scripts/backup_core.py:1050`，探测实现 `:905-1048`，调用点 `:1299`、解压在 `:1309`），依次查 Windows 文件共享冲突、data 目录 `*.pid` 与仓库 `.run/start.json` 里还活着的控制面进程、非空 `-wal` 残留、以及库上未结束的写事务。命中任一条就以退出码 3 拒绝执行，并直接告诉操作者停哪个服务、或改走 `POST /api/system/restore`、确需强推再 `--force`。**这条为什么重要**：此前代码不拦，Windows 上对占用中的库执行恢复会失败在半途、Linux 上会丢掉快照之后的已提交事务；现在失败发生在动手之前，`pre-restore` 现场和目标库都不会被碰。停服后的正常恢复一字未改（`tmp/restore-guard-drill/drill.py`：占用时 exit=3 且 mtime 未变，优雅停服后 exit=0、selfcheck ok）。
 
 ## 演示数据
 
@@ -191,10 +224,15 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 - 配置恢复是显式选项；默认不覆盖 `config/`、`providers/`、`upstreams/`。
 - 演示数据识别依赖标记（`demo_local` / `[demo] `）；用户自建的、未打标记的演示数据不会被剔除。
 - 目标库被其他进程占用时替换失败，脚本会提示先停服务；不会强删文件。（仅 CLI 路径；管理界面走在线备份，不受打开句柄限制）
+- 远端备份的 `endpoint` 与 provider `base_url` 共用同一套地址守卫：默认拒绝环回/私网/链路本地地址，云元数据地址无条件拒绝；连本机或内网 MinIO 需显式设置 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1`。
 - 归档没有 `.sha256` 旁注时，无法发现“manifest 与成员被一起篡改”的情况，严格场景请加 `--require-sidecar`。
 - 旧脚本 `backup.ps1 -Compress` 生成的 zip 结构与当前 manifest 不同，新核心会拒绝；请用新脚本重新备份。
 - 旧封装参数 `-Compress`、`-SkipVerify` 不再保留：归档始终压缩；校验默认执行，严格模式用 `--require-sidecar`。
 - `scripts/backup_lib.py` 是旧实现的遗留文件，四个封装脚本已不再调用它。
+
+**（2026-11-06 已更正）**
+
+上面第一条「本地归档本身不加密」只对归档文件外层成立：`db/unified.db` 成员里有 `settings.provider_config` 的 `api_key`、`upstream_config` 的上游密钥和 `provider_credentials.secret`。旧版把整库快照原样打进 zip，等于一旦归档被拷走，所有上游密钥直接泄给拿文件的人——外层 zip 有没有加密都不影响这一点，因为本地归档本来就没有外层加密。现在的行为见上文「上游密钥在归档里怎么放」：配了 `UNIFIED_BACKUP_ENCRYPTION_KEY` 就逐字段 AES-256-GCM 封装，恢复时还原；没配就清空并显式告警、恢复后要求重新粘贴。误判后果是把「本地归档不加密」读成「本地归档没有密钥暴露面」，从而按普通日志文件分发/拷贝 `unified-backup-*.zip`，或在恢复后误以为 provider 会自己恢复可用。
 
 ## 2026-11-04 覆盖索引变更后复验
 

@@ -471,6 +471,138 @@ def _decrypt_bytes_stdlib(payload: bytes, key: bytes) -> bytes:
     return _xor_stream(ciphertext, _keystream(aes, nonce, 2, len(ciphertext)))
 
 
+# ---------------------------------------------------------------- 字段级封装
+# 本地归档里的上游密钥（settings.provider_config、provider_credentials.secret）
+# 以 `u2a-enc:v1:` 前缀 + 同一套 AES-256-GCM 形式落库：nonce(12) || ciphertext || tag(16)。
+# AAD 用独立常量，和归档文件加密分开，避免同一密钥在两个用途之间互相拼接密文。
+
+SEAL_PREFIX = "u2a-enc:v1:"
+SECRET_AAD = b"unified-2api-provider-secret-v1"
+
+
+def is_sealed(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(SEAL_PREFIX)
+
+
+def seal_text(text: str, key: bytes, *, implementation: str | None = None) -> str:
+    """把单个密钥字段封装成可落库的字符串；明文为空时原样返回，不产出无意义密文。"""
+    payload = _seal_bytes_with(
+        text.encode("utf-8"), key, SECRET_AAD, implementation or backend()
+    )
+    return SEAL_PREFIX + base64.b64encode(payload).decode("ascii")
+
+
+def unseal_text(token: str, key: bytes, *, implementation: str | None = None) -> str:
+    """还原 `seal_text` 的结果；格式不对抛 ValueError，tag 不对抛 CryptoVerifyError。"""
+    if not is_sealed(token):
+        raise ValueError("不是本工具封装的字段（缺少 u2a-enc:v1: 前缀）")
+    try:
+        payload = base64.b64decode(token[len(SEAL_PREFIX):], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"封装字段不是合法 base64：{exc}") from exc
+    plain = _unseal_bytes_with(payload, key, SECRET_AAD, implementation or backend())
+    return plain.decode("utf-8")
+
+
+def _seal_bytes_with(data: bytes, key: bytes, aad: bytes, implementation: str) -> bytes:
+    if implementation == "lib":
+        if not lib_available():
+            raise CryptoBackendUnavailable(f"lib 实现不可用：{_lib_reason}")
+        return _seal_bytes_lib(data, key, aad)
+    if implementation == "stdlib":
+        return _seal_bytes_stdlib(data, key, aad)
+    raise ValueError(f"未知的加密实现：{implementation}")
+
+
+def _unseal_bytes_with(payload: bytes, key: bytes, aad: bytes, implementation: str) -> bytes:
+    if implementation == "lib":
+        if not lib_available():
+            raise CryptoBackendUnavailable(f"lib 实现不可用：{_lib_reason}")
+        return _unseal_bytes_lib(payload, key, aad)
+    if implementation == "stdlib":
+        return _unseal_bytes_stdlib(payload, key, aad)
+    raise ValueError(f"未知的解密实现：{implementation}")
+
+
+def _seal_bytes_lib(data: bytes, key: bytes, aad: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    if len(key) != 32:
+        raise ValueError("AES-256 需要 32 字节密钥")
+    nonce = os.urandom(NONCE_BYTES)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(aad)
+    ciphertext = encryptor.update(data) + encryptor.finalize()
+    return nonce + ciphertext + encryptor.tag
+
+
+def _unseal_bytes_lib(payload: bytes, key: bytes, aad: bytes) -> bytes:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    if len(key) != 32:
+        raise ValueError("AES-256 需要 32 字节密钥")
+    if len(payload) < NONCE_BYTES + TAG_BYTES:
+        raise CryptoVerifyError("密文长度不足，缺少 nonce 或 tag")
+    nonce = payload[:NONCE_BYTES]
+    ciphertext = payload[NONCE_BYTES:-TAG_BYTES]
+    tag = payload[-TAG_BYTES:]
+    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+    decryptor.authenticate_additional_data(aad)
+    try:
+        return decryptor.update(ciphertext) + decryptor.finalize()
+    except InvalidTag as exc:
+        raise CryptoVerifyError("GCM 校验失败：密钥不对或密文被篡改") from exc
+
+
+def _seal_bytes_stdlib(data: bytes, key: bytes, aad: bytes) -> bytes:
+    """与 `_decrypt_bytes_stdlib` 的校验顺序逐字节对齐：GHASH(AAD) → GHASH(CT) → 长度块。"""
+    aes = _AES256(key)
+    table = _ghash_table(aes.encrypt_block(bytes(16)))
+    nonce = os.urandom(NONCE_BYTES)
+    ciphertext = _xor_stream(data, _keystream(aes, nonce, 2, len(data)))
+    state = _ghash_padded(0, aad, table)
+    state = _ghash_padded(state, ciphertext, table)
+    state ^= int.from_bytes(struct.pack(">QQ", len(aad) * 8, len(data) * 8), "big")
+    acc = 0
+    for pos in range(16):
+        acc ^= table[pos][(state >> (8 * (15 - pos))) & 0xFF]
+    mask = aes.encrypt_block(_counter_block(nonce, 1))
+    tag = bytes(
+        a ^ b
+        for a, b in zip(
+            struct.pack(">QQ", acc >> 64, acc & 0xFFFFFFFFFFFFFFFF), mask
+        )
+    )
+    return nonce + ciphertext + tag
+
+
+def _unseal_bytes_stdlib(payload: bytes, key: bytes, aad: bytes) -> bytes:
+    if len(payload) < NONCE_BYTES + TAG_BYTES:
+        raise CryptoVerifyError("密文长度不足，缺少 nonce 或 tag")
+    nonce = payload[:NONCE_BYTES]
+    ciphertext = payload[NONCE_BYTES:-TAG_BYTES]
+    tag = payload[-TAG_BYTES:]
+    aes = _AES256(key)
+    table = _ghash_table(aes.encrypt_block(bytes(16)))
+    state = _ghash_padded(0, aad, table)
+    state = _ghash_padded(state, ciphertext, table)
+    state ^= int.from_bytes(struct.pack(">QQ", len(aad) * 8, len(ciphertext) * 8), "big")
+    acc = 0
+    for pos in range(16):
+        acc ^= table[pos][(state >> (8 * (15 - pos))) & 0xFF]
+    mask = aes.encrypt_block(_counter_block(nonce, 1))
+    expected = bytes(
+        a ^ b
+        for a, b in zip(
+            struct.pack(">QQ", acc >> 64, acc & 0xFFFFFFFFFFFFFFFF), mask
+        )
+    )
+    if not hmac.compare_digest(expected, tag):
+        raise CryptoVerifyError("GCM 校验失败：密钥不对或密文被篡改")
+    return _xor_stream(ciphertext, _keystream(aes, nonce, 2, len(ciphertext)))
+
+
 def load_key(environ: dict[str, str] | None = None) -> bytes:
     """从环境变量读取并严格校验；没有/格式错都抛异常，由调用方拒绝上传。"""
     raw = (environ if environ is not None else os.environ).get(KEY_ENV, "")

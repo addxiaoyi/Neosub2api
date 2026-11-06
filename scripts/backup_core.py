@@ -13,12 +13,18 @@ scripts/backup.ps1、backup.sh、restore.ps1、restore.sh 都只是这一层的�
 
 演示数据（provider=demo_local、密钥名以 "[demo] " 开头）默认不进入归档，
 清单里记录删了多少行；需要保留时显式 --include-demo。
+
+上游密钥（settings.provider_config 里的 api_key 等、provider_credentials.secret）
+在归档里一律不是明文：配了 UNIFIED_BACKUP_ENCRYPTION_KEY 就逐字段 AES-256-GCM
+封装（恢复时还原）；没配就清空这些字段并在 stderr 与清单里明确记录，恢复后提示
+重新粘贴，绝不静默产出带明文密钥的归档。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -66,10 +72,30 @@ CONFIG_DIRS = ("config", "providers", "upstreams")
 
 EXIT_FAIL = 1
 EXIT_VERIFY = 2
+EXIT_BUSY = 3
+
+# 上游密钥封装：密钥只从环境变量读，与远端备份共用同一把（变量含义已在 .env.example 写明）
+SECRET_KEY_ENV = "UNIFIED_BACKUP_ENCRYPTION_KEY"
+# 会被逐字段封装/清空的 settings 键：provider_config 是界面写入的上游密钥主体，
+# upstream_config 里的 upstash/同名密钥字段同理
+SECRET_SETTING_KEYS = ("provider_config", "upstream_config")
+SECRET_CREDENTIAL_TABLE = "provider_credentials"
+# 与 apps/control/app/routers/settings.py 的 SECRET_KEYS 口径一致，另加几个实际出现在
+# provider_config.options 里的名字（sentinel_token / extra_keys / cookies）
+SECRET_FIELD_NAMES = frozenset({
+    "api_key", "apikey", "token", "secret", "password",
+    "access_token", "refresh_token", "cookie", "cookies", "authorization",
+    "client_secret", "sentinel_token", "extra_keys",
+})
+SECRET_FIELD_SUFFIXES = ("_key", "_secret", "_token", "_password")
 
 
 class BackupError(RuntimeError):
     """可预期的运维错误：给一句结论，不打堆栈。"""
+
+
+class TargetBusyError(BackupError):
+    """目标库看起来还在被服务使用：拒绝整体替换，单独给一个退出码区分于校验失败。"""
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -301,6 +327,253 @@ def demo_residue(conn: sqlite3.Connection) -> dict[str, int]:
     return count_demo_rows(conn)
 
 
+# ---------------------------------------------------------------- 上游密钥封装
+
+
+_crypto_module = None
+
+
+def backup_crypto():
+    """按文件路径加载控制面的加密实现，避免把整个 app 包（及其依赖）拖进来。"""
+    global _crypto_module  # noqa: PLW0603
+    if _crypto_module is None:
+        source = repo_root() / "apps" / "control" / "app" / "services" / "backup_crypto.py"
+        if not source.is_file():
+            raise BackupError(f"加密组件缺失：找不到 {source}，无法处理归档里的上游密钥")
+        spec = importlib.util.spec_from_file_location("unified_backup_crypto", source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        _crypto_module = module
+    return _crypto_module
+
+
+def _is_secret_field(name: str) -> bool:
+    lowered = name.strip().lower()
+    return lowered in SECRET_FIELD_NAMES or lowered.endswith(SECRET_FIELD_SUFFIXES)
+
+
+def _scrub_secret_value(value, scrub) -> tuple[object, int]:
+    """只处理「名字像密钥」字段的值；列表（如 options.extra_keys）逐元素处理。"""
+    if isinstance(value, str):
+        if not value.strip():
+            return value, 0
+        return scrub(value), 1
+    if isinstance(value, list):
+        out: list = []
+        count = 0
+        for item in value:
+            new_item, changed = _scrub_secret_value(item, scrub)
+            out.append(new_item)
+            count += changed
+        return out, count
+    if isinstance(value, dict):
+        return _scrub_secret_fields(value, scrub)
+    return value, 0
+
+
+def _scrub_secret_fields(node, scrub) -> tuple[object, int]:
+    if isinstance(node, dict):
+        out: dict = {}
+        count = 0
+        for name, value in node.items():
+            if isinstance(name, str) and _is_secret_field(name):
+                new_value, changed = _scrub_secret_value(value, scrub)
+            else:
+                new_value, changed = _scrub_secret_fields(value, scrub)
+            out[name] = new_value
+            count += changed
+        return out, count
+    if isinstance(node, list):
+        out_list: list = []
+        count = 0
+        for item in node:
+            new_item, changed = _scrub_secret_fields(item, scrub)
+            out_list.append(new_item)
+            count += changed
+        return out_list, count
+    return node, 0
+
+
+def _walk_sealed(node, unseal) -> tuple[object, int]:
+    """解封按内容前缀判断而不是字段名：以后改名或新增字段也不会漏还原。"""
+    if isinstance(node, dict):
+        out: dict = {}
+        count = 0
+        for name, value in node.items():
+            out[name], changed = _walk_sealed(value, unseal)
+            count += changed
+        return out, count
+    if isinstance(node, list):
+        out_list: list = []
+        count = 0
+        for item in node:
+            new_item, changed = _walk_sealed(item, unseal)
+            out_list.append(new_item)
+            count += changed
+        return out_list, count
+    if isinstance(node, str) and backup_crypto().is_sealed(node):
+        return unseal(node), 1
+    return node, 0
+
+
+def protect_secrets(conn: sqlite3.Connection) -> dict:
+    """归档前处理上游密钥，返回要写进 manifest 的 secrets 记录。
+
+    配了 UNIFIED_BACKUP_ENCRYPTION_KEY：逐字段 AES-256-GCM 封装，恢复时用同一把密钥还原。
+    没配：清空这些字段（行还在，界面能看出「这条凭据需要重新粘贴」）并在 stderr 显式告警——
+    宁可恢复后要人重贴，也不把明文密钥写进归档。
+    """
+    crypto = backup_crypto()
+    key = None
+    reason = ""
+    try:
+        key = crypto.load_key()
+    except Exception as exc:  # 缺密钥/格式坏都按「未配置」处理，行为一致
+        reason = str(exc)
+
+    def scrub(text: str) -> str:
+        if crypto.is_sealed(text):
+            return text
+        return crypto.seal_text(text, key) if key else ""
+
+    info: dict = {
+        "policy": "none",
+        "algorithm": "aes-256-gcm",
+        "key_env": SECRET_KEY_ENV,
+        "settings_keys": [],
+        "settings_fields": 0,
+        "provider_credentials_rows": 0,
+    }
+    if reason:
+        info["reason"] = reason
+
+    for setting_key in SECRET_SETTING_KEYS:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (setting_key,)).fetchone()
+        if row is None:
+            continue
+        try:
+            node = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(node, dict):
+            continue
+        cleaned, count = _scrub_secret_fields(node, scrub)
+        if not count:
+            continue
+        conn.execute(
+            "UPDATE settings SET value = ? WHERE key = ?",
+            (json.dumps(cleaned, ensure_ascii=False), setting_key),
+        )
+        info["settings_fields"] += count
+        info["settings_keys"].append(setting_key)
+
+    if has_table(conn, SECRET_CREDENTIAL_TABLE):
+        rows = conn.execute(
+            f"SELECT id, secret FROM {SECRET_CREDENTIAL_TABLE} WHERE secret <> ''"
+        ).fetchall()
+        for row in rows:
+            text = row["secret"]
+            if not isinstance(text, str) or not text.strip():
+                continue
+            sealed = scrub(text)
+            if sealed == text:
+                continue
+            conn.execute(
+                f"UPDATE {SECRET_CREDENTIAL_TABLE} SET secret = ? WHERE id = ?",
+                (sealed, row["id"]),
+            )
+            info["provider_credentials_rows"] += 1
+    conn.commit()
+
+    # UPDATE 只改写页内内容，旧明文页可能留在 freelist；VACUUM 重建后归档里才真的搜不到。
+    # 快照副本统一落成 delete 日志模式，免得上游密钥加密后的内容还留在 -wal 里。
+    mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    if mode != "delete":
+        conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("VACUUM")
+
+    if info["settings_fields"] or info["provider_credentials_rows"]:
+        info["policy"] = "encrypted" if key else "stripped"
+    if info["policy"] == "stripped":
+        print(
+            f"warning: 未配置 {SECRET_KEY_ENV}（或不是 32 字节 base64），归档已清空上游密钥字段："
+            "恢复后需在「服务商」/「凭据」页重新粘贴，否则 provider 不可用。"
+            "需要原样还原时请先配置该环境变量再备份。",
+            file=sys.stderr,
+        )
+    return info
+
+
+def unseal_secrets(db: Path, manifest: dict) -> dict:
+    """恢复前把归档里封装的上游密钥还原成明文（只改解压出来的副本）。"""
+    raw = manifest.get("secrets")
+    info = raw if isinstance(raw, dict) else {}
+    policy = str(info.get("policy") or "none")
+    result: dict = {"policy": policy, "restored_fields": 0, "provider_credentials_rows": 0}
+    if policy != "encrypted":
+        return result
+
+    crypto = backup_crypto()
+    try:
+        key = crypto.load_key()
+    except Exception as exc:
+        raise BackupError(
+            f"归档里的上游密钥已用 {SECRET_KEY_ENV} 加密封装，恢复需要同一把密钥（当前不可用：{exc}）。"
+            "配好环境变量后重试；拿不到密钥就只能放弃还原，恢复后到「服务商」/「凭据」页重新粘贴。"
+        ) from exc
+
+    def unseal(text: str) -> str:
+        return crypto.unseal_text(text, key)
+
+    conn = open_db(db)
+    try:
+        for setting_key in SECRET_SETTING_KEYS:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (setting_key,)
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                node = json.loads(row["value"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(node, dict):
+                continue
+            cleaned, count = _walk_sealed(node, unseal)
+            if not count:
+                continue
+            conn.execute(
+                "UPDATE settings SET value = ? WHERE key = ?",
+                (json.dumps(cleaned, ensure_ascii=False), setting_key),
+            )
+            result["restored_fields"] += count
+
+        if has_table(conn, SECRET_CREDENTIAL_TABLE):
+            rows = conn.execute(f"SELECT id, secret FROM {SECRET_CREDENTIAL_TABLE}").fetchall()
+            for row in rows:
+                if not crypto.is_sealed(row["secret"]):
+                    continue
+                conn.execute(
+                    f"UPDATE {SECRET_CREDENTIAL_TABLE} SET secret = ? WHERE id = ?",
+                    (unseal(row["secret"]), row["id"]),
+                )
+                result["provider_credentials_rows"] += 1
+        conn.commit()
+        # 解封后同样重建文件：旧的密文页不留在解压副本里，也顺手压实页数
+        mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if mode != "delete":
+            conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("VACUUM")
+    except (crypto.CryptoVerifyError, ValueError) as exc:
+        raise BackupError(
+            f"归档里的上游密钥用当前 {SECRET_KEY_ENV} 解不开：{exc}。"
+            "密钥不匹配时不要继续恢复，否则 provider 会拿到无法使用的密钥"
+        ) from exc
+    finally:
+        conn.close()
+    return result
+
+
 # ---------------------------------------------------------------- 归档构建
 
 
@@ -329,7 +602,7 @@ def copy_repo_files(root: Path, staging: Path, files: list[Path]) -> list[dict]:
 
 
 def build_manifest(*, source_label: str, method: str, db_file: Path, members: list[dict], demo: dict,
-                   root: Path) -> dict:
+                   root: Path, secrets: dict) -> dict:
     stats = database_stats(db_file)
     return {
         "manifest_version": MANIFEST_VERSION,
@@ -358,6 +631,7 @@ def build_manifest(*, source_label: str, method: str, db_file: Path, members: li
         "tables": stats["tables"],
         "totals": {"tables": len(stats["tables"]), "rows": sum(stats["tables"].values())},
         "demo": demo,
+        "secrets": secrets,
         "files": members,
     }
 
@@ -434,13 +708,14 @@ def make_archive(*, db_source: Path, out_dir: Path, keep: int, include_demo: boo
                     raise BackupError(f"demo data still present after filtering: {residue}")
             else:
                 demo["note"] = "demo rows kept because --include-demo was requested"
+            secrets_info = protect_secrets(conn)
         finally:
             conn.close()
 
         members = copy_repo_files(root, staging, collect_repo_files(root))
         manifest = build_manifest(
             source_label=source_label, method=method, db_file=db_file, members=members,
-            demo=demo, root=root,
+            demo=demo, root=root, secrets=secrets_info,
         )
         (staging / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -472,6 +747,10 @@ def make_archive(*, db_source: Path, out_dir: Path, keep: int, include_demo: boo
     print(
         f"demo: excluded={demo['excluded']} found={demo.get('found_rows', 0)} "
         f"removed={demo.get('removed_rows', 0)} detail={json.dumps(demo.get('removed') or {}, ensure_ascii=False, sort_keys=True)}"
+    )
+    print(
+        f"secrets: policy={secrets_info['policy']} fields={secrets_info['settings_fields']} "
+        f"credentials={secrets_info['provider_credentials_rows']} key_env={SECRET_KEY_ENV}"
     )
     print(f"config files: {len(members)} ({', '.join(item['member'] for item in members)})" if members
           else "config files: 0")
@@ -609,10 +888,178 @@ def print_load_summary(archive: Path, digest: str | None, manifest: dict) -> Non
         f"demo: excluded={demo.get('excluded')} found={demo.get('found_rows', 0)} "
         f"removed={demo.get('removed_rows', 0)}"
     )
+    secrets = manifest.get("secrets")
+    if isinstance(secrets, dict):
+        print(
+            f"secrets: policy={secrets.get('policy') or 'none'} fields={secrets.get('settings_fields', 0)} "
+            f"credentials={secrets.get('provider_credentials_rows', 0)} key_env={secrets.get('key_env')}"
+        )
+    else:
+        print("secrets: policy=plaintext (旧版本归档，未做上游密钥封装)")
     print(f"config files: {len(manifest.get('files') or [])}")
 
 
 # ---------------------------------------------------------------- 恢复
+
+
+def _handle_held(path: Path) -> bool:
+    """Windows：以「不允许任何人共享」的方式打开文件，失败于占用类错误即说明还有别人拿着句柄。
+
+    SQLite 在 Windows 上打开库与 -wal/-shm 时用的是 FILE_SHARE_READ|WRITE，
+    所以控制面只要还连着库，这个探测就会被拒绝；文件根本不存在（错误 2）不算占用。
+    macOS/Linux 没有强制共享语义，这里恒返回 False，靠下面的 SQLite 写锁探测兜底。
+    """
+    if os.name != "nt" or not path.exists():
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    ERROR_NOT_FOUND = 2
+    SHARING_VIOLATION = 32
+    LOCK_VIOLATION = 33
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+    )
+    handle = kernel32.CreateFileW(
+        str(path), GENERIC_READ, 0, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle != invalid:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        return False
+    error = ctypes.get_last_error()
+    if error in (ERROR_NOT_FOUND,):
+        return False
+    return error in (SHARING_VIOLATION, LOCK_VIOLATION)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            ok = kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+            return bool(ok) and code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_owner(db: Path) -> str | None:
+    """data 目录的 *.pid 与仓库 .run/start.json 里记的控制面进程还活着就返回原因。
+
+    控制面是每请求开关连接，空闲时没有任何文件句柄，只能靠它自己留下的 pid 线索；
+    两种来源都没有时交由下面的句柄/写锁探测兜底。
+    """
+    for candidate in sorted(db.parent.glob("*.pid")):
+        try:
+            pid = int(candidate.read_text(encoding="utf-8").strip().split()[0])
+        except (OSError, ValueError, IndexError):
+            continue
+        if _pid_alive(pid):
+            return f"{candidate.name} 指向的控制面进程 {pid} 仍在运行"
+
+    state = repo_root() / ".run" / "start.json"
+    try:
+        data = json.loads(state.read_text(encoding="utf-8"))
+        pid = int(data.get("api_pid") or 0)
+        # 状态文件不记 db 路径，只对仓库默认数据目录负责，别误伤指向别处的恢复
+        default_db = (Path(data.get("root") or repo_root()) / "data" / "unified.db").resolve()
+        if pid and db.resolve() == default_db and _pid_alive(pid):
+            return f"scripts/start 起的控制面进程 {pid} 仍在运行（.run/start.json）"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _wal_leftover(db: Path) -> bool:
+    """有非空 -wal 说明上个实例没正常退出（正常关闭会 checkpoint 并删掉 -wal/-shm）。
+
+    这时 -wal 里可能还有已提交但未落主库的事务，直接换文件等于静默丢数据，
+    所以按「可疑占用」处理，要人显式确认。
+    """
+    wal = Path(f"{db}-wal")
+    try:
+        return wal.is_file() and wal.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def target_in_use(db: Path) -> str | None:
+    """返回「目标库仍被占用」的人话原因；判断不了就返回 None，不拦正常恢复。"""
+    for item in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
+        if _handle_held(item):
+            return f"{item.name} 仍被另一个进程打开（Windows 文件共享冲突）"
+
+    owner = _lock_owner(db)
+    if owner:
+        return owner
+
+    if _wal_leftover(db):
+        return f"存在非空的 {db.name}-wal，上个实例可能没有正常退出，残留事务可能被丢弃"
+
+    # 句柄探测抓不到「进程闲置、按请求开关连接」的场景，再看一眼有没有未结束的写事务：
+    # 这时换文件，对方会把自己的旧事务写到新库上。
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db), timeout=0.2)
+        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ROLLBACK")
+    except sqlite3.OperationalError as exc:
+        text = str(exc).lower()
+        if "locked" in text or "busy" in text:
+            return f"数据库上还有未结束的写事务（{exc}）"
+    except sqlite3.Error:
+        # 库已损坏时恢复恰恰是来救它的，探测失败不构成拦截理由
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+    return None
+
+
+def assert_restore_target_idle(db: Path, *, force: bool) -> None:
+    if force or not db.is_file():
+        return
+    reason = target_in_use(db)
+    if reason is None:
+        return
+    raise TargetBusyError(
+        f"目标库还在被使用：{reason}。CLI 恢复是整文件替换，服务在跑时替换会失败或让写入错乱。\n"
+        f"  先停控制面再重试：bash scripts/start.sh --stop / powershell -File scripts\\start.ps1 -Stop；\n"
+        f"  容器部署用 docker compose stop control（或 docker stop <容器名>）。\n"
+        f"  不停服请改用管理界面的在线恢复：POST /api/system/restore。\n"
+        f"  确认没有进程在用、仍要强行替换，加 --force（Windows 上仍可能因文件占用失败）。"
+    )
 
 
 def pre_restore(db: Path, backups_dir: Path) -> Path:
@@ -847,6 +1294,12 @@ def cmd_restore(args) -> int:
     backups_dir = Path(args.backups)
     repo = Path(args.repo)
 
+    # 换文件之前先确认没有人在用：这一步拦的是「服务还在跑就恢复」，
+    # 与归档校验无关，所以放在最前面，避免先花时间解压再失败。
+    assert_restore_target_idle(db, force=bool(getattr(args, "force", False)))
+    if getattr(args, "force", False) and db.is_file():
+        print("warning: 已跳过占用检查（--force），替换时仍可能被系统文件锁拒绝", file=sys.stderr)
+
     digest = archive_digest(archive)
     if digest is None:
         if args.require_sidecar:
@@ -857,6 +1310,25 @@ def cmd_restore(args) -> int:
     try:
         print_load_summary(archive, digest, manifest)
         print(f"target: {db}")
+
+        # 只改解压出来的副本；密钥缺失/不匹配时在动目标库之前失败
+        secrets_state = unseal_secrets(db_file, manifest)
+        if secrets_state["policy"] == "encrypted":
+            print(
+                f"secrets: restored fields={secrets_state['restored_fields']} "
+                f"credentials={secrets_state['provider_credentials_rows']}"
+            )
+        elif secrets_state["policy"] == "stripped":
+            print(
+                "warning: 归档里的上游密钥在备份时已被清空（当时未配置 "
+                f"{SECRET_KEY_ENV}），恢复后需在「服务商」/「凭据」页重新粘贴，否则 provider 不可用",
+                file=sys.stderr,
+            )
+        elif "secrets" not in manifest:
+            print(
+                "warning: 该归档由未做密钥封装的旧版本生成，内含明文上游密钥，请按敏感文件保管",
+                file=sys.stderr,
+            )
 
         before = None
         if db.is_file():
@@ -956,6 +1428,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ready-timeout", type=int, default=20)
     p.add_argument("--require-sidecar", action="store_true")
     p.add_argument("--skip-verify", action="store_true", help="emergency only: tolerate a missing .sha256 sidecar")
+    p.add_argument(
+        "--force", action="store_true",
+        help="skip the in-use guard and replace the database even if a service may still hold it",
+    )
     p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("inspect", help="read-only stats of a database")
@@ -973,6 +1449,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args) or 0)
+    except TargetBusyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_BUSY
     except BackupError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_VERIFY if args.command in {"verify", "restore"} else EXIT_FAIL
