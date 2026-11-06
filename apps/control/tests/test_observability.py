@@ -182,6 +182,8 @@ def test_probes_work_without_login(base_url) -> None:
 
 def test_readiness_503_names_unhealthy_subsystem(admin, base_url) -> None:
     original = {item["id"]: bool(item["enabled"]) for item in admin.get("/api/providers").json()}
+    listed = admin.get("/api/providers").json()
+    had_key = any(item["id"] == "opencode" and item["has_api_key"] for item in listed)
     try:
         for pid, enabled in original.items():
             if enabled:
@@ -191,7 +193,9 @@ def test_readiness_503_names_unhealthy_subsystem(admin, base_url) -> None:
         assert down.json()["unhealthy"] == ["providers"]
         assert down.json()["checks"]["providers"]["enabled"] == 0
 
-        # opencode 的 spec.readiness 是 ready；启用后至少一家可服务，探针应恢复 200
+        # opencode 填上 key 后 readiness 才是 ready；启用后至少一家可服务，探针应恢复 200
+        if not had_key:
+            admin.patch("/api/providers/opencode", json={"api_key": "sk-readiness-probe"}).raise_for_status()
         admin.patch("/api/providers/opencode", json={"enabled": True}).raise_for_status()
         up = admin.get("/api/health/ready")
         assert up.status_code == 200
@@ -199,6 +203,8 @@ def test_readiness_503_names_unhealthy_subsystem(admin, base_url) -> None:
     finally:
         for pid, enabled in original.items():
             admin.patch(f"/api/providers/{pid}", json={"enabled": enabled}).raise_for_status()
+        if not had_key:
+            admin.patch("/api/providers/opencode", json={"api_key": ""}).raise_for_status()
 
 
 def test_metrics_requires_admin_and_reads_existing_tables(admin, base_url) -> None:

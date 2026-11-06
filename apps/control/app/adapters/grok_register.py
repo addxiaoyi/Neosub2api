@@ -33,6 +33,27 @@ class GrokRegisterAdapter(ProviderAdapter):
         self._settings = settings
         super().__init__(base_url)
 
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        executor = str(getattr(self._settings, "grok_register_executor_url", "") or "").strip()
+        if executor:
+            # 地址是配置事实，执行器进程是否在线只能由外部运行时自证：本阶段不做进程探测
+            return "needs_config", (
+                "执行器地址已配置，但浏览器执行器是否在线需外部运行时自证；"
+                "控制面在列表渲染阶段不探测该进程，故无法判定能否出任务",
+            )
+        return "needs_config", (
+            "GROK_REGISTER_EXECUTOR_URL 指向浏览器执行器（当前为空）；"
+            "未配置时任务入队后会以明确原因失败，地址由部署环境提供，无法在列表阶段判定",
+        )
+
     async def health(self) -> dict[str, Any]:
         stats = queue_stats(self._settings.db_path)
         executor = "http" if self._settings.grok_register_executor_url else "unconfigured"
