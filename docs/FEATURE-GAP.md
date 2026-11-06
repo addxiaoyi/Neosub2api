@@ -1,6 +1,6 @@
 # 功能缺口账本（FEATURE-GAP）
 
-> 判定时点：2026-11-05。这是快照，不是承诺。代码、测试、文档三者冲突时以代码为准；本文件随时间必然过时，复核请直接看工作区，不要拿旧结论当依据。
+> 判定时点：2026-11-05 首判；2026-11-06 二次复核（本版）。这是快照，不是承诺。代码、测试、文档三者冲突时以代码为准；本文件随时间必然过时，复核请直接看工作区，不要拿旧结论当依据。
 
 ## 1. 判定口径
 
@@ -19,6 +19,8 @@
 
 工作区当时有 139 项未提交改动（100 项修改 + 39 项未跟踪条目），见 §5；另有会话正在改 `apps/control`、`apps/web`，读到的代码可能是半成品。遇到明显半成品（例如路由缺处理分支、前端引用了尚不存在的接口）就在证据列标「实现中」，既不据此判已完成，也不据此判缺失。
 
+**（2026-11-06 复核）** 上面「139 项」是 2026-11-05 快照。当前工作区 `git status --porcelain` 为 53 行（38 项 `M` + 15 项 `??` 条目，含本文件与 `.gitignore` 修改）；按文件计 54 个（`apps/web/components/common/onboarding/` 展开为 `OnboardingWizard.tsx`、`OnboardingTodo.tsx` 两个文件）。仍无任何 add / commit / push。N-03 打包导入导出与 N-09 凭据引导已在本次复核中逐文件核对并落到档位，全部仍在未提交状态。逐项见 §5 末块「2026-11-06 二次复核快照」。
+
 ## 2. 总表
 
 | 编号 | 功能 | 对标仓库 | 现状档位 | 证据位置（当前工作区） | 阻塞原因 |
@@ -26,7 +28,7 @@
 | E-01 | 账号批量动作（禁用/启用/删除/重启/签到，逐条结果） | codebuddy2api、sub2api | 已实现 | `apps/control/app/routers/accounts.py:640`（`POST /accounts/batch`）、`:573`（`/restart`）、`:355`（`/checkin-all`）；`apps/control/tests/test_backend_gaps.py:97,127,151`；`apps/web/app/(main)/accounts/page.tsx:1267-1288`（批量操作条） | 无（后端文件首入库 b5772fb、批量操作在 81bb7d8、测试 ca7959b、前端 adf22d8 入库） |
 | E-02 | 账号导入 + 保存前试连 | codebuddy2api | 已实现 | `accounts.py:368`（`/import`）、`:432`（`/import/probe`）；`tests/test_accounts_import.py:73-246`；`apps/web/components/common/accounts/ImportAccountDialog.tsx` | 无（已在 81bb7d8 入库，前端组件在 adf22d8 入库） |
 | E-03 | 访问令牌批量动作 | 控制面自建（各上游共用） | 已实现 | `apps/control/app/routers/keys.py:205`（`POST /batch`）；`tests/test_keys_batch.py:55-198`（含超限 400、不泄密、单行审计）；`apps/web/app/(main)/keys/page.tsx:210`（批量操作条） | 无（后端批量与测试在 8b2d54d 入库、前端在 adf22d8 入库） |
-| E-04 | 请求日志导出 CSV | sub2api（系统日志）、控制面自建 | 已实现 | `apps/control/app/routers/logs.py:304`（`GET /logs/export`）；`tests/test_logs_export.py:104-197`（同筛选、6 类凭据脱敏、公式注入中和、超限报错不截断）；`apps/web/app/(main)/logs/page.tsx:253` | 无（导出路由与测试在 82f03a2 入库、文件首入库 dc19c82，前端 eacc574 入库） |
+| E-04 | 请求日志导出 CSV（管理员与普通用户） | sub2api（系统日志）、控制面自建 | 已实现 | `apps/control/app/routers/logs.py:64`（`_owner`）、`:71`（`_assert_key_owned`）、`:376`（`GET /logs/export`）、`:354`（`_audit_export`，动作名 `logs.export` 见 `:369`）；`tests/test_logs_export.py:113-137`（viewer 可导出）、`:139-194`（按 key 归属收窄、显式传他人 key 403、审计 `logs.export`）；`apps/web/app/(main)/logs/page.tsx:296-306`（导出按钮对所有登录用户可见） | 无（导出路由与测试在 82f03a2 入库、文件首入库 dc19c82，前端 eacc574 入库；2026-11-06 扩到普通用户，见 N-04） |
 | E-05 | 模型映射导入 / 导出 / 回滚 | codebuddy2api（模型映射页） | 已实现 | `apps/control/app/routers/settings.py:866,887,1085`；`tests/test_model_map_transfer.py:40-136`；`apps/web/app/(main)/settings/page.tsx:1848` | 无（已在 65e88b9 入库，组件在 dafb3c4 入库） |
 | E-06 | Antigravity / Sora / Claude Code 客户端兼容面 | sub2api | 已实现 | `apps/control/app/routers/v1.py:890-984`；`tests/test_v1_client_compat.py:224-500` | 无（已在 65e88b9 入库）；只对声明了 compat surface 的 provider 生效，其余 501（有意） |
 | E-07 | TOTP 两步验证 + 恢复码 | 控制面自建 | 已实现 | `apps/control/app/routers/auth.py:321-462`（status/setup/enable/disable/verify）；`apps/control/app/totp.py`；`apps/web/components/common/layout/ManagementBar.tsx:643`；`tests/test_user_account_system.py:163-253` | 无（已在 8b2d54d 入库） |
@@ -38,13 +40,23 @@
 | E-13 | qoder 会话搬运 | qoder-trae-workbuddy-switch | 已实现（受上游路径语义限制） | `apps/control/app/routers/qoder_sessions.py:38`（导出）、`:43`（导入），均为整包透传；`apps/web/components/common/settings/QoderSessionsPanel.tsx:21-204`；`ProvidersSection.tsx:812`；`tests/test_qoder_sessions_proxy.py:37,49` | 上游 `SessionCopy` 只认绝对路径，包留在 sidecar 主机，浏览器既不能上传也不能下载——这是上游协议边界，不是本仓漏做 |
 | P-01 | provider 定时健康检测 | sub2api（账号健康）、codebuddy2api | 半截 | 调度器 `apps/control/app/services/provider_health.py:46-150`；API `providers.py:30,43`；`main.py:148-157` 启动/停止；判定内核 `services/provider_probe.py`；测试 `tests/test_provider_health.py:123-235` | 前端无入口；默认关闭（`config.py:126` `health_check_enabled: bool = False`，测试 `:218` 也锁定这个默认） |
 | P-02 | `/quota/policies` 页面 | sub2api | 已实现 | 策略 CRUD `apps/control/app/routers/quota.py:193,244,308`（阈值 1-100 校验 `:236-241`），周期用量与告警列表 `:356,390`，告警确认 / 静默 / 关闭 / 重开与审计 `:473-566`；页面 `apps/web/app/(main)/quota/policies/page.tsx:373-384`（页头）、`:512`（删除确认）、`:771-830`（告警处置）；入口 `apps/web/app/(main)/quota/page.tsx:78-82,401`；基线登记 `FRONTEND-BASELINE.md:74`；测试 `tests/test_quota.py:526,559-600`、`tests/test_ops_triage.py:192-229` | 2026-11-05 基线登记完成，阻塞原因解除 |
-| P-03 | sub2api Ops 排障面 | sub2api | 半截（2 真缺 + 2 待复核） | 已于 2026-11-05 复核实现：告警确认 / 静默 / 关闭 / 重开与审计 `quota.py:473-566`，失败请求标记已解决 / 取消 `logs.py:398-449`；真缺①系统日志采集：仓内只有请求日志（`logs.py:270,314`），`system.py` 仅 `:77` changelog、`:95` versions，无进程 / 上游日志路由；真缺②实时流量：无推送与聚合视图，只有指标快照（`health.py:419,439`），现有页面可用轮询承担一部分；待复核③运行时状态：`health.py:117,122` 仅存活 / 就绪，`settings.py:425` 是运行时配置，缺「并发 / 在途 / 调度器」看哪些指标的定义；待复核④告警规则管理面：规则参数只在 `config.py:132-140` 与 env 可配，无 DB CRUD（配额阈值走 `/quota/policies`） | 系统日志与实时流量需运维负责人拍板采集面、保留期与隐私边界；运行时状态与规则管理面需产品确认验收口径。上游 LGPL 隔离仍成立（`upstreams/upstreams.yaml:87,94`） |
+| P-03 | sub2api Ops 排障面 | sub2api | 半截（2 真缺 + 2 待决策） | 已于 2026-11-05 复核实现：告警确认 / 静默 / 关闭 / 重开与审计 `quota.py:473-566`，失败请求标记已解决 / 取消 `logs.py:398-449`；真缺①系统日志采集：仓内只有请求日志（`logs.py:270,314`），`system.py` 仅 `:77` changelog、`:95` versions，无进程 / 上游日志路由；真缺②实时流量：无推送与聚合视图，只有指标快照（`health.py:419,439`），现有页面可用轮询承担一部分；待决策③运行时状态：`health.py:117,122` 仅存活 / 就绪，`settings.py:425` 是运行时配置，缺「并发 / 在途 / 调度器」看哪些指标的定义；待决策④告警规则管理面：规则参数只在 `config.py:132-140` 与 env 可配，无 DB CRUD（配额阈值走 `/quota/policies`） | 系统日志与实时流量需运维负责人拍板采集面、保留期与隐私边界；③运行时状态指标需运维负责人点头「采哪几项（并发 / 在途 / 调度器队列 / 失败率）」并写进验收口径；④告警规则管理面需产品负责人点头「是否要 DB CRUD 管理面（还是维持 env / config 可配）」，并要运维负责人确认「规则是否允许在页面改」。上游 LGPL 隔离仍成立（`upstreams/upstreams.yaml:87,94`） |
 | U-01 | 在线更新执行 | codebuddy2api（系统更新页）、sub2api | 已实现 | `apps/control/app/routers/update.py:57`（`/update-status`）、`:62`（`/update/check`）、`:75`（`/update/apply`，`:83-91` 要求版本逐字一致且 `available`/`can_apply` 双闸）、`:106`（`/update/rollback`）；`services/update_feed.py:78-120`（能力探测与 `can_apply`）、`update_executor.py:4-5`（换码与重启路径）、`update_signing.py`、`update_manifest.py`、`update_boot.py`；前端 `apps/web/components/common/settings/UpdatePanel.tsx:42`（挂在 `apps/web/app/(main)/settings/page.tsx:2016`）；测试 `tests/test_update_manifest.py:68-162`、`tests/test_update_feed.py:125-193`、`tests/test_update_executor.py:117-295` | 无缺口，两个前置条件：①默认 `UNIFIED_UPDATE_ENABLED=false`（`config.py:149,222`），需运营显式开启；②需自备发布源 `UNIFIED_UPDATE_MANIFEST_URL` 与签名密钥（`config.py:150-151,224-225`）。容器部署还要求代码目录绑挂并配 `restart: unless-stopped`，否则探测直接 `can_apply=false`（`update_feed.py:101-108`）。实现已在 8253f2c、9349160 入库 |
 | U-02 | 未定价模型 token 估算计费 | gptGrok2api、muse2api | 待决策 | `apps/control/app/billing.py:320-323`（只打 `usage_zero` / `usage_missing` 标，不估 token）；`docs/muse-usage-policy.md:11-12`；`docs/m3-billing-plan.md:161` 的 `billing.charge_on_missing_usage` 在代码中不存在；估算精度口径 `docs/muse-usage-policy.md:43`（可见文本 ±15–30%） | 需财务负责人点头：估算出的 token 是否计入额度与账单（即「猜出来的用量要不要收钱」），误差是写进账单还是只做提示。点头前还要先给 muse 别名补价格行，否则估出 token 仍套不到价 |
 | U-03 | 备份远端目标（S3 等）与定时计划 | 控制面自建 | 已实现 | 端点 `apps/control/app/routers/backup_remote.py:88,94,114,140,166,222`（配置读取 / 保存、远端列表、手动上传、远端恢复、删除）；下载与解密 `services/backup_remote.py:397`（`download_archive`，先验 `.enc.sha256` 再解密）、`:475`（`commit_download`）、`:489`（`delete_remote`，连 sidecar 一起删）、`:527`（`upload`）、`:716`（按 keep 轮转）；加密 `services/backup_crypto.py`（AES-256-GCM，`crypto_backend` 报 lib/stdlib）；恢复复用 `routers/backup.py:182` 抽出的 `restore_archive()`，本地 `/restore` 在 `:250` 持锁后调用；定时 `services/backup_schedule.py:31-43,64-102`；S3 客户端 `services/s3_client.py`；四个开关 `config.py:183-186,262-269`；lifespan 启停 `main.py:161-162,175,182`；前端 `apps/web/components/common/settings/BackupRemoteSection.tsx`（由 `BackupPanel.tsx` 渲染）；测试 `tests/test_backup_remote.py`、`tests/test_backup_schedule.py`、`tests/test_s3_sigv4.py` | 无缺口；默认 `UNIFIED_BACKUP_REMOTE_ENABLED=false`、开关关闭时零外呼，凭据只从 `UNIFIED_BACKUP_S3_*` 环境变量读，需运营显式开启并配齐。已入库：加密后端 4d7e54a、S3 客户端 9ebff30、路由与调度 500e671、前端面板 622fa9f；分段回放见 §3.3 末块与 §4.11 末块 |
 | U-04 | `/tasks` 页面恢复 | sub2api / codebuddy2api（任务页） | 待决策 | 仓库无 `tasks` 路由（`apps/web/app` 下无该目录）；`FRONTEND-BASELINE.md:70` 记录整条链路已删 | 需产品负责人点头：是恢复已删的 `/tasks` 页面（等于推翻基线删页决定，并新增页面，与 §3「不新增页面」冲突），还是确认维持删除。点头前两件事都算未定 |
 | U-05 | gptGrok 图库 / 提示词 | gptGrok2api | 待决策 | `docs/design/frontend-integration-plan.md:99`（「图片图库/文件存储 不进界面」）；控制面无对应路由 | 需产品负责人点头：是自建图库与提示词管理面（等于新增存储、权限与页面三块），还是维持现有「不进界面」口径。这是范围取舍，不是技术阻塞 |
 | U-06 | sub2api iframe 嵌入 | sub2api | 不做（已合并承载，非缺口） | 配额域已 1:1 落在 `/quota` 三个 tab（`apps/web/app/(main)/quota/page.tsx:57,407-423`，页头入口 `:78-82,401`）与 `/quota/policies`（`apps/control/app/routers/quota.py:193,244,308` 策略 CRUD、`:356,390,473-566` 状态与告警处置审计；页面 `apps/web/app/(main)/quota/policies/page.tsx:373-384,512`）；后端只有分组 / 账号 / 流水三类路由（`apps/control/app/routers/sub2api.py:57-150`；表结构 `apps/control/app/adapters/sub2api_store.py:3`）；上游其余栏目属 `docs/PROVIDERS.md:249` 取舍 #2 的排除项，`routers/` 无对应路由；本仓安全头禁止自身被嵌入（`apps/control/app/main.py:213,217`、`deploy/nginx.conf:254`） | 无（iframe 方案已由等价页面替代；上游栏目清单是文档级证据 `docs/design/frontend-integration-plan.md:181`，仓内无上游前端源码可核对） |
+| N-01 | 一键启动脚本（Windows / Linux，状态文件与退出码分类） | 控制面自建 | 半截 | `scripts/start.ps1:24-25`（`.run/start.json` 路径）、`:36-41`（`Fail` 统一退出码）、`:189-194`（Python 缺失 / 版本低 = 3）、`:227`（前端产物缺失 = 2）、`:298`（迁移失败 = 5）、`:310-314`（端口全占 = 4）、`:331`（uvicorn 启动，无 `--reload`）、`:339,345,347`（端口抢占 / 库锁 / 健康超时 = 6）、`:364-367`（前端启动失败 = 7）、`:441`（状态文件写入）；`scripts/start.sh:13`（`start.json`）、`:37-40`（`fail`）、`:61-63`（=3）、`:193-194`（=2）、`:200`（=3）、`:219,236`（=5）、`:242-244`（=4）、`:269-275`（=6）、`:291-292`（=7）；`scripts/serve-web.mjs:19`（`/api`、`/v1` 等反代前缀）；`deploy/README.md:184-186`（首轮实跑记录） | 缺自动化用例：仓内无脚本级测试，`scripts/e2e/run-smoke.ps1` 也不调用 `start.ps1` / `start.sh`，只有 `deploy/README.md` 的首轮手工实跑记录。退出码 1-7 两端一致，功能链路完整，但按 §1 不得按已实现验收 |
+| N-02 | 首次运行向导（六步、可跳过、库内完成标志、重置入口） | 控制面自建 | 已实现 | `apps/control/app/routers/onboarding.py:52`（读，`current_user`）、`:61`（写）、`:95`（重置，写与重置均 `admin_user`）；`apps/control/app/main.py:39,324-325`（路由注册）；`apps/control/tests/test_onboarding.py:19-97`（默认未完成、合并去重、步数收敛、跳过清理、重置重开、匿名拒绝、viewer 写 403）；`apps/web/lib/onboarding.ts`；`apps/web/components/common/onboarding/{OnboardingWizard,OnboardingTodo}.tsx`；`apps/web/app/(main)/layout.tsx:44`（自动打开仅管理员）、`:96`（非管理员不挂载组件）；`apps/web/app/(main)/settings/page.tsx:2029-2059`（`isAdmin` 内「重新运行向导」）；`apps/web/app/(main)/keys/page.tsx:345-349`（「向导创建」徽标）；五语同键（`apps/web/lib/i18n/locales/{zh-CN,zh-TW,en,ja,ko}.json`，键 `onboarding.*` / `keys.badgeFromWizard` / `settings.onboardingRerunTitle`） | 无（工作区未提交：`onboarding.py`、`test_onboarding.py`、两个向导组件与 `lib/onboarding.ts` 均为 `??`） |
+| N-03 | 配置与账号打包导入导出（merge / overwrite / dry-run、事务回滚、默认不含明文） | 控制面自建 | 已实现 | 三个端点均 `admin_user`：导出 `apps/control/app/routers/config_transfer.py:38`、预检 `:63`、写入 `:83`（`:85-88` 拒绝 dry-run 与缺 `confirm`）；打包默认脱敏 `apps/control/app/config_bundle.py:69`（`:108,130,148` 仅 `include_secrets` 才带 `api_key` / `secret` / `meta_json`，`:155-156` 写 `contains_secrets` 与警告）、校验 `:177`、差异 `:327`（create / overwrite / skip / fail 逐条）、单事务写入 `:445`（`:481` `BEGIN IMMEDIATE`、`:617-619` 任一步失败 `rollback`）；路由注册 `apps/control/app/main.py:34,324`；CLI `scripts/config_export.py:35-50`、`scripts/config_import.py:67-105`；前端 `apps/web/components/common/settings/ConfigTransferPanel.tsx:72-153`（下载 / 选文件即预检 / merge·overwrite 切换 / 确认后写入），挂在 `apps/web/app/(main)/settings/page.tsx:2022`（`isAdmin` 内），客户端 `apps/web/lib/api.ts:715-725`；测试 `apps/control/tests/test_config_transfer.py:78`（默认脱敏）、`:116`（dry-run 前后行数不变）、`:128`（坏字段整批拒绝、0 行落库）、`:145`（中途失败回滚）、`:161`（不带 secret 的覆盖不清空库里密钥）、`:174,200`（HTTP 端点） | 无。工作区未提交：`config_bundle.py`、`routers/config_transfer.py`、`scripts/config_{export,import}.py`、`ConfigTransferPanel.tsx`、`test_config_transfer.py` 均 `??`。本轮实跑该测试文件：8 passed（端口 8061 被占时 8 条全 skip，改 `UNIFIED_TEST_CTRL_PORT=8098` / `UNIFIED_TEST_FAST_PORT=8099` 后通过） |
+| N-05 | 移动端适配（表格横向提示 / 导入弹窗高度 / 150% 缩放胶囊换行） | 控制面自建 | 半截 | `apps/web/components/ui/table.tsx:55`（`common.tableScrollHint`）；五语键 `apps/web/lib/i18n/locales/{zh-CN,zh-TW,en,ja,ko}.json`（`common.tableScrollHint`）；`apps/web/components/animate-ui/radix/dialog.tsx:197`（`max-h-[calc(100dvh-1rem)]` + `overflow-y-auto`）；`apps/web/app/(main)/accounts/page.tsx:1294,1321`（筛选条 `flex-wrap` + 胶囊 `whitespace-normal`） | 缺视觉回归用例，且本轮只读代码、未在 150% 缩放实机复核；`apps/web` 无截图基线或 e2e 用例覆盖这三处 |
+| N-06 | sidecar 存活五分类（alive / auth / timeout / refused / http_error） | sub2api / 四家 sidecar | 已实现 | `apps/control/app/services/sidecar_status.py:38`（状态枚举注释）、`:124-201`（五类探测分类）、`:214-231`（贴到 `/api/providers`，非 alive 转 `needs_config` 并带原因）、`:234-257`（并发刷新 + TTL）；`apps/control/app/routers/providers.py:29`（`GET /api/providers/sidecars`）；`apps/control/tests/test_sidecar_link.py:132,145,157,165,173`（五态逐一断言）、`:347-357`；前端 `ProvidersSection.tsx:532-542`（alive 徽标）与 `:544-550`（异常原因） | 无（路由与测试在 7d57aed 入库） |
+| N-07 | Grok 注册执行器协议 v1 | gptGrok2api / grok-register | 已实现 | `apps/control/app/services/grok_register.py:4-5,24`（协议常量 `grok-register-executor/v1`）、`:339-351`（执行与落库）；`apps/control/scripts/grok_executor_stub.py:3-12,126,149,164-165`（提交 / 轮询 / 取消）；`apps/control/app/routers/grok.py:26-84`（任务创建 / 列表 / 详情 / 取消 / 重试 / worker，全 `admin_user`）；`apps/web/components/common/settings/GrokRegisterTasks.tsx:101-221`；`apps/control/tests/test_grok_register.py:73-178`（完成落账号、执行器不可达、失败重试、超时区分、坏响应、重启恢复孤儿任务、取消）；`docs/providers/grok-register.md:7` | 无（协议与 stub 在 620408e 入库；任务面只对管理员开放，符合设计） |
+| N-08 | 新增 / 变更端点：`POST /providers/{id}/token/validate`、`GET /api/providers/sidecars`、`POST /api/onboarding/reset` | 控制面自建 | 已实现 | token/validate：`apps/control/app/routers/providers.py:89-127`（admin 依赖、写审计、错误分类），审计动作 `providers.token.validate` 见 `tests/test_sub2api_codar_gaps.py:231-237`；前端 `apps/web/lib/api.ts:655-658`、`ProvidersSection.tsx:393`，测试 `apps/control/tests/test_sub2api_codar_gaps.py:211-246`（含 viewer 403）；sidecars：`providers.py:29-43`，前端无独立按钮，但同一 `sidecar_status` 已由 `/api/providers` 贴到列表并在 `ProvidersSection.tsx:532-550` 展示；onboarding/reset：`onboarding.py:95-112`，前端 `settings/page.tsx:2047-2052`、`lib/api.ts:319`，测试 `test_onboarding.py:63-78` | 无（三个端点在当前工作区；onboarding 相关文件未提交，其余已提交） |
+| N-09 | 凭据失效后引导重新粘贴 | 控制面自建（全部 provider） | 已实现 | 后端四态判定 `apps/control/app/services/credential_state.py:17-21`、`:96-140`（`classify`；`:129-135` 重新粘贴后旧证据作废）；只读接口贴状态并改写 `requires` `apps/control/app/registry.py:374-399`；可判程度 `:431-440`（探活自报 401/403 的适配器：`apps/control/app/adapters/codebuddy.py:99`、`sidecar_link.py:24`），其余靠真实请求留痕 / JWT 过期 / 明确写「判不出」；适配器文案 `apps/control/app/adapters/codar.py:53,108,200-202`、`qoder.py:621-622`；用例 `apps/control/tests/test_credential_state.py:47-351`（24 条，含 `list_public` 失效需重贴、重贴后复位、探活不回 401 时不误判）；前端①服务商页失效徽标 + 「重新粘贴」按钮 `apps/web/components/common/settings/ProvidersSection.tsx:579-599`，动作 `:500-512`（展开该行、聚焦密文输入框，管理员外的按钮禁用 `:592`），跨页 hash 直达 `:521-532`；②导入弹窗顶部红条 + 「去服务商页重贴」`apps/web/components/common/accounts/ImportAccountDialog.tsx:145-159`；③账号页把状态透传给弹窗 `apps/web/app/(main)/accounts/page.tsx:170-171`；类型 `apps/web/lib/providers.ts:134-140`；四个文案键在五个语言包里各出现一次（`providers.credentialInvalidated`、`providers.repasteCredential`、`accounts.importCredentialInvalidated`、`accounts.repasteProvider`） | 无（工作区未提交：`credential_state.py`、`test_credential_state.py` 为 `??`，其余为 `M`）。残留（不阻塞主链路）：`credential_state_note`（探活不回传 401/403 时为何只能给「未知」）只在接口与类型里（`apps/web/lib/providers.ts:140`、`apps/web/components/common/accounts/account-ops.ts:38`），页面未渲染；前端无自动化用例，与 N-02 同口径 |
+| N-10 | `/api/onboarding` 94 次 404（结案） | 控制面自建 | 不做（非缺口） | 路由已注册：`apps/control/app/main.py:39,324-325`；用例覆盖：`apps/control/tests/test_onboarding.py:19-97`；启动脚本不带热重载：`scripts/start.ps1:331`（`uvicorn ... app.main:app`，无 `--reload`） | 已结案：预览后端跑的是 8240 旧进程（启动早于路由文件写入），重启即恢复，不是代码缺陷。94 次这个计数属会话观测，仓内无法复核 |
+| N-11 | 四家 sidecar 上游许可证（结案） | trae2api / Deepseek2Go / qoder-switch / codar2api | 不做（非缺口） | `THIRD-PARTY-NOTICES.md:30-33`（汇总表）、`:74-77`（trae2api = MIT）、`:79-82`（Deepseek2Go 无 LICENSE，按 All Rights Reserved）、`:84-87`（qoder-switch = PolyForm-Noncommercial-1.0.0）、`:89-92`（codar2api = MIT） | 已登记，非缺口；商用边界按表中 safe / warn / danger 执行 |
 
 ## 3. 逐项说明
 
@@ -131,6 +143,30 @@
 **误判后果**：按「有意不做（未实现）」归档，会让人以为口径已经闭合，后续再提图库需求只能重新考古；反过来按「未实现」排期，会在产品没点头前先动存储与权限模型。
 
 **U-06 sub2api iframe。** 结案为「不做（已合并承载，非缺口）」。iframe 原本要承载的配额域已 1:1 落在 `/quota` 的分组 / 账号池 / 流水三个 tab（`apps/web/app/(main)/quota/page.tsx:57,407-423`），页头另有 `/quota/policies`（配额策略与告警）入口（`:78-82,401`）；后者有确认弹窗（`apps/web/app/(main)/quota/policies/page.tsx:512`）、错误回显（`:165-233` 的 `setPoliciesError` / `setStatusError` / `setAlertsError`）与操作审计（`apps/control/app/routers/quota.py:295,319,467-470`），比只读 iframe 更完整。上游其余栏目（Channels / Proxies / Subscriptions / Orders / PromoCodes / Redeem / Affiliates / Announcements / Plugins）属取舍 #2 的排除项（`docs/PROVIDERS.md:249`），后端从未建对应路由：`apps/control/app/routers/sub2api.py:57-150` 只有 groups / accounts / ledger，`apps/control/app/adapters/sub2api_store.py:3` 的表结构也只这三张。此外本仓安全头明确禁止自身被嵌入：`apps/control/app/main.py:213`（`X-Frame-Options: DENY`）、`:217`（CSP `frame-ancestors 'none'`）、`deploy/nginx.conf:254`。上游栏目清单是文档级证据（`docs/design/frontend-integration-plan.md:181`），仓内没有上游前端源码可核对。
+
+### 3.4 近期改动复核（N-01 ~ N-11，2026-11-06）
+
+**判定边界。** 本节只写本轮能在工作区看到的东西。N-03 / N-09 此前被记为「仓内没有可核对的路由 / 组件」的并行会话半成品；2026-11-06 第三次复核已逐文件读到实现与前端入口，对应段落与总表档位均已据实改写。以下所有「测试存在」均指测试文件与断言存在；只有 N-03 本轮实跑了 `test_config_transfer.py`（8 passed），其余条目没有执行 pytest、没有启动服务、没有做浏览器实测。
+
+**N-01 一键启动。** `start.ps1` 与 `start.sh` 都实现了：写 `.run/start.json`、按 pid 停止上一实例、端口段扫描、控制面健康检查、可选静态前端、失败分 7 类退出码。`serve-web.mjs` 负责 `/api`、`/v1` 等前缀反代与静态文件。`deploy/README.md:184-186` 记录首轮实跑通过。缺的是自动化：没有脚本级测试，`scripts/e2e/run-smoke.ps1` 也不走这两个入口。按 §1 归「半截（缺测试）」，不按已实现验收。
+
+**N-02 首次向导。** 后端三端点 + 8 条用例，前端向导与待办条只在管理员下挂载（`layout.tsx:44,96`），设置页重置入口在 `isAdmin` 分支内，密钥页有「向导创建」徽标。五语键同键同序。没有前端自动化用例，这一点与 E 系前端条目相同，不影响「已实现」判定。相关文件全部未提交。
+
+**N-03 打包导入导出。** 本轮逐文件核对后升为「已实现」，依据均能指到行：后端三端点 `routers/config_transfer.py:38,63,83`（全 `admin_user`，`:85-88` 拒绝 dry-run 直写与缺 `confirm`）；导出默认不含明文 `config_bundle.py:69`（`:108` 的 `api_key`、`:130` 的 `secret`、`:148` 的 `meta_json` 均只在 `include_secrets=True` 时出现，`:155-156` 回 `contains_secrets` 与警告）；非法字段整批拒绝在 `validate_bundle:177` + `plan_import:327`，写入前 `apply_import:445` 检查 `fail` 并抛 `BundleRejected`（`:465-468`），单事务 `:481` `BEGIN IMMEDIATE`，异常 `:617-619` `rollback`；CLI 两个脚本各自接同一套函数（`scripts/config_export.py:35-50`、`scripts/config_import.py:67-105`）；前端 `ConfigTransferPanel.tsx:72-153` 负责下载 / 预检 / 模式切换 / 确认写入，`settings/page.tsx:2022` 在 `isAdmin` 内挂载，`lib/api.ts:715-725` 是客户端。用例 `test_config_transfer.py` 覆盖默认脱敏（`:78`）、dry-run 不写库（`:116`）、坏字段整批拒绝（`:128`）、中途失败回滚（`:145`）、不带 secret 的覆盖不清空密钥（`:161`）、HTTP 端点只读与拒绝（`:174,200`）。本轮实跑该文件：8 passed（端口 8061 被占时全部 skip，改用 8098/8099 后通过）。
+
+**N-04 日志导出扩围（并入 E-04，档位不变）。** 后端去掉管理员前置，改为按 key 归属收窄；显式传他人 `key_id` 返回 403 而不是空集；成功、被拒、超限、异常四类都写 `logs.export` 审计。前端导出按钮不再按角色隐藏（`logs/page.tsx:296-306`）。有 viewer 用例，E-04 维持「已实现」，只更新证据与范围。
+
+**N-05 移动端。** 三处都是 CSS 层改动：表格底部提示（`table.tsx:55`）、弹窗 `max-h` 与滚动（`dialog.tsx:197`）、账号页服务商筛选条与胶囊换行（`accounts/page.tsx:1294,1321`）。没有截图基线或视觉回归用例，本轮也没有实机放大到 150% 复核，归「半截（缺视觉回归用例）」。
+
+**N-06 sidecar 五分类。** `_status` 对 401 → `auth`、超时 → `timeout`、连接拒绝 → `refused`、非 2xx → `http_error`、2xx → `alive`；`decorate_public` 把非 alive 转成 `needs_config` 并带原因，列表页据此展示。五态各有一条断言。已实现。
+
+**N-07 Grok 协议 v1。** 协议常量、提交 / 轮询 / 取消、stub、任务路由、前端任务面板与 7 条用例齐全；stub 纯标准库，不依赖浏览器。已实现。
+
+**N-08 三端点。** `token/validate` 有 admin 依赖、审计与 viewer 403 用例；`sidecars` 是快照端点，前端没有独立按钮，但同一状态已贴到 `/api/providers` 并在服务商列表展示，不算「只有路由没有入口」；`onboarding/reset` 有设置页入口与 2 条用例。已实现。
+
+**N-09 凭据失效引导。** 本轮核实前端已接入，升为「已实现」。后端把四态与「需要重新粘贴」的 `requires` 贴到只读接口（`registry.py:374-399`），判定内核 `credential_state.py:96-140`，重新粘贴后旧证据作废（`:129-135`）；可判到什么程度由 `registry.py:431-440` 决定，codebuddy 与四家 sidecar 走探活自带 401/403（`adapters/codebuddy.py:99`、`adapters/sidecar_link.py:24`），其余按真实请求留痕 / JWT 过期 / 明确「判不出」。前端有三处入口：服务商页的失效徽标与「重新粘贴」按钮（`ProvidersSection.tsx:579-599`，动作在 `:500-512` 展开该行并聚焦密文框，非管理员禁用），账号页把 `credential_state` 透传给导入弹窗（`accounts/page.tsx:170-171`），弹窗顶部红条给出「去服务商页重贴」直达链接（`ImportAccountDialog.tsx:145-159` → `/settings#provider-<id>`，由 `ProvidersSection.tsx:521-532` 消费 hash）。四个文案键在五语各命中一次。用例 `test_credential_state.py` 共 24 条（原记「20 条」只数了同步用例，另有 4 条 async），覆盖失效需重贴、重贴后复位、探活不回 401 时不误判。残留不阻塞：`credential_state_note` 只在接口与类型里（`lib/providers.ts:140`、`accounts/account-ops.ts:38`），页面未渲染；前端无自动化用例。
+
+**N-10 / N-11 结案。** 404 是旧进程未加载新路由（启动脚本无 `--reload`），许可证已在 `THIRD-PARTY-NOTICES.md` 登记；两条都不再算缺口，不再排期。
 
 ## 4. 旧结论更正留档
 
@@ -258,6 +294,24 @@
 **（2026-11-05 已更正，本批入库后）** 上一块的「半截」与「尚未提交」都已过期：远端恢复 `POST /api/system/backups/restore-remote`（`routers/backup_remote.py:166`）、远端删除 `DELETE /api/system/backups/remote/{name}`（`:222`）与前端入口 `apps/web/components/common/settings/BackupRemoteSection.tsx` 均已落地，并按主题入库（路由与调度 500e671、前端面板 622fa9f、加密后端 4d7e54a、S3 客户端 9ebff30、依赖 6759077）。U-03 档位由「半截」改为「已实现」，证据与行号见 §3.3 末块。
 **误判后果**：拿这块当「还差恢复」去排期，会重复实现下载 / 解密链路；把「已实现」直接当运营可用，则会忽略默认关闭 + 凭据只走环境变量这两个前提。
 
+### 4.12 `/api/onboarding` 94 次 404「疑似路由缺失」
+
+> 会话观测：预览环境对 `/api/onboarding` 连续记录 94 次 404，曾被当作「向导路由没上线」的代码缺陷。
+>
+> —— 会话结论，本文件未逐字收录，无法逐字留档
+
+**（2026-11-06 结案）** 不是代码缺陷。路由已注册（`apps/control/app/main.py:39,324-325`），端点与用例都在（`apps/control/tests/test_onboarding.py:19-97`）。旧预览后端 8240 的启动时间早于 `onboarding.py` 写入，且 `scripts/start.ps1:331` 的 uvicorn 命令不带 `--reload`，旧进程不会加载后加的路由，于是持续 404；重启进程即恢复。归「不做（非缺口）」，不移入缺口清单。94 次这个计数与进程启动时刻无法从仓库复核，只能作为会话观测保留。
+**误判后果**：按代码缺陷排期会去重写已经存在的路由与用例，或在复盘时把它算进缺陷密度；真正该做的是把预览进程的重启流程固定下来。
+
+### 4.13 四家 sidecar 许可证「未知」
+
+> 会话旧结论：四家 sidecar 的许可证情况不明，可能阻塞分发。
+>
+> —— 会话结论，本文件未逐字收录，无法逐字留档
+
+**（2026-11-06 结案）** 已在 `THIRD-PARTY-NOTICES.md` 逐家登记并可核对：trae2api = MIT（`:30,74-77`）、Deepseek2Go 无 LICENSE / 按 All Rights Reserved（`:31,79-82`）、qoder-switch = PolyForm-Noncommercial-1.0.0（`:32,84-87`）、codar2api = MIT（`:33,89-92`）。归「不做（非缺口）」；分发与商用边界按表中 safe / warn / danger 执行，Deepseek2Go 与 qoder-switch 只保留进程隔离、不分发上游代码。
+**误判后果**：按「未知」处理会重复做许可证考古，或误把 qoder-switch 当宽松许可而商用；反过来把 MIT 的两家当风险也会拖慢可选 sidecar 的发布。
+
 ## 5. 本轮新增的证据（2026-11-05 入库复核）
 
 **（2026-11-05 已更正）** 本节是 2026-11-05 之前的工作区快照，不能当现状读。此后代码已分组入库，本次只读核对时 HEAD 为 `7e7805b`。照旧读会得到两类误判：一是以为 E-01~E-13 的代码 / 测试 / 组件还挂在工作区外，从而重复排期、重复实现；二是把「本地跑绿 ≠ CI 跑绿」推成「这些用例从未进 CI」，据此重写本该由 CI 覆盖的用例。
@@ -285,6 +339,35 @@
 **（2026-11-05 入库复核）** 上一段的「20 个未入库测试文件」与「`ci.yml` 还没提交」已过期：判定时点之后的分组提交里，`apps/control/tests/` 的 63 个 `test_*.py` 已被跟踪；2026-11-05 新增的 U-03 用例（`test_backup_remote.py`、`test_backup_schedule.py`、`test_s3_sigv4.py` 与夹具 `fake_s3_server.py`）仍在工作区未跟踪，不计入这 63 个。`ci.yml` 已跟踪（首入库 `b5772fb`）且工作树无改动。所以「这些用例从未进 CI」不成立，能确认的只是「已进版本库」。本轮没有执行任何测试，也没有查 CI 运行记录，**用例是否在 CI 里实跑通过仍未核实**，不能把「已入库」当成「已跑绿」。
 **误判后果**：继续按这段读，会去重写已经在 `ci.yml` 覆盖范围内的用例，或把「未入库」推成「CI 从没跑过」而绕开 CI 另建一套验证。
 
+**（2026-11-06 二次复核快照）** 只读核对，未做 add / commit / push。HEAD `d906399`，分支 `baseline/unified-2api`，相对 `origin/baseline/unified-2api` ahead 47。`git status --porcelain` 为 53 行（含本文件与 `.gitignore` 修改）：38 `M` + 15 `??` 条目；`-uall` 为 54 行（`apps/web/components/common/onboarding/` 展开为 `OnboardingWizard.tsx` / `OnboardingTodo.tsx`，按文件计 54 个）。`??` 项：`apps/control/app/{config_bundle.py,routers/config_transfer.py,routers/onboarding.py,services/credential_state.py}`、`apps/control/tests/{test_config_transfer,test_credential_state,test_onboarding}.py`、`apps/web/components/common/onboarding/`（两个组件）、`apps/web/components/common/settings/ConfigTransferPanel.tsx`、`apps/web/lib/onboarding.ts`、`scripts/{config_export.py,config_import.py,serve-web.mjs}`、`deploy/{.env.prod-bind.example,docker-compose.prod-bind.yml}`。本轮只改本文件与 `.gitignore`；N-03 的 `test_config_transfer.py` 已实跑 8 passed（8098/8099 端口），其余条目没有执行 pytest、没有启动服务、没有做浏览器实测，N-02 / N-04 / N-06 / N-07 / N-08 的「测试存在」不等于「本轮跑绿」。并行会话仍可能继续改动 `apps/control` / `apps/web`，条目数以复核时 `git status` 为准。
+**误判后果**：把「测试文件存在」当「本轮已验证」，会在交付时漏掉真实失败；把并行会话的半成品当稳定实现，会在下一轮盘点时反复改档。
+
 ## 6. 复核方式
 
 对任一编号，按证据列的文件:行直接打开当前工作区核对；拿不到对应函数或路由即视为「未核实」，按 §1 重新归档，不要沿用本文件。发现本文件与代码不符时，按 §4 体例追加更正块，不删原句。
+
+## 7. 流程阻塞（非功能缺口）
+
+### 7.1 push 被 GitHub secret scanning 拦截
+
+- **现状**：本地分支 `baseline/unified-2api` 相对 `origin/baseline/unified-2api` ahead 47 个提交，push 未完成。仓库内没有任何可核对的告警原文（全仓检索 `secret scanning` / `push protection` 无命中），命中的文件、规则名、是否误报均**未核实**。
+- **两条出路**（都必须先确认命中内容，不得强行绕过）：
+  1. **确属误报**：由仓库管理员在 GitHub 的 Security → Secret scanning 对该告警标记 false positive / 加 allowlist，然后重推同一提交。不要改代码去迁就扫描器，也不要用 push protection bypass 口令。
+  2. **确属真实泄露**：先把命中的凭据在对应上游轮换作废，再改成环境变量或本地未入库配置，按仓库历史清理流程重写该提交（必要时 `git filter-repo`）后重推；不得用 `--no-verify`、`--force` 或关闭 push protection 绕过。
+- **影响**：不阻塞本地开发与验收，只阻塞对外发布。任何「已发布 / 已上线」结论在 push 成功前都不成立；本条不计入功能缺口，也不按功能缺口排期。
+
+## 8. 待决策 / 已知风险（未修）
+
+这两条都不是功能缺口，也不写成已解决；放在这里是为了别在下一次盘点时被当成「已修复」划掉。
+
+### 8.1 Docker 生产控制面 healthcheck 启动窗口偏短，可能导致前端永远不起
+
+- **现状**：控制面探活打 `/healthz`，`deploy/docker-compose.prod-bind.yml:67-74` 为 `interval: 30s`、`timeout: 5s`、`retries: 3`、`start_period: 120s`（注释自称「给足启动窗口」）；`deploy/docker-compose.prod.yml:36-41` 三个参数相同但 `start_period` 只有 `20s`。前端 `web` 以 `depends_on: control: condition: service_healthy` 等控制面健康后才启动（prod-bind `:80-82`、prod `:56-58`、根 `deploy/docker-compose.yml:75-77`）。
+- **风险**：首次启动要建库、跑迁移、回放大库，超过 `start_period` 后再连续 3 次（间隔 30s）失败才判 `unhealthy`——prod-bind 约 210s、prod 约 110s。Docker 的 `restart: unless-stopped` 只在**进程退出**时重启容器，不会因 `unhealthy` 重启；于是控制面进程还在跑、状态显示 unhealthy，而 `web` 因条件未满足一直不启动，表现为「控制面在跑、前端永远起不来」。人工 `docker compose restart` 能恢复，但自动恢复没有。
+- **未修 / 待决策**：由运维或部署负责人定 `start_period` 取值（或改 `depends_on` 条件、加 `restart` 之外的补偿）。本次只登记，不改 compose。
+
+### 8.2 CLI 恢复是文件整体替换，不是在线备份，必须停服
+
+- **现状**：`scripts/backup_core.py:844` 的 `cmd_restore` 先校验归档，再 `pre_restore()` 留存当前库，然后替换——库是 `:882-884` 把暂存库 `os.replace` 到目标路径，配置文件同样 `shutil.copy2` + `os.replace`（`:727-740`）。`pre_restore()` 的注释写明前提是服务已停止（`:618-623`），失败分支的报错也要求先停服（`:642-644`：「Stop the control plane first, then retry (Windows locks open db files)」）。
+- **风险**：服务运行中执行 CLI 恢复时，Windows 上库文件被占用会直接失败；即便侥幸替换成功，也可能与在线写入交错，丢掉快照之后的已提交事务。在线恢复应走管理界面的 `POST /api/system/restore`（`apps/control/app/routers/backup.py:249-263`，`restore_archive` 在 `:182`，全程持 `_busy_guard`），不用 CLI 顶替。
+- **文档状态**：`docs/BACKUP.md:152,156` 已写明「恢复前必须停服务」且只对 CLI 路径成立、管理界面不停服也能恢复；本条只登记为已知风险，不再重复改 BACKUP.md。

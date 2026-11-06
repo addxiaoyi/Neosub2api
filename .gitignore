@@ -18,8 +18,16 @@ data/
 .env.local
 .env.*.local
 deploy/.env
+deploy/.env*
+!deploy/.env.example
+!deploy/.env.prod-bind.example
 deploy/certs/
 deploy/certbot-webroot/
+
+# 私钥不入库（公钥已入库，显式放行）
+*.pem
+*.key
+!deploy/release-pubkey.pem
 
 # 仅在本地留存的验证截图（体积大，不随仓库分发）
 docs/ux-shots/
@@ -27,6 +35,8 @@ docs/ux-shots/
 # 日志与临时构建产物
 *.log
 /logs/
+*.bak
+.run/
 *.tsbuildinfo
 .pytest_cache/
 .mypy_cache/
