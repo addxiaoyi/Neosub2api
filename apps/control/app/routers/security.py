@@ -20,9 +20,17 @@ from pydantic import BaseModel
 from ..billing import period_bounds
 from ..net_guard import BLOCKED_ADDRESSES, BLOCKED_HOSTNAMES
 from ..security import PermissionDenied, admin_user, audit_event, current_user
+from ..services import secret_store
 from .auth import LoginGuard, _login_failures, _login_guard, _login_lock, _login_wait
 
 router = APIRouter(prefix="/api", tags=["security"])
+
+
+@router.get("/security/secret-at-rest")
+def secret_at_rest(request: Request, user: dict = Depends(admin_user)):
+    """凭据落库加密现状：只给计数与开关，不出现任何明文/密文片段。"""
+    return secret_store.status(request.app.state.db)
+
 
 MAX_AUDIT_LIMIT = 500
 AUDIT_ACTOR_DENIED = "无权查看他人审计日志"

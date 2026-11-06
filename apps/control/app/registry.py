@@ -9,6 +9,7 @@ from .api_utils import mask_secret, now
 from .config import LEGACY_PROVIDER_BASES, Settings
 from .db import Database, get_json_setting, set_json_setting
 from .net_guard import UpstreamAddressError, guard_upstream_url, is_loopback_url
+from .services import secret_store
 from .services.credential_state import (
     INVALIDATED,
     SUPPORT_EXPIRY,
@@ -21,6 +22,14 @@ from .services.credential_state import (
 )
 
 logger = logging.getLogger("unified.registry")
+
+
+def _plain_credential(row) -> dict[str, Any]:
+    """对外/适配器消费的凭据行一律解封；解不开时 secret 为空，绝不外发密文。"""
+    item = dict(row)
+    item["secret"] = secret_store.read_secret(item.get("secret"))[0]
+    return item
+
 
 # provider id → Settings 上的地址字段；只有 pid 同时出现在 settings.env_base_pids 时才算 env 来源
 ENV_BASE_FIELDS = {
@@ -48,7 +57,7 @@ class ResolvedProvider:
                 "id": row["id"],
                 "label": row["label"],
                 "base_url": row["base_url"],
-                "secret_masked": mask_secret(row["secret"]),
+                "secret_masked": mask_secret(secret_store.read_secret(row["secret"])[0]),
                 "sort_order": int(row["sort_order"]),
             }
             for row in self.credentials
@@ -241,8 +250,8 @@ class ProviderRegistry:
         self, pid: str, credentials: tuple[dict[str, Any], ...], cfg: dict[str, Any]
     ) -> tuple[str, ...]:
         """凭据顺序：统一凭据库 → 旧版 provider_config.api_key → env（仅 codebuddy 有）。"""
-        raw: list[Any] = [row["secret"] for row in credentials]
-        raw.append(cfg.get("api_key"))
+        raw: list[Any] = [secret_store.read_secret(row["secret"])[0] for row in credentials]
+        raw.append(secret_store.read_secret(cfg.get("api_key"))[0])
         if pid == "codebuddy":
             raw.append(self.settings.codebuddy_api_key)
         keys: list[str] = []
@@ -487,7 +496,7 @@ class ProviderRegistry:
                 if api_key is not None:
                     # 前端掩码回显约定："***" = 不变，空串 = 清除
                     if api_key != "***":
-                        cfg["api_key"] = api_key.strip()
+                        cfg["api_key"] = secret_store.seal(api_key.strip())
                         # 重新粘贴后旧探活/请求证据不再代表这把 key，记下时间让判定失效
                         cfg["api_key_updated_at"] = int(time.time())
                 if options is not None:
@@ -495,7 +504,8 @@ class ProviderRegistry:
                     merged = {**merged, **options}
                     cfg["options"] = merged
                 configs[pid] = cfg
-                set_json_setting(conn, "provider_config", configs)
+                # 整表回写前重封：否则 cfg 里别家残留的明文会被一起写回库
+                set_json_setting(conn, "provider_config", secret_store.seal_provider_config(configs))
             conn.commit()
         finally:
             conn.close()
@@ -568,7 +578,7 @@ class ProviderRegistry:
                 ).fetchall()
         finally:
             conn.close()
-        return [dict(row) for row in rows]
+        return [_plain_credential(row) for row in rows]
 
     def credential(self, cid: int) -> dict[str, Any]:
         conn = self.db.connect()
@@ -578,7 +588,7 @@ class ProviderRegistry:
             conn.close()
         if row is None:
             raise ProviderError(404, f"凭据不存在：{cid}")
-        return dict(row)
+        return _plain_credential(row)
 
     def _clean_base(self, pid: str, base_url: str) -> str:
         try:
@@ -626,7 +636,7 @@ class ProviderRegistry:
                     pid,
                     (label or "").strip()[:64],
                     cleaned_base,
-                    (secret or "").strip(),
+                    secret_store.seal((secret or "").strip()),
                     1 if enabled else 0,
                     int(sort_order),
                     (note or "").strip()[:200],
@@ -670,7 +680,7 @@ class ProviderRegistry:
                 if len(secret) > 4096:
                     raise ProviderError(400, "secret 超过 4096 字符")
                 sets.append("secret = ?")
-                values.append((secret or "").strip())
+                values.append(secret_store.seal((secret or "").strip()))
         if enabled is not None:
             sets.append("enabled = ?")
             values.append(1 if enabled else 0)

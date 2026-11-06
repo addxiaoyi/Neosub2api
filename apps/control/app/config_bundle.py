@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable
 
 from .db import get_json_setting
+from .services import secret_store
 
 FORMAT_ID = "unified-2api-config"
 VERSION = 1
@@ -106,7 +107,7 @@ def build_bundle(
         if adapter is not None:
             item["spec"] = _spec_snapshot(adapter)
         if include_secrets and str(cfg.get("api_key") or ""):
-            item["api_key"] = str(cfg["api_key"])
+            item["api_key"] = secret_store.read_secret(cfg["api_key"])[0]
         providers.append(item)
 
     accounts: list[dict[str, Any]] = []
@@ -146,7 +147,7 @@ def build_bundle(
             "has_secret": bool(secret.strip()),
         }
         if include_secrets:
-            item["secret"] = secret
+            item["secret"] = secret_store.read_secret(secret)[0]
         credentials.append(item)
 
     return {
@@ -413,7 +414,7 @@ def plan_import(
             report["create"].append(_entry(path, f"{key[0]}/{key[1]}", "create", "库里没有该凭据"))
             continue
         diff = _diff_fields(current, item, CREDENTIAL_FIELDS)
-        if "secret" in item and str(current.get("secret") or "") != str(item["secret"]):
+        if "secret" in item and secret_store.read_secret(current.get("secret"))[0] != str(item["secret"]):
             diff.append("secret")
         if semantics == "merge":
             report["skip"].append(_entry(path, f"{key[0]}/{key[1]}", "skip", "merge：同名保留库里的记录", diff))
@@ -439,7 +440,10 @@ def _save_provider_config(conn: sqlite3.Connection, configs: dict[str, Any]) -> 
     # 不走 set_json_setting：那个函数自带 commit，会破坏本函数所在的单事务。
     from .db import put_settings
 
-    put_settings(conn, {"provider_config": json.dumps(configs, ensure_ascii=False)})
+    put_settings(
+        conn,
+        {"provider_config": json.dumps(secret_store.seal_provider_config(configs), ensure_ascii=False)},
+    )
 
 
 def apply_import(
@@ -508,7 +512,7 @@ def apply_import(
                     old = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
                     cfg["options"] = {**old, **(item.get("options") or {})}
                     if "api_key" in item:
-                        cfg["api_key"] = str(item["api_key"])
+                        cfg["api_key"] = secret_store.seal(str(item["api_key"]))
                     configs[pid] = cfg
                 touched.add(pid)
             except sqlite3.Error as exc:
@@ -576,7 +580,7 @@ def apply_import(
             base = str(item.get("base_url") or "")
             try:
                 if action == "create":
-                    secret = str(item.get("secret") or "")
+                    secret = secret_store.seal(str(item.get("secret") or ""))
                     conn.execute(
                         "INSERT INTO provider_credentials(provider, label, base_url, secret, enabled, "
                         "sort_order, note, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -606,7 +610,7 @@ def apply_import(
                     if "secret" in item:
                         conn.execute(
                             "UPDATE provider_credentials SET secret = ? WHERE id = ?",
-                            (str(item["secret"]), cid),
+                            (secret_store.seal(str(item["secret"])), cid),
                         )
                 touched.add(provider)
             except (sqlite3.Error, TypeError) as exc:

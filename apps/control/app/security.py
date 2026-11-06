@@ -9,6 +9,29 @@ from fastapi import Depends, HTTPException, Request
 
 PBKDF2_ROUNDS = 200_000
 SESSION_COOKIE = "u2a_session"
+# 库里只存会话 token 的摘要；Cookie 仍持有原文，读时再算一次摘要比对
+SESSION_TOKEN_PREFIX = "s256:"
+
+
+def hash_token(token: str) -> str:
+    """会话/挑战 token 都是 256 位随机串，确定性 SHA-256 足够，不需要慢哈希。"""
+    return SESSION_TOKEN_PREFIX + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def migrate_session_tokens(conn) -> int:
+    """启动时把历史明文 token 就地替换成摘要；Cookie 原文不变，在线会话不会失效。"""
+    rows = conn.execute("SELECT token FROM sessions").fetchall()
+    changed = 0
+    for row in rows:
+        token = str(row["token"] or "")
+        if not token or token.startswith(SESSION_TOKEN_PREFIX):
+            continue
+        conn.execute(
+            "UPDATE sessions SET token = ? WHERE token = ?", (hash_token(token), token)
+        )
+        changed += 1
+    conn.commit()
+    return changed
 
 
 def hash_password(password: str) -> str:
@@ -50,7 +73,7 @@ def create_session(conn, username: str, ttl: int) -> str:
     conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
     conn.execute(
         "INSERT INTO sessions(token, username, created_at, expires_at) VALUES(?, ?, ?, ?)",
-        (token, username, now, now + ttl),
+        (hash_token(token), username, now, now + ttl),
     )
     conn.commit()
     return token
@@ -67,15 +90,16 @@ def session_user(request: Request) -> dict[str, Any] | None:
         return None
     conn = request.app.state.db.connect()
     try:
+        digest = hash_token(token)
         row = conn.execute(
             "SELECT s.username, s.expires_at, u.role FROM sessions s "
             "JOIN users u ON u.username = s.username WHERE s.token = ?",
-            (token,),
+            (digest,),
         ).fetchone()
         if not row:
             return None
         if row["expires_at"] < int(time.time()):
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = ?", (digest,))
             conn.commit()
             return None
         return {"username": row["username"], "role": row["role"]}

@@ -16,6 +16,7 @@ from .api_utils import mask_access_args, mask_text, redact_endpoints
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
 from .gateway_errors import PROTOCOL_ANTHROPIC, GatewayError, framework_payload, protocol_for_path
+from .middleware.rate_limit import RateLimitMiddleware, load_rate_limit_config
 from .observability import (
     REQUEST_ID_HEADER,
     bind_request,
@@ -53,11 +54,12 @@ from .routers import (
     update,
     v1,
 )
-from .security import hash_password, verify_password
+from .security import hash_password, migrate_session_tokens, verify_password
 from .services.backup_remote import BackupRemoteService
 from .services.backup_schedule import BackupScheduleService
 from .services.grok_register import GrokRegisterService
 from .services.provider_health import ProviderHealthService
+from .services.secret_store import bootstrap
 from .services.update_boot import arm_confirm, reconcile
 from .services.update_executor import UpdateExecutor
 from .services.update_feed import UpdateFeed
@@ -155,6 +157,13 @@ def create_app() -> FastAPI:
     boot = reconcile(settings)
     db = Database(settings.db_path)
     _seed_admin(db, settings)
+    # 凭据加密：密钥缺失时告警/严格模式拒绝启动，有密钥则一次性封存历史明文
+    secrets_summary = bootstrap(db)
+    conn = db.connect()
+    try:
+        migrate_session_tokens(conn)
+    finally:
+        conn.close()
     registry = ProviderRegistry(db, settings)
     grok_service = GrokRegisterService(settings)
     # 健康检测与 grok 队列同一机制：lifespan 里 start/stop 的 asyncio 周期任务
@@ -198,6 +207,7 @@ def create_app() -> FastAPI:
     )
     app.state.settings = settings
     app.state.db = db
+    app.state.secret_at_rest = secrets_summary
     app.state.registry = registry
     app.state.grok_service = grok_service
     app.state.health_service = health_service
@@ -207,6 +217,10 @@ def create_app() -> FastAPI:
     app.state.update_boot = boot
     app.state.update_feed = update_feed
     app.state.update_executor = update_executor
+
+    # G3：密钥 RPM 与全局并发闸默认全关（0）。先于 CORS/安全头注册 → 位于它们内层，
+    # 被拒的 429/503 同样会带上安全头、X-Request-Id 并计入访问日志；启动顺序不受影响。
+    app.add_middleware(RateLimitMiddleware, config=load_rate_limit_config())
 
     app.add_middleware(
         CORSMiddleware,

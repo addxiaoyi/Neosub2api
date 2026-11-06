@@ -19,6 +19,7 @@ import app.services.grok_register as grok_service_module
 from app.config import load_settings
 from app.routers import grok as grok_router
 from app.security import current_user
+from app.services import secret_store
 from app.services.grok_register import GrokRegisterService, _backoff_seconds
 
 
@@ -133,7 +134,7 @@ def test_export_json_fields_match_accounts(svc):
             "WHERE provider='grok-register' ORDER BY file"
         ).fetchall()
         secrets = [
-            row["secret"]
+            secret_store.read_secret(row["secret"])[0]
             for row in conn.execute(
                 "SELECT secret FROM provider_credentials WHERE provider='grok-register'"
             ).fetchall()

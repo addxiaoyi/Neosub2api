@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from ..adapters.base import ProviderError
 from ..api_utils import mask_secret, mask_text, now, parse_bool
 from ..db import get_json_setting, put_settings, set_json_setting
+from ..services import secret_store
 from ..model_resolve import (
     DEFAULT_FAILOVER_ATTEMPTS,
     DEFAULT_FAILOVER_ENABLED,
@@ -666,6 +667,9 @@ def _read_config(request: Request, *, reveal: bool = False) -> dict[str, Any]:
             cfg[group] = merged
         elif not isinstance(value, dict):
             cfg[group] = {}
+    # provider_config 的 api_key 在库里是密文：展示与下发前统一解封，掩码才作用在明文上
+    if isinstance(cfg.get("provider_config"), dict):
+        cfg["provider_config"] = secret_store.unseal_provider_config(cfg["provider_config"])
     if reveal:
         return cfg
     redacted = _mask_tree(cfg)
@@ -726,6 +730,8 @@ async def save_upstream_config(
     user: dict = Depends(admin_user),
 ):
     cleaned = _strip_echo({k: v for k, v in patch.items() if k not in {"available", "config_path", "reload_hint", "push"}})
+    if isinstance(cleaned.get("provider_config"), dict):
+        cleaned["provider_config"] = secret_store.seal_provider_config(cleaned["provider_config"])
     conn = request.app.state.db.connect()
     try:
         stored = get_json_setting(conn, "upstream_config", {})

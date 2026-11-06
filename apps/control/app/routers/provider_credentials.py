@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from ..adapters.base import ProviderError
 from ..api_utils import mask_secret
 from ..security import admin_user, audit_event, current_user
+from ..services import secret_store
 
 router = APIRouter(prefix="/api/provider-credentials", tags=["provider-credentials"])
 
@@ -20,7 +21,7 @@ AUDIT_FIELDS = ("label", "base_url", "secret", "enabled", "sort_order", "note")
 
 
 def _public(row: dict[str, Any]) -> dict[str, Any]:
-    secret = str(row.get("secret") or "")
+    secret = secret_store.read_secret(row.get("secret"))[0]
     return {
         "id": int(row["id"]),
         "provider": row["provider"],

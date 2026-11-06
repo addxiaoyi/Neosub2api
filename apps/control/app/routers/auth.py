@@ -17,6 +17,7 @@ from ..security import (
     create_session,
     current_user,
     hash_password,
+    hash_token,
     revoke_user_sessions,
     verify_password,
 )
@@ -171,7 +172,7 @@ def _issue_challenge(conn, username: str) -> str:
     conn.execute("DELETE FROM login_challenges WHERE expires_at < ?", (ts,))
     conn.execute(
         "INSERT INTO login_challenges(token, username, created_at, expires_at) VALUES(?,?,?,?)",
-        (token, username, ts, ts + CHALLENGE_TTL_SEC),
+        (hash_token(token), username, ts, ts + CHALLENGE_TTL_SEC),
     )
     conn.commit()
     return token
@@ -329,7 +330,7 @@ def refresh(request: Request, response: Response, user: dict = Depends(current_u
     conn = request.app.state.db.connect()
     ip = request.client.host if request.client else ""
     try:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM sessions WHERE token = ?", (hash_token(token),))
         new_token = create_session(conn, user["username"], request.app.state.settings.session_ttl_sec)
         audit(conn, user["username"], "session_refresh", "", "", ip)
     finally:
@@ -488,15 +489,16 @@ def _consume_recovery_code(conn, username: str, raw_code: str) -> bool:
 def totp_verify(body: TotpVerifyBody, request: Request, response: Response):
     conn = request.app.state.db.connect()
     ip = request.client.host if request.client else ""
+    challenge_key = hash_token(body.challenge.strip())
     try:
         challenge = conn.execute(
             "SELECT username, expires_at, attempts FROM login_challenges WHERE token = ?",
-            (body.challenge.strip(),),
+            (challenge_key,),
         ).fetchone()
         if challenge is None:
             raise HTTPException(status_code=401, detail="验证已过期，请重新登录")
         if int(challenge["expires_at"]) < now():
-            conn.execute("DELETE FROM login_challenges WHERE token = ?", (body.challenge.strip(),))
+            conn.execute("DELETE FROM login_challenges WHERE token = ?", (challenge_key,))
             conn.commit()
             raise HTTPException(status_code=401, detail="验证已过期，请重新登录")
         username = challenge["username"]
@@ -507,11 +509,11 @@ def totp_verify(body: TotpVerifyBody, request: Request, response: Response):
         def _fail(detail: str, status_code: int = 401) -> None:
             attempts = int(challenge["attempts"]) + 1
             if attempts >= CHALLENGE_MAX_ATTEMPTS:
-                conn.execute("DELETE FROM login_challenges WHERE token = ?", (body.challenge.strip(),))
+                conn.execute("DELETE FROM login_challenges WHERE token = ?", (challenge_key,))
             else:
                 conn.execute(
                     "UPDATE login_challenges SET attempts = ? WHERE token = ?",
-                    (attempts, body.challenge.strip()),
+                    (attempts, challenge_key),
                 )
             conn.commit()
             raise HTTPException(status_code=status_code, detail=detail)
@@ -539,7 +541,7 @@ def totp_verify(body: TotpVerifyBody, request: Request, response: Response):
                 "UPDATE users SET totp_last_counter = ? WHERE username = ?",
                 (counter, username),
             )
-        conn.execute("DELETE FROM login_challenges WHERE token = ?", (body.challenge.strip(),))
+        conn.execute("DELETE FROM login_challenges WHERE token = ?", (challenge_key,))
         token = create_session(conn, username, request.app.state.settings.session_ttl_sec)
         audit(conn, username, "login_totp", "", "", ip)
     finally:
@@ -554,7 +556,7 @@ def logout(request: Request, response: Response):
     if token:
         conn = request.app.state.db.connect()
         try:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = ?", (hash_token(token),))
             conn.commit()
         finally:
             conn.close()

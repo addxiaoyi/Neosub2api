@@ -38,6 +38,7 @@ from .adapters.base import ProviderSpec, stub_capabilities
 from .adapters.openai_compat import OpenAICompatAdapter
 from .api_utils import now
 from .billing import extract_usage, period_bounds, record_usage, resolve_prices, settle, totals
+from .services import secret_store
 from .config import Settings, load_settings
 from .db import Database, get_json_setting, set_json_setting
 from .key_prefix import KEY_PREFIX, STORED_PREFIX_LEN
@@ -364,7 +365,7 @@ class DemoRuntime:
         cur = conn.execute(
             "INSERT INTO provider_credentials(provider, label, base_url, secret, enabled, sort_order, note, "
             "created_at, updated_at) VALUES(?,?,?,?,1,0,?,?,?)",
-            (DEMO_PROVIDER_ID, f"{DEMO_MARK}假上游凭证", "", "demo-local-token",
+            (DEMO_PROVIDER_ID, f"{DEMO_MARK}假上游凭证", "", secret_store.seal("demo-local-token"),
              f"{DEMO_MARK}演示凭据，可一键清除", ts, ts),
         )
         credential_id = int(cur.lastrowid)

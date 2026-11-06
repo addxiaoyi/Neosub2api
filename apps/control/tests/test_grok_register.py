@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 import grok_executor_stub  # noqa: E402
 
 from app.config import load_settings  # noqa: E402
+from app.services import secret_store  # noqa: E402
 from app.services.grok_register import GrokRegisterService  # noqa: E402
 
 
@@ -95,7 +96,8 @@ async def test_pending_to_done_lands_accounts(stub, make_service):
     assert len(accounts) == 2
     assert all(row["uid"].startswith("stub-") for row in accounts)
     assert len(creds) == 2
-    assert all(row["secret"].startswith("stub-cookie-") for row in creds)
+    # 落库可能是密文，取明文再断言
+    assert all(secret_store.read_secret(row["secret"])[0].startswith("stub-cookie-") for row in creds)
 
     steps = [s["step"] for s in svc.detail(int(task["id"]))["steps"]]
     assert steps[0] == "queued"

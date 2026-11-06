@@ -18,6 +18,7 @@ import httpx
 
 from ..config import Settings
 from ..db import Database
+from . import secret_store
 
 logger = logging.getLogger(__name__)
 
@@ -590,12 +591,17 @@ class GrokRegisterService:
                 secret = cookie or token
                 credential_id = 0
                 if secret:
+                    # 密文每次封装都不同，不能拿密文比对；按 provider 取小集合后解封比较
                     existing = conn.execute(
-                        "SELECT id FROM provider_credentials WHERE provider=? AND secret=?",
-                        ("grok-register", secret),
-                    ).fetchone()
-                    if existing is not None:
-                        credential_id = int(existing["id"])
+                        "SELECT id, secret FROM provider_credentials WHERE provider=?",
+                        ("grok-register",),
+                    ).fetchall()
+                    matched = [
+                        int(row["id"]) for row in existing
+                        if secret_store.read_secret(row["secret"])[0] == secret
+                    ]
+                    if matched:
+                        credential_id = matched[0]
                     else:
                         cursor = conn.execute(
                             "INSERT INTO provider_credentials(provider, label, base_url, secret, enabled, "
@@ -604,7 +610,7 @@ class GrokRegisterService:
                                 "grok-register",
                                 f"任务 #{task_id} {uid}"[:64],
                                 "",
-                                secret,
+                                secret_store.seal(secret),
                                 1,
                                 0,
                                 f"注册任务 #{task_id} 产出（{item.get('nickname') or uid}）",
@@ -698,7 +704,7 @@ class GrokRegisterService:
                 "FROM accounts WHERE provider='grok-register' ORDER BY file"
             ).fetchall()
             secrets = {
-                int(row["id"]): str(row["secret"] or "")
+                int(row["id"]): secret_store.read_secret(row["secret"])[0]
                 for row in conn.execute(
                     "SELECT id, secret FROM provider_credentials WHERE provider='grok-register'"
                 ).fetchall()
