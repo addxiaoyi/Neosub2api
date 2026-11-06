@@ -16,8 +16,8 @@ scripts/backup.ps1、backup.sh、restore.ps1、restore.sh 都只是这一层的�
 
 上游密钥（settings.provider_config 里的 api_key 等、provider_credentials.secret）
 在归档里一律不是明文：配了 UNIFIED_BACKUP_ENCRYPTION_KEY 就逐字段 AES-256-GCM
-封装（恢复时还原）；没配就清空这些字段并在 stderr 与清单里明确记录，恢复后提示
-重新粘贴，绝不静默产出带明文密钥的归档。
+封装，恢复时保持封装态原样落库（解封只发生在应用读取时）；没配就清空这些字段
+并在 stderr 与清单里明确记录，恢复后提示重新粘贴，绝不静默产出带明文密钥的归档。
 """
 
 from __future__ import annotations
@@ -352,34 +352,36 @@ def _is_secret_field(name: str) -> bool:
     return lowered in SECRET_FIELD_NAMES or lowered.endswith(SECRET_FIELD_SUFFIXES)
 
 
-def _scrub_secret_value(value, scrub) -> tuple[object, int]:
+def _scrub_secret_value(value, scrub, tally: dict, row_key: str) -> tuple[object, int]:
     """只处理「名字像密钥」字段的值；列表（如 options.extra_keys）逐元素处理。"""
     if isinstance(value, str):
         if not value.strip():
             return value, 0
-        return scrub(value), 1
+        stored, bucket = scrub(value)
+        tally[bucket][row_key] += 1
+        return stored, 1
     if isinstance(value, list):
         out: list = []
         count = 0
         for item in value:
-            new_item, changed = _scrub_secret_value(item, scrub)
+            new_item, changed = _scrub_secret_value(item, scrub, tally, row_key)
             out.append(new_item)
             count += changed
         return out, count
     if isinstance(value, dict):
-        return _scrub_secret_fields(value, scrub)
+        return _scrub_secret_fields(value, scrub, tally, row_key)
     return value, 0
 
 
-def _scrub_secret_fields(node, scrub) -> tuple[object, int]:
+def _scrub_secret_fields(node, scrub, tally: dict, row_key: str) -> tuple[object, int]:
     if isinstance(node, dict):
         out: dict = {}
         count = 0
         for name, value in node.items():
             if isinstance(name, str) and _is_secret_field(name):
-                new_value, changed = _scrub_secret_value(value, scrub)
+                new_value, changed = _scrub_secret_value(value, scrub, tally, row_key)
             else:
-                new_value, changed = _scrub_secret_fields(value, scrub)
+                new_value, changed = _scrub_secret_fields(value, scrub, tally, row_key)
             out[name] = new_value
             count += changed
         return out, count
@@ -387,39 +389,33 @@ def _scrub_secret_fields(node, scrub) -> tuple[object, int]:
         out_list: list = []
         count = 0
         for item in node:
-            new_item, changed = _scrub_secret_fields(item, scrub)
+            new_item, changed = _scrub_secret_fields(item, scrub, tally, row_key)
             out_list.append(new_item)
             count += changed
         return out_list, count
     return node, 0
 
 
-def _walk_sealed(node, unseal) -> tuple[object, int]:
-    """解封按内容前缀判断而不是字段名：以后改名或新增字段也不会漏还原。"""
+def _probe_sealed(node, is_sealed, on_sealed) -> int:
+    """按内容前缀找出封装态；只读遍历，不改写任何节点，密文交给回调逐个校验。"""
     if isinstance(node, dict):
-        out: dict = {}
-        count = 0
-        for name, value in node.items():
-            out[name], changed = _walk_sealed(value, unseal)
-            count += changed
-        return out, count
+        return sum(_probe_sealed(value, is_sealed, on_sealed) for value in node.values())
     if isinstance(node, list):
-        out_list: list = []
-        count = 0
-        for item in node:
-            new_item, changed = _walk_sealed(item, unseal)
-            out_list.append(new_item)
-            count += changed
-        return out_list, count
-    if isinstance(node, str) and backup_crypto().is_sealed(node):
-        return unseal(node), 1
-    return node, 0
+        return sum(_probe_sealed(item, is_sealed, on_sealed) for item in node)
+    if isinstance(node, str) and is_sealed(node):
+        on_sealed(node)
+        return 1
+    return 0
 
 
 def protect_secrets(conn: sqlite3.Connection) -> dict:
     """归档前处理上游密钥，返回要写进 manifest 的 secrets 记录。
 
-    配了 UNIFIED_BACKUP_ENCRYPTION_KEY：逐字段 AES-256-GCM 封装，恢复时用同一把密钥还原。
+    三类结果分开计数：`already_sealed`（库里本来就是封装态）、`sealed_now`（本次封装）、
+    `not_sealed`（没配密钥被清空）。只要有一行受保护就不报 `policy=none`，避免
+    「库已整体封存」的归档被误报成未处理。
+
+    配了 UNIFIED_BACKUP_ENCRYPTION_KEY：逐字段 AES-256-GCM 封装，恢复时保持封装态。
     没配：清空这些字段（行还在，界面能看出「这条凭据需要重新粘贴」）并在 stderr 显式告警——
     宁可恢复后要人重贴，也不把明文密钥写进归档。
     """
@@ -431,18 +427,21 @@ def protect_secrets(conn: sqlite3.Connection) -> dict:
     except Exception as exc:  # 缺密钥/格式坏都按「未配置」处理，行为一致
         reason = str(exc)
 
-    def scrub(text: str) -> str:
+    def scrub(text: str) -> tuple[str, str]:
         if crypto.is_sealed(text):
-            return text
-        return crypto.seal_text(text, key) if key else ""
+            return text, "already_sealed"
+        if key is None:
+            return "", "not_sealed"
+        return crypto.seal_text(text, key), "sealed_now"
 
     info: dict = {
         "policy": "none",
         "algorithm": "aes-256-gcm",
         "key_env": SECRET_KEY_ENV,
         "settings_keys": [],
-        "settings_fields": 0,
-        "provider_credentials_rows": 0,
+        "already_sealed": {"settings_fields": 0, "provider_credentials_rows": 0},
+        "sealed_now": {"settings_fields": 0, "provider_credentials_rows": 0},
+        "not_sealed": {"settings_fields": 0, "provider_credentials_rows": 0},
     }
     if reason:
         info["reason"] = reason
@@ -457,14 +456,15 @@ def protect_secrets(conn: sqlite3.Connection) -> dict:
             continue
         if not isinstance(node, dict):
             continue
-        cleaned, count = _scrub_secret_fields(node, scrub)
-        if not count:
+        cleaned, touched = _scrub_secret_fields(node, scrub, info, "settings_fields")
+        if not touched:
             continue
-        conn.execute(
-            "UPDATE settings SET value = ? WHERE key = ?",
-            (json.dumps(cleaned, ensure_ascii=False), setting_key),
-        )
-        info["settings_fields"] += count
+        # 全是已封存时 cleaned 与 node 相等，不必回写
+        if cleaned != node:
+            conn.execute(
+                "UPDATE settings SET value = ? WHERE key = ?",
+                (json.dumps(cleaned, ensure_ascii=False), setting_key),
+            )
         info["settings_keys"].append(setting_key)
 
     if has_table(conn, SECRET_CREDENTIAL_TABLE):
@@ -475,14 +475,13 @@ def protect_secrets(conn: sqlite3.Connection) -> dict:
             text = row["secret"]
             if not isinstance(text, str) or not text.strip():
                 continue
-            sealed = scrub(text)
-            if sealed == text:
-                continue
-            conn.execute(
-                f"UPDATE {SECRET_CREDENTIAL_TABLE} SET secret = ? WHERE id = ?",
-                (sealed, row["id"]),
-            )
-            info["provider_credentials_rows"] += 1
+            stored, bucket = scrub(text)
+            info[bucket]["provider_credentials_rows"] += 1
+            if stored != text:
+                conn.execute(
+                    f"UPDATE {SECRET_CREDENTIAL_TABLE} SET secret = ? WHERE id = ?",
+                    (stored, row["id"]),
+                )
     conn.commit()
 
     # UPDATE 只改写页内内容，旧明文页可能留在 freelist；VACUUM 重建后归档里才真的搜不到。
@@ -492,9 +491,15 @@ def protect_secrets(conn: sqlite3.Connection) -> dict:
         conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("VACUUM")
 
-    if info["settings_fields"] or info["provider_credentials_rows"]:
-        info["policy"] = "encrypted" if key else "stripped"
-    if info["policy"] == "stripped":
+    if sum(info["already_sealed"].values()) + sum(info["sealed_now"].values()):
+        info["policy"] = "encrypted"
+    elif sum(info["not_sealed"].values()):
+        info["policy"] = "stripped"
+    # 旧字段保持「本次封装」口径，外部脚本仍可只读这两个键
+    info["settings_fields"] = info["sealed_now"]["settings_fields"]
+    info["provider_credentials_rows"] = info["sealed_now"]["provider_credentials_rows"]
+
+    if key is None and sum(info["not_sealed"].values()):
         print(
             f"warning: 未配置 {SECRET_KEY_ENV}（或不是 32 字节 base64），归档已清空上游密钥字段："
             "恢复后需在「服务商」/「凭据」页重新粘贴，否则 provider 不可用。"
@@ -504,28 +509,20 @@ def protect_secrets(conn: sqlite3.Connection) -> dict:
     return info
 
 
-def unseal_secrets(db: Path, manifest: dict) -> dict:
-    """恢复前把归档里封装的上游密钥还原成明文（只改解压出来的副本）。"""
+def verify_sealed_secrets(db: Path, manifest: dict) -> dict:
+    """恢复前确认归档里的封装态密钥能被当前密钥解开；不改写解压副本。
+
+    封装态原样落库，解封只发生在应用读取时。缺密钥/密钥不匹配都在动目标库之前失败，
+    不会出现「恢复一次就变成明文」或静默降级。
+    """
     raw = manifest.get("secrets")
     info = raw if isinstance(raw, dict) else {}
-    policy = str(info.get("policy") or "none")
-    result: dict = {"policy": policy, "restored_fields": 0, "provider_credentials_rows": 0}
-    if policy != "encrypted":
-        return result
-
+    declared = str(info.get("policy") or "none")
     crypto = backup_crypto()
-    try:
-        key = crypto.load_key()
-    except Exception as exc:
-        raise BackupError(
-            f"归档里的上游密钥已用 {SECRET_KEY_ENV} 加密封装，恢复需要同一把密钥（当前不可用：{exc}）。"
-            "配好环境变量后重试；拿不到密钥就只能放弃还原，恢复后到「服务商」/「凭据」页重新粘贴。"
-        ) from exc
+    counts = {"settings_fields": 0, "provider_credentials_rows": 0}
+    sealed: list[str] = []
 
-    def unseal(text: str) -> str:
-        return crypto.unseal_text(text, key)
-
-    conn = open_db(db)
+    conn = open_db(db, readonly=True)
     try:
         for setting_key in SECRET_SETTING_KEYS:
             row = conn.execute(
@@ -539,39 +536,55 @@ def unseal_secrets(db: Path, manifest: dict) -> dict:
                 continue
             if not isinstance(node, dict):
                 continue
-            cleaned, count = _walk_sealed(node, unseal)
-            if not count:
-                continue
-            conn.execute(
-                "UPDATE settings SET value = ? WHERE key = ?",
-                (json.dumps(cleaned, ensure_ascii=False), setting_key),
-            )
-            result["restored_fields"] += count
+            counts["settings_fields"] += _probe_sealed(node, crypto.is_sealed, sealed.append)
 
         if has_table(conn, SECRET_CREDENTIAL_TABLE):
-            rows = conn.execute(f"SELECT id, secret FROM {SECRET_CREDENTIAL_TABLE}").fetchall()
-            for row in rows:
-                if not crypto.is_sealed(row["secret"]):
-                    continue
-                conn.execute(
-                    f"UPDATE {SECRET_CREDENTIAL_TABLE} SET secret = ? WHERE id = ?",
-                    (unseal(row["secret"]), row["id"]),
-                )
-                result["provider_credentials_rows"] += 1
-        conn.commit()
-        # 解封后同样重建文件：旧的密文页不留在解压副本里，也顺手压实页数
-        mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
-        if mode != "delete":
-            conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute("VACUUM")
+            for row in conn.execute(f"SELECT secret FROM {SECRET_CREDENTIAL_TABLE}"):
+                if crypto.is_sealed(row["secret"]):
+                    sealed.append(row["secret"])
+                    counts["provider_credentials_rows"] += 1
+    finally:
+        conn.close()
+
+    if not sealed:
+        return {
+            "policy": declared,
+            "verified_fields": 0,
+            "provider_credentials_rows": 0,
+            "sealed": counts,
+        }
+
+    try:
+        key = crypto.load_key()
+    except Exception as exc:
+        raise BackupError(
+            f"归档里的上游密钥已用 {SECRET_KEY_ENV} 加密封装，恢复需要同一把密钥（当前不可用：{exc}）。"
+            "配好环境变量后重试；拿不到密钥就只能放弃还原，恢复后到「服务商」/「凭据」页重新粘贴。"
+        ) from exc
+
+    try:
+        for token in sealed:
+            crypto.unseal_text(token, key)
     except (crypto.CryptoVerifyError, ValueError) as exc:
         raise BackupError(
             f"归档里的上游密钥用当前 {SECRET_KEY_ENV} 解不开：{exc}。"
             "密钥不匹配时不要继续恢复，否则 provider 会拿到无法使用的密钥"
         ) from exc
-    finally:
-        conn.close()
-    return result
+
+    return {
+        "policy": "encrypted",
+        "verified_fields": counts["settings_fields"],
+        "provider_credentials_rows": counts["provider_credentials_rows"],
+        "sealed": counts,
+    }
+
+
+def unseal_secrets(db: Path, manifest: dict) -> dict:
+    """兼容面板路由的旧入口（apps/control/app/routers/backup.py 仍按此名调用）。
+
+    行为已改为「只校验、不改写」；新代码请直接用 verify_sealed_secrets。
+    """
+    return verify_sealed_secrets(db, manifest)
 
 
 # ---------------------------------------------------------------- 归档构建
@@ -749,8 +762,10 @@ def make_archive(*, db_source: Path, out_dir: Path, keep: int, include_demo: boo
         f"removed={demo.get('removed_rows', 0)} detail={json.dumps(demo.get('removed') or {}, ensure_ascii=False, sort_keys=True)}"
     )
     print(
-        f"secrets: policy={secrets_info['policy']} fields={secrets_info['settings_fields']} "
-        f"credentials={secrets_info['provider_credentials_rows']} key_env={SECRET_KEY_ENV}"
+        f"secrets: policy={secrets_info['policy']} "
+        f"already_sealed={_bucket_text(secrets_info['already_sealed'])} "
+        f"sealed_now={_bucket_text(secrets_info['sealed_now'])} "
+        f"not_sealed={_bucket_text(secrets_info['not_sealed'])} key_env={SECRET_KEY_ENV}"
     )
     print(f"config files: {len(members)} ({', '.join(item['member'] for item in members)})" if members
           else "config files: 0")
@@ -762,6 +777,12 @@ def make_archive(*, db_source: Path, out_dir: Path, keep: int, include_demo: boo
 
 def _rows_line(title: str, counts: dict[str, int]) -> str:
     return f"{title}: " + ", ".join(f"{name}={value}" for name, value in sorted(counts.items()))
+
+
+def _bucket_text(bucket: object) -> str:
+    """secrets 的分桶计数压成一行：fields=本次涉及字段数/credentials=涉及行数。"""
+    data = bucket if isinstance(bucket, dict) else {}
+    return f"fields={data.get('settings_fields', 0)}/credentials={data.get('provider_credentials_rows', 0)}"
 
 
 # ---------------------------------------------------------------- 归档读取与校验
@@ -891,8 +912,11 @@ def print_load_summary(archive: Path, digest: str | None, manifest: dict) -> Non
     secrets = manifest.get("secrets")
     if isinstance(secrets, dict):
         print(
-            f"secrets: policy={secrets.get('policy') or 'none'} fields={secrets.get('settings_fields', 0)} "
-            f"credentials={secrets.get('provider_credentials_rows', 0)} key_env={secrets.get('key_env')}"
+            f"secrets: policy={secrets.get('policy') or 'none'} "
+            f"already_sealed={_bucket_text(secrets.get('already_sealed'))} "
+            f"sealed_now={_bucket_text(secrets.get('sealed_now'))} "
+            f"not_sealed={_bucket_text(secrets.get('not_sealed'))} "
+            f"key_env={secrets.get('key_env')}"
         )
     else:
         print("secrets: policy=plaintext (旧版本归档，未做上游密钥封装)")
@@ -1311,22 +1335,25 @@ def cmd_restore(args) -> int:
         print_load_summary(archive, digest, manifest)
         print(f"target: {db}")
 
-        # 只改解压出来的副本；密钥缺失/不匹配时在动目标库之前失败
-        secrets_state = unseal_secrets(db_file, manifest)
+        # 只校验能否解开；不改写解压副本，封装态原样落库
+        secrets_state = verify_sealed_secrets(db_file, manifest)
         if secrets_state["policy"] == "encrypted":
             print(
-                f"secrets: restored fields={secrets_state['restored_fields']} "
-                f"credentials={secrets_state['provider_credentials_rows']}"
-            )
-        elif secrets_state["policy"] == "stripped":
-            print(
-                "warning: 归档里的上游密钥在备份时已被清空（当时未配置 "
-                f"{SECRET_KEY_ENV}），恢复后需在「服务商」/「凭据」页重新粘贴，否则 provider 不可用",
-                file=sys.stderr,
+                f"secrets: sealed fields={secrets_state['verified_fields']} "
+                f"credentials={secrets_state['provider_credentials_rows']} 已保留封装态（应用读取时解封）"
             )
         elif "secrets" not in manifest:
             print(
                 "warning: 该归档由未做密钥封装的旧版本生成，内含明文上游密钥，请按敏感文件保管",
+                file=sys.stderr,
+            )
+        # 混合归档（部分已封存、部分没配密钥被清空）也要把清空这件事说出来
+        secrets_meta = manifest.get("secrets")
+        not_sealed = secrets_meta.get("not_sealed") if isinstance(secrets_meta, dict) else None
+        if isinstance(not_sealed, dict) and sum(not_sealed.values()):
+            print(
+                "warning: 归档里的上游密钥在备份时已被清空（当时未配置 "
+                f"{SECRET_KEY_ENV}），恢复后需在「服务商」/「凭据」页重新粘贴，否则 provider 不可用",
                 file=sys.stderr,
             )
 

@@ -217,12 +217,13 @@ def restore_archive(
     rollback_dir = Path(tempfile.mkdtemp(prefix="u2a-rollback-"))
     try:
         _verify_archive(core, db_file, manifest)
-        # 归档里的上游密钥是封装态；先还原解压副本再换库，缺密钥/不匹配就整体中止
+        # 归档里的上游密钥是封装态：先用当前密钥试解校验，通过后封装态原样落库，
+        # 不改写解压副本；缺密钥/不匹配就在动目标库之前整体中止
         try:
             secrets_state = core.unseal_secrets(db_file, manifest)
         except core.BackupError as exc:
             raise HTTPException(
-                status_code=400, detail=f"归档里的上游密钥无法还原，已中止恢复：{exc}"
+                status_code=400, detail=f"归档里的上游密钥校验未通过，已中止恢复：{exc}"
             ) from exc
         pre_snapshot = _restore_pre_snapshot(core, settings, directory, username)
         rollback_file = _snapshot_live(core, original, rollback_dir)
@@ -251,6 +252,7 @@ def restore_archive(
         "duration_ms": duration_ms,
         "selfcheck_ok": True,
         "rows_after": manifest.get("tables", {}),
+        # 密钥校验结果：policy / verified_fields / provider_credentials_rows / sealed
         "secrets": secrets_state,
     }
 

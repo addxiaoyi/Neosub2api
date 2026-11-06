@@ -31,11 +31,12 @@ manifest 关键字段：
 | `database.integrity_check` | 快照生成时的 `PRAGMA integrity_check` |
 | `tables` / `totals` | 每表行数与总行数，恢复后逐表比对 |
 | `demo.excluded` / `demo.found_rows` / `demo.removed_rows` | 演示数据处理结果 |
-| `secrets.policy` / `secrets.settings_fields` / `secrets.provider_credentials_rows` | 上游密钥处理策略（`encrypted` / `stripped` / `none`）与处理数量；旧归档没有该字段 |
+| `secrets.policy` / `secrets.settings_fields` / `secrets.provider_credentials_rows` | 上游密钥处理策略（`encrypted` / `stripped` / `none`）与本次封装数量；旧归档没有该字段 |
+| `secrets.already_sealed` / `secrets.sealed_now` / `secrets.not_sealed` | 分桶计数（`settings_fields` / `provider_credentials_rows`）：库里本来已封装 / 本次封装 / 没封存（未配密钥被清空）。`policy=none` 只在三类都为 0 时出现 |
 
 ## 上游密钥在归档里怎么放
 
-归档里的 `db/unified.db` 会带上游密钥，所以本地归档不保留明文：`scripts/backup_core.py` 在打包前对快照副本调用 `protect_secrets`（`scripts/backup_core.py:419-505`），逐字段处理三类位置：
+归档里的 `db/unified.db` 会带上游密钥，所以本地归档不保留明文：`scripts/backup_core.py` 在打包前对快照副本调用 `protect_secrets`（`scripts/backup_core.py:411`），逐字段处理三类位置。已经是 `u2a-enc:v1:` 的行按「已封存」计数，不会被重复封一层，也不会被当成未处理：
 
 | 位置 | 处理 |
 | --- | --- |
@@ -45,9 +46,9 @@ manifest 关键字段：
 
 封装格式是 `u2a-enc:v1:` + base64(`nonce(12) || ciphertext || tag(16)`)，AES-256-GCM，AAD 固定为 `unified-2api-provider-secret-v1`，与归档文件加密（AAD `unified-2api-backup-v1`）分开。密钥只来自环境变量 `UNIFIED_BACKUP_ENCRYPTION_KEY`（32 字节 base64，与远端备份共用），模板见 `.env.example` / `deploy/.env.example`。
 
-**没配密钥时**：备份照常成功，但会把这些字段清空（行还在），在 stderr 打一条 `warning: 未配置 UNIFIED_BACKUP_ENCRYPTION_KEY…归档已清空上游密钥字段`，`manifest.json` 里记 `secrets.policy=stripped`，备份输出也会打印 `secrets: policy=stripped`。恢复这类归档时会再提示一次：provider 需要在「服务商」/「凭据」页重新粘贴密钥，否则不可用。不会出现「静默产出带明文密钥的归档」这条路径。
+**没配密钥时**：备份照常成功，但会把仍是明文的字段清空（行还在），在 stderr 打一条 `warning: 未配置 UNIFIED_BACKUP_ENCRYPTION_KEY…归档已清空上游密钥字段`，`manifest.json` 里记 `secrets.policy=stripped`，备份输出也会打印 `secrets: policy=stripped`。已经是 `u2a-enc:v1:` 的行不动，并按 `secrets.already_sealed` 计数；此时 `policy` 为 `encrypted`，因为归档里确实有受保护的密钥。恢复这类归档时会再提示一次：provider 需要在「服务商」/「凭据」页重新粘贴密钥，否则不可用。不会出现「静默产出带明文密钥的归档」这条路径。
 
-**恢复时**：`unseal_secrets`（`scripts/backup_core.py:507-575`）只改解压出来的副本，在动目标库之前完成；`secrets.policy=encrypted` 的归档缺同一把密钥或密钥不匹配时直接失败（CLI 退出码 2；管理界面 400），目标库与服务不受影响。管理界面恢复成功后响应里多一个 `secrets` 字段，写明 `policy` 与还原数量。旧版本生成的归档没有 `secrets` 字段，`verify` 与恢复都会打印「旧版本归档，内含明文上游密钥」的告警。
+**恢复时**：`verify_sealed_secrets`（旧调用名 `unseal_secrets`，`scripts/backup_core.py:512`）只做校验，不改写解压副本：用同一把密钥逐个试解封装态，全部成功才继续；封装态原样落库，解封只发生在应用读取时。`secrets.policy=encrypted` 的归档缺同一把密钥或密钥不匹配时直接失败（CLI 退出码 2；管理界面 400），目标库与服务不受影响。管理界面恢复成功后响应里多一个 `secrets` 字段，写明 `policy` 与校验数量。旧版本生成的归档没有 `secrets` 字段，`verify` 与恢复都会打印「旧版本归档，内含明文上游密钥」的告警。
 
 **残留边界**：`pre-restore-*` 是对当前库的字节级现场拷贝（`unified.db.bak`），刻意不做改写——它的用途就是坏库回滚，写入任何东西都可能毁掉现场。这个文件含明文上游密钥，请把它和归档一样按敏感文件保管（仅本机、权限 0600 的目录、不进版本库）。容器备份（`-UseContainer`）在打包前会短暂在宿主机留下未封装的 `.db` 快照，脚本在 `finally` 里删除；中断退出时请手工确认 `data/backups` 下没有残留的 `unified-snapshot-*.db`。
 
@@ -97,7 +98,7 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 
 顺序（任一步失败就停止，不碰目标库）：
 
-1. **校验归档**：若 `.sha256` 存在，先比对归档本身；再逐个成员比对 manifest 里的 sha256、大小；对解压出的库再跑一次 `PRAGMA integrity_check`。归档带封装密钥时，本步还会用 `UNIFIED_BACKUP_ENCRYPTION_KEY` 把解压副本还原成明文；缺密钥或密钥不匹配就直接中止，不进入后续步骤（见「上游密钥在归档里怎么放」）。
+1. **校验归档**：若 `.sha256` 存在，先比对归档本身；再逐个成员比对 manifest 里的 sha256、大小；对解压出的库再跑一次 `PRAGMA integrity_check`。归档里找出 `u2a-enc:v1:` 封装态后，用 `UNIFIED_BACKUP_ENCRYPTION_KEY` 逐个试解以确认能解开，但**不改写副本**（封装态原样落库，应用读取时才解封）；缺密钥或密钥不匹配就直接中止，不进入后续步骤（见「上游密钥在归档里怎么放」）。
 2. **留存现场**：当前库与 `-wal` / `-shm` 原样拷贝到 `data/backups/pre-restore-<时间戳>/unified.db.bak`（含 `pre-restore.json` 记录指纹）。
    这里刻意不用在线快照，因为“库已经坏了”正是最常见的恢复场景。
    目标库本来就不存在时跳过这一步：输出 `rows before restore: <unreadable/absent>`，也不生成 `pre-restore-*` 目录——没有现场可留，属正常分支，不是失败。
@@ -143,7 +144,7 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 5. `_backup_into` + `_ensure_wal`：SQLite 在线备份把归档页写进活库，再把 `journal_mode` 钉回 `wal`（`backup.py:331-354`、`:355-371`）。
 6. `_structure_check`：表集合、只增表行数下限、admin 账号、`integrity_check`、`foreign_key_check`、demo 残留（`backup.py:400-459`）；不过就 `_rollback_db`（`:390-399`）。
 
-成功响应：`{ok, restored, path, pre_restore_backup, pre_restore_path, duration_ms, selfcheck_ok, rows_after, secrets}`（`secrets` 里是 `policy` / `restored_fields` / `provider_credentials_rows`），并写 `audit_logs`（action `backup.restore`）。
+成功响应：`{ok, restored, path, pre_restore_backup, pre_restore_path, duration_ms, selfcheck_ok, rows_after, secrets}`（`secrets` 里是 `policy` / `verified_fields` / `provider_credentials_rows`），并写 `audit_logs`（action `backup.restore`）。恢复只校验封装态能否解开，落库值保持 `u2a-enc:v1:`，由应用读取路径解封。
 
 **能力边界**（和 CLI 的差别）：
 
@@ -232,7 +233,7 @@ powershell -File scripts\restore.ps1 -Latest -WithConfig -ReadyUrl http://127.0.
 
 **（2026-11-06 已更正）**
 
-上面第一条「本地归档本身不加密」只对归档文件外层成立：`db/unified.db` 成员里有 `settings.provider_config` 的 `api_key`、`upstream_config` 的上游密钥和 `provider_credentials.secret`。旧版把整库快照原样打进 zip，等于一旦归档被拷走，所有上游密钥直接泄给拿文件的人——外层 zip 有没有加密都不影响这一点，因为本地归档本来就没有外层加密。现在的行为见上文「上游密钥在归档里怎么放」：配了 `UNIFIED_BACKUP_ENCRYPTION_KEY` 就逐字段 AES-256-GCM 封装，恢复时还原；没配就清空并显式告警、恢复后要求重新粘贴。误判后果是把「本地归档不加密」读成「本地归档没有密钥暴露面」，从而按普通日志文件分发/拷贝 `unified-backup-*.zip`，或在恢复后误以为 provider 会自己恢复可用。
+上面第一条「本地归档本身不加密」只对归档文件外层成立：`db/unified.db` 成员里有 `settings.provider_config` 的 `api_key`、`upstream_config` 的上游密钥和 `provider_credentials.secret`。旧版把整库快照原样打进 zip，等于一旦归档被拷走，所有上游密钥直接泄给拿文件的人——外层 zip 有没有加密都不影响这一点，因为本地归档本来就没有外层加密。现在的行为见上文「上游密钥在归档里怎么放」：配了 `UNIFIED_BACKUP_ENCRYPTION_KEY` 就逐字段 AES-256-GCM 封装，恢复时保持封装态原样落库、应用读取时解封；没配就清空并显式告警、恢复后要求重新粘贴。误判后果是把「本地归档不加密」读成「本地归档没有密钥暴露面」，从而按普通日志文件分发/拷贝 `unified-backup-*.zip`，或在恢复后误以为 provider 会自己恢复可用。
 
 ## 2026-11-04 覆盖索引变更后复验
 
