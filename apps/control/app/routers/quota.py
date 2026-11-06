@@ -146,6 +146,7 @@ def _policy_public(conn, row) -> dict[str, Any]:
         "limit_micro": int(row["limit_micro"]),
         "limit_usd": to_usd(row["limit_micro"]),
         "limit_requests": int(row["limit_requests"]),
+        "limit_tokens": int(row["limit_tokens"]),
         "enabled": bool(row["enabled"]),
         "thresholds": _thresholds(conn, row["id"]),
         "created_at": int(row["created_at"]),
@@ -183,6 +184,8 @@ def _alert_public(row) -> dict[str, Any]:
         "limit_micro": int(row["limit_micro"]),
         "used_requests": int(row["used_requests"]),
         "limit_requests": int(row["limit_requests"]),
+        "used_tokens": int(row["used_tokens"]),
+        "limit_tokens": int(row["limit_tokens"]),
         "status": _alert_status(row, now()),
         "acked_at": int(row["acked_at"] or 0),
         "closed_at": int(row["closed_at"] or 0),
@@ -225,6 +228,7 @@ class PolicyIn(BaseModel):
     model: str = ""
     limit_micro: int = 0
     limit_requests: int = 0
+    limit_tokens: int = 0
     thresholds: list[int] = Field(default_factory=list)
     enabled: bool = True
 
@@ -246,10 +250,10 @@ def upsert_policy(body: PolicyIn, request: Request, user: dict = Depends(admin_u
     window = (body.window or "").strip().lower()
     if window not in QUOTA_WINDOWS:
         raise HTTPException(400, f"window 必须是 {'/'.join(QUOTA_WINDOWS)}")
-    if body.limit_micro < 0 or body.limit_requests < 0:
+    if body.limit_micro < 0 or body.limit_requests < 0 or body.limit_tokens < 0:
         raise HTTPException(400, "额度上限不能为负")
-    if body.limit_micro == 0 and body.limit_requests == 0:
-        raise HTTPException(400, "金额上限与请求数上限至少设置一项（0 表示不设）")
+    if body.limit_micro == 0 and body.limit_requests == 0 and body.limit_tokens == 0:
+        raise HTTPException(400, "金额、请求数与 token 上限至少设置一项（0 表示不设）")
     provider = (body.provider or "").strip()
     provider = "" if provider == "*" else provider
     model = (body.model or "").strip()
@@ -268,18 +272,20 @@ def upsert_policy(body: PolicyIn, request: Request, user: dict = Depends(admin_u
         if existing is None:
             cur = conn.execute(
                 "INSERT INTO quota_policies(key_id, provider, model, window, limit_micro, "
-                "limit_requests, enabled, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "limit_requests, limit_tokens, enabled, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (key_id, provider, model, window, body.limit_micro, body.limit_requests,
-                 1 if body.enabled else 0, stamp, stamp),
+                 body.limit_tokens, 1 if body.enabled else 0, stamp, stamp),
             )
             policy_id = cur.lastrowid
             action = "quota.policy.create"
         else:
             policy_id = existing["id"]
             conn.execute(
-                "UPDATE quota_policies SET limit_micro = ?, limit_requests = ?, enabled = ?, "
-                "updated_at = ? WHERE id = ?",
-                (body.limit_micro, body.limit_requests, 1 if body.enabled else 0, stamp, policy_id),
+                "UPDATE quota_policies SET limit_micro = ?, limit_requests = ?, limit_tokens = ?, "
+                "enabled = ?, updated_at = ? WHERE id = ?",
+                (body.limit_micro, body.limit_requests, body.limit_tokens,
+                 1 if body.enabled else 0, stamp, policy_id),
             )
             action = "quota.policy.update"
         # 阈值整体替换；已发出的告警按 (策略, 百分比, 周期) 去重，不会因重建阈值行而重复
@@ -298,7 +304,8 @@ def upsert_policy(body: PolicyIn, request: Request, user: dict = Depends(admin_u
             action,
             f"quota_policy:{policy_id}",
             f"key_id={key_id} window={window} provider={provider!r} model={model!r} "
-            f"micro={body.limit_micro} requests={body.limit_requests} thresholds={percents}",
+            f"micro={body.limit_micro} requests={body.limit_requests} "
+            f"tokens={body.limit_tokens} thresholds={percents}",
         )
         return result
     finally:
@@ -327,6 +334,7 @@ def _status_item(conn, policy, at: int) -> dict[str, Any]:
     usage = window_usage(conn, policy, at)
     limit_micro = int(policy["limit_micro"])
     limit_requests = int(policy["limit_requests"])
+    limit_tokens = int(policy["limit_tokens"])
     alerts = conn.execute(
         "SELECT * FROM quota_alerts WHERE policy_id = ? AND period_start = ? "
         "ORDER BY threshold_percent",
@@ -341,13 +349,17 @@ def _status_item(conn, policy, at: int) -> dict[str, Any]:
         "used_micro": usage["used_micro"],
         "used_usd": to_usd(usage["used_micro"]),
         "used_requests": usage["used_requests"],
+        "used_tokens": usage["used_tokens"],
         "remaining_micro": max(0, limit_micro - usage["used_micro"]) if limit_micro else None,
         "remaining_requests": max(0, limit_requests - usage["used_requests"]) if limit_requests else None,
+        "remaining_tokens": max(0, limit_tokens - usage["used_tokens"]) if limit_tokens else None,
         "ratio_micro": round(usage["used_micro"] / limit_micro, 6) if limit_micro else None,
         "ratio_requests": round(usage["used_requests"] / limit_requests, 6) if limit_requests else None,
+        "ratio_tokens": round(usage["used_tokens"] / limit_tokens, 6) if limit_tokens else None,
         "exceeded": bool(
             (limit_micro and usage["used_micro"] >= limit_micro)
             or (limit_requests and usage["used_requests"] >= limit_requests)
+            or (limit_tokens and usage["used_tokens"] >= limit_tokens)
         ),
         "alerts": [_alert_public(row) for row in alerts],
     }

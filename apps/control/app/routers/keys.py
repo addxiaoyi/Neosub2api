@@ -8,6 +8,8 @@ admin 可查全部、可建任意归属的 key；非 admin 只列自己的 key�
 """
 
 import hashlib
+import ipaddress
+import json
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +22,17 @@ from ..security import admin_user, audit_event, current_user
 router = APIRouter(prefix="/api/keys", tags=["keys"])
 
 
+def _allow_list(raw: str | None) -> list[str]:
+    """白名单列存 JSON 数组；老库空串、坏值一律当「未配置」。"""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
 def _row_to_public(row) -> dict:
     return {
         "id": row["id"],
@@ -29,6 +42,8 @@ def _row_to_public(row) -> dict:
         "created_at": row["created_at"],
         "last_used_at": row["last_used_at"],
         "owner_user_id": row["owner_user_id"],
+        "model_allow": _allow_list(row["model_allow"]),
+        "ip_allow": _allow_list(row["ip_allow"]),
     }
 
 
@@ -90,11 +105,39 @@ def create_key(body: KeyCreate, request: Request, user: dict = Depends(admin_use
 class KeyPatch(BaseModel):
     name: str | None = None
     enabled: bool | None = None
+    # 空数组 = 清空白名单（不限制）；None = 不改
+    model_allow: list[str] | None = None
+    ip_allow: list[str] | None = None
+
+
+def _norm_models(items: list[str]) -> str:
+    """模型名单：存 JSON 数组；* 由网关侧解释成前缀通配。"""
+    cleaned = [str(raw).strip() for raw in items]
+    for name in cleaned:
+        if not (1 <= len(name) <= 128):
+            raise HTTPException(400, "模型白名单每项长度需为 1-128 个字符")
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
+
+
+def _norm_ips(items: list[str]) -> str:
+    """IP 名单：只收单 IP 与 CIDR，先解析再入库，别把非法值留给请求时才发现。"""
+    cleaned = [str(raw).strip() for raw in items]
+    for text in cleaned:
+        try:
+            ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            raise HTTPException(400, f"IP 白名单项不是合法 IP/CIDR：{text}")
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
 
 
 @router.patch("/{key_id}")
 def update_key(key_id: int, body: KeyPatch, request: Request, user: dict = Depends(admin_user)):
-    if body.name is None and body.enabled is None:
+    if (
+        body.name is None
+        and body.enabled is None
+        and body.model_allow is None
+        and body.ip_allow is None
+    ):
         raise HTTPException(400, "没有需要更新的字段")
     conn = request.app.state.db.connect()
     try:
@@ -108,6 +151,14 @@ def update_key(key_id: int, body: KeyPatch, request: Request, user: dict = Depen
             conn.execute("UPDATE api_keys SET name = ? WHERE id = ?", (name, key_id))
         if body.enabled is not None:
             conn.execute("UPDATE api_keys SET enabled = ? WHERE id = ?", (1 if body.enabled else 0, key_id))
+        if body.model_allow is not None:
+            conn.execute(
+                "UPDATE api_keys SET model_allow = ? WHERE id = ?", (_norm_models(body.model_allow), key_id)
+            )
+        if body.ip_allow is not None:
+            conn.execute(
+                "UPDATE api_keys SET ip_allow = ? WHERE id = ?", (_norm_ips(body.ip_allow), key_id)
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
     finally:
