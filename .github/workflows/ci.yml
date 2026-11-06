@@ -216,3 +216,39 @@ jobs:
             echo "::error::上游巡检有仓 error/不可达（exit=$code），见上方输出"
           fi
           exit "$code"
+
+  # 一键启动脚本的脚本级用例（scripts/tests/test_start_scripts.py，4 条）。
+  # 不能塞进 backend job：那条是 ubuntu 且不带 Node，三条依赖 node 的用例会走 [env]
+  # 跳过，且 start.ps1 分支需要 PowerShell。用例按平台分流（Windows 跑 start.ps1，
+  # 其余 POSIX 跑 start.sh），所以两个 runner 各跑一遍；macOS 未单独挂，POSIX 分支与
+  # Linux 同源。用例自起临时目录 + 动态端口，不碰仓库 data/ 与 .run/。
+  start-scripts:
+    name: start-scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/control/requirements*.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install backend deps
+        working-directory: apps/control
+        run: python -m pip install -r requirements-dev.txt
+
+      # -rs 让 skip 原因可见：Node 或 PowerShell 缺失时应显式暴露，而不是静默变绿
+      - name: 一键启动脚本用例（4 条）
+        run: python -m pytest scripts/tests/test_start_scripts.py -v -rs

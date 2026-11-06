@@ -11,8 +11,14 @@
 
 平台分流：Windows 跑 `start.ps1`（powershell/pwsh），Linux/macOS 跑 `start.sh`。
 两者测的是同一套退出码与状态文件契约。Windows 上 WSL 的 bash 看不到 Windows
-进程（kill/PID 语义不通用，且本机 WSL 未开 interop），所以本文件在 Windows
-只跑 PowerShell 分支，start.sh 的 Windows 覆盖情况见交付说明。
+进程（kill/PID 语义不通用），所以本文件在 Windows 只跑 PowerShell 分支。
+
+start.sh 的 Linux 分支 2026-11-06 在 WSL2（Ubuntu 24.04，bash 5.2，Python 3.12，
+Node 20）实跑过：全部用例通过；另补一条「PATH 里没有 node」的降级用例。
+Windows 侧的 start.sh 不适用（Windows 版 Python 不认 POSIX 路径）。
+注意：`scripts/start.sh` 必须是 LF 行尾，`core.autocrlf=true` 的检出会让 bash
+在第 9 行 `set -o pipefail` 处报 `invalid option name`，WSL 直接跑 /mnt/d 下的
+工作区文件时会踩到；Linux 侧按 LF 检出即可。
 
 运行：python -m pytest scripts/tests/test_start_scripts.py -v
 """
@@ -334,6 +340,52 @@ def test_stop_cleans_state_after_process_exit(tmp_path: Path) -> None:
             assert "状态文件存在，但进程已经退出；已清理状态" in stopped.output
         assert not result.state_file.exists()
         assert _http_status(f"http://127.0.0.1:{state['web_port']}/") is None
+    finally:
+        h.cleanup()
+
+
+def test_start_without_node_serves_page_from_control(tmp_path: Path) -> None:
+    """POSIX：PATH 里没有 node 时降级为控制面同端口托管页面，状态文件 web_port 为空。"""
+    if IS_WIN:
+        pytest.skip("[env] Windows 走 start.ps1，node 缺失分支属 start.sh 的 POSIX 路径")
+
+    h = Harness(tmp_path, with_web=True)
+    # 只从 PATH 里摘掉 node，Python/curl 等其余命令保持可用
+    h.env["PATH"] = os.pathsep.join(
+        p for p in h.env.get("PATH", "").split(os.pathsep) if p and not (Path(p) / "node").exists()
+    )
+    api_port = _free_port()
+    try:
+        result = _start(h, api_port=api_port)
+        assert result.code == 0, f"期望启动成功，实际 {result.code}；输出：\n{result.output}"
+        assert "未检测到 Node.js" in result.output
+        state = result.state or {}
+        assert state.get("web_port") is None, f"没有 node 时 web_port 应为 null：{state}"
+        h.track(state.get("api_pid"))
+        assert _wait_http(f"http://127.0.0.1:{state['api_port']}/healthz", 20)
+        assert _http_status(f"http://127.0.0.1:{api_port}/") == 200, "控制面应同端口托管页面"
+    finally:
+        h.cleanup()
+
+
+def test_start_ignores_broken_http_proxy(tmp_path: Path) -> None:
+    """POSIX：宿主/CI 设了不通的 HTTP(S)_PROXY 时，回环探针仍应判为健康。"""
+    if IS_WIN:
+        pytest.skip("[env] 该回归针对 start.sh 的 Python 探针，Windows 走 start.ps1")
+
+    h = Harness(tmp_path, with_web=True)
+    dead_proxy = f"http://127.0.0.1:{_free_port()}"
+    for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        h.env[key] = dead_proxy
+    for key in ("no_proxy", "NO_PROXY"):
+        h.env.pop(key, None)
+    api_port = _free_port()
+    try:
+        result = _start(h, api_port=api_port)
+        assert result.code == 0, f"代理不该影响回环探针，实际退出码 {result.code}；输出：\n{result.output}"
+        state = result.state or {}
+        h.track(state.get("api_pid"), state.get("web_pid"))
+        assert _wait_http(f"http://127.0.0.1:{state['api_port']}/healthz", 20)
     finally:
         h.cleanup()
 

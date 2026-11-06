@@ -78,8 +78,11 @@ PY
 http_ok() {
     "$py" - "$1" <<'PY'
 import sys, urllib.request
+# 探针只打回环，必须绕开宿主/CI 里可能设着的 HTTP(S)_PROXY：
+# 代理不通时会把 200 变成 502，脚本就会误判成「控制面没起来」
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 try:
-    with urllib.request.urlopen(sys.argv[1], timeout=2) as resp:
+    with opener.open(sys.argv[1], timeout=2) as resp:
         sys.exit(0 if resp.status == 200 else 1)
 except Exception:
     sys.exit(1)
@@ -340,11 +343,12 @@ else
 fi
 
 STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S')" \
-STATE_FILE="$state_file" API_PORT="$api_port" WEB_PORT="$web_port" API_PID="$api_pid" WEB_PID="$web_pid" \
+STATE_FILE="$state_file" REPO_ROOT="$root" API_PORT="$api_port" WEB_PORT="$web_port" API_PID="$api_pid" WEB_PID="$web_pid" \
 "$py" - <<'PY'
 import json, os
 data = {
     "started_at": os.environ["STARTED_AT"],
+    "root": os.environ["REPO_ROOT"],
     "api_port": int(os.environ["API_PORT"]),
     "web_port": int(os.environ["WEB_PORT"]) if os.environ["WEB_PORT"] else None,
     "api_pid": int(os.environ["API_PID"]),

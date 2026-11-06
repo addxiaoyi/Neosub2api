@@ -181,10 +181,39 @@ URI 约 500 字节含 3 个敏感参数，客户端自身开销约 100µs/请求
 | `nginx -t`（三份配置分别跑） | 通过 | `deploy/nginx.conf` 用临时自签证书 + `--add-host control/web`；`apps/web/nginx.conf`、`deploy/web-nginx.conf` 同法（`--add-host control`） |
 | 访问日志脱敏（实流） | 通过 | `?api_key=***&foo=***&token=***&safe=keep`；18 个参数名别名与裸 `?u2a_xxx` 全部落 `***`，Referer 只留 origin+path |
 | 本机端口 | 8010 空闲；8080 被其他服务占用 | 本轮把 web 临时映射到 18080（override 文件放 `%TEMP%`，未落仓库） |
-| `scripts/start.sh`（Linux） | 通过 | `python:3.12-slim` 容器内实跑，`/healthz` 返回 200（首轮） |
+| `scripts/start.sh`（Linux） | 通过 | 2026-11-03 `python:3.12-slim` 容器内首轮实跑，`/healthz` 200；2026-11-06 在 WSL2 Ubuntu 24.04 复跑完整生命周期（起服务 → `/healthz` → `/api/login` → 首页 → `--stop`），详见下节 |
 | `scripts/start.sh`（Git Bash） | **不适用** | Windows 版 Python 不认 POSIX 路径；Windows 请用 `start.ps1` |
 | `scripts/start.ps1`（Windows） | 通过 | 使用仓库内 `.runtime\python\python.exe`，`/healthz` 返回 200（首轮） |
 | 真实 TLS 证书 / 真实上游 / 公网暴露 | **未验证** | `deploy/certs/` 目前是空目录，真实证书**尚未签发**（`nginx -t` 用的是临时自签证书，测试完即弃）；本机也没有域名与真实上游，需在目标环境执行上线清单 |
+
+### `scripts/start.sh` Linux 实跑证据（2026-11-06）
+
+环境：WSL2 `Ubuntu-24.04`（内核 `6.6.87.2-microsoft-standard-WSL2`），GNU bash 5.2.21，Python 3.12.3（`uv` 建 venv，依赖按 `apps/control/requirements.txt` 装），Node 20.19.4（临时解包，未改系统 PATH）。控制面代码用 symlink 指到工作区 `apps/control`，静态产物用真实的 `apps/web/out`，数据目录与 `.run/` 放在仓库外，端口 `18320/18321`。
+
+关键输出（一次连续会话内完成，避免 WSL 回收进程）：
+
+```
+==> 启动控制面      http://127.0.0.1:18321/healthz 已通过
+==> 启动前端静态服务  http://127.0.0.1:18320/ 已可访问
+START_EXIT=0
+GET  /healthz                 -> 200  {"ok":true,"providers":14}
+POST /api/login               -> 200  {"ok":true,"username":"addxiaoyi","role":"admin"}
+GET  /                        -> 200  8705 bytes
+start.json                    -> {"started_at":"...","root":"/root/startsh/repo","api_port":18321,
+                                  "web_port":18320,"api_pid":829,"web_pid":848}
+再次执行 start.sh             -> 已经在运行，未重复启动。SECOND_EXIT=0
+bash scripts/start.sh --stop  -> 已停止。释放端口：页面 18320，控制面 18321。STOP_EXIT=0
+停止后                        -> 两个端口均 connection refused，start.json 已删除，两个 pid 均已退出
+```
+
+脚本级用例：同一 WSL 环境 `pytest scripts/tests/test_start_scripts.py -v` → **6 passed**（比 Windows 侧多覆盖「PATH 里没有 node」的降级与「不通的 HTTP(S)\_PROXY」两条 POSIX 路径）。Windows 侧 `start.ps1` 分支 4 passed / 2 skipped。
+
+实跑暴露四处：三处已修，一处只记录（改它需要 git 操作，超出本轮允许范围）：
+
+1. **行尾**：库里 blob 是 LF（`git ls-files --eol scripts/start.sh` → `i/lf`），但本机 `core.autocrlf=true` 检出成 CRLF，WSL 直接从 `/mnt/d` 跑会在第 9 行报 `set: pipefail: invalid option name`，后续 `$'\r'` 把 `case` 解析打碎。已把工作区文件规范化回 LF；根治办法是给 `*.sh` 加 `.gitattributes` 强制 LF（本轮不在允许改动范围，未改）。
+2. **状态文件字段不一致**：`start.ps1` 写 `root`，`start.sh` 没写，同一个 `.run/start.json` 契约两套形状，POSIX 用例会因此挂。已补 `root`（`scripts/start.sh` 结尾写状态那段）。
+3. **回环探针吃代理**：宿主或 CI 设了不通的 `HTTP(S)_PROXY` 时，Python `urllib` 默认走代理，200 会变 502，脚本误判「控制面没起来」并以退出码 6 失败。已改成显式 `ProxyHandler({})` 只走直连；上表那次实跑就是**故意**把代理指到 `127.0.0.1:9`、并清空 `no_proxy` 下完成的。
+4. **可执行位（未修，记录在案）**：`git ls-files -s scripts/start.sh` 是 `100644`，Linux 检出后 `./scripts/start.sh` 会 Permission denied，因此所有文档与用例统一用 `bash scripts/start.sh` 调用。根治要 `git update-index --chmod=+x scripts/start.sh` 随下次提交带上；本轮按要求不做 git 操作，故未改。
 
 ### 两个根因已修（2026-11-03）
 

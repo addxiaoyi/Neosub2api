@@ -103,6 +103,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 
 浏览器打开 `http://127.0.0.1:8010` 即是管理界面（仪表盘 / 账号 / 配额 / 定价 / 密钥 / 模型 / 测试台 / 统计 / 日志 / 安全 / 设置）。
 
+Linux / macOS 可以用一键脚本代替上面三步：`bash scripts/start.sh`（停止用 `bash scripts/start.sh --stop`；默认页面 18100、控制面 18101，被占用时自动顺延）。这条脚本 2026-11-06 在 WSL2 Ubuntu 24.04 实跑过完整生命周期（起服务 → `/healthz` 200 → `/api/login` 200 → 首页 200 → `--stop` 释放端口），记录在 [../deploy/README.md](../deploy/README.md) 的实跑表。注意 `scripts/start.sh` 必须是 LF 行尾：`core.autocrlf=true` 的检出会把它变成 CRLF，bash 会在第 9 行 `set -o pipefail` 报 `invalid option name`；Windows 上请用 `scripts\start.ps1`，不用这个脚本。
+
 ## 5. 首次登录
 
 - 账号：`UNIFIED_ADMIN_USER`（默认 `admin`）；口令取 `UNIFIED_ADMIN_PASSWORD`，未设置且库里没有口令时首次启动随机生成并写入 `data/admin-password.txt`（历史固定值 `unified-admin` 会被识别并轮换，不再作为默认口令）。

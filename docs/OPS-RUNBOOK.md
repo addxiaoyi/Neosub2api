@@ -62,6 +62,8 @@
   怎么确认：脚本启动时打印的令牌提示（无令牌会提示「未配置令牌，可能被限流」）；跑完看输出里还有没有 `rate_limited`。巡检细节详见 `docs/UPSTREAM-CHECK-RUNBOOK.md`。
 - **测试环境**：本机有 `HTTP_PROXY` 时，测试里的 httpx 必须 `trust_env=False`，否则单条用例能从 0.5 秒变成几分钟（曾出现 387s vs 55.90s）；测试目录 36 个调用点现已全部加上。
   怎么确认：`env | grep HTTP_PROXY`（Windows：`echo $env:HTTP_PROXY`）是否非空；pytest 单条计时是否在秒级；`grep -r "trust_env" apps/control/tests` 覆盖新增调用点。
+- **一键启动脚本的用例按平台分流，别把 CI 绿当成 Windows 和 Linux 两个脚本都被本机验证过**：`scripts/tests/test_start_scripts.py` 的 4 条用例挂在 `.github/workflows/ci.yml` 的 `start-scripts` job（不并入 backend job，后者没有 Node 与 PowerShell）。`windows-latest` 只覆盖 `start.ps1` 分支，`ubuntu-latest` 只覆盖 `start.sh` 分支；macOS 未单独挂，POSIX 行为与 Linux 同源。
+  怎么确认：PR 或 push main 的 Checks 里 `start-scripts (windows-latest)` 与 `start-scripts (ubuntu-latest)` 均绿，日志为 `4 passed` 且无 SKIPPED。
 - **压测**：拐点是 SQLite 单写者，不是网络；并发上到 64 后 p95 明显抬头，属预期。
   怎么确认：压测各并发档位 p95 对比，详见 `docs/PERFORMANCE.md`。
 - **老库升级（本轮 schema 改动）**：对存量库幂等、无损，已验证 44/44 断言——补列幂等（老行 `key_prefix` 为 NULL、不回填假值）、两条新索引自动重建且部分索引 `WHERE` 谓词逐字保真、七张业务表行数与内容指纹零损失、第二次启动零错误且索引数不变。**限制**：`billing_ledger.log_id` 只加列不回填，存量成功日志升级后在 `/api/logs` 统一显示 `credit_status=unlinked`、金额为空；若要让历史金额可见需单独立项做回填。
