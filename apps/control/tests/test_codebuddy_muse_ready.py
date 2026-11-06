@@ -353,7 +353,7 @@ def test_muse_v1_stream_records_usage(
 
 @pytest.mark.parametrize(
     ("upstream", "expected"),
-    [(401, 401), (403, 401), (429, 429), (500, 502), (503, 503)],
+    [(401, 401), (403, 403), (429, 429), (500, 502), (503, 503)],
 )
 def test_muse_v1_upstream_errors_map_and_log(
     admin: httpx.Client,
@@ -378,10 +378,32 @@ def test_muse_v1_upstream_errors_map_and_log(
     assert isinstance(body.get("error"), dict) and body["error"].get("message"), body
     assert body["error"].get("upstream_status") == upstream
 
-    # 日志保留上游原始状态码，响应体才走归一化后的网关码
+    # 日志与响应必须同一个状态码：401/403 原样透传，5xx 按网关约定归一
     item = _wait_log(admin, model, "muse", before)
-    assert item["status"] == upstream
+    assert item["status"] == expected
     assert item["error"]
+
+
+def test_failure_budget_isolated_per_provider(
+    admin: httpx.Client, anon: httpx.Client, bearer_key: str, muse_on_fake: str
+):
+    """一把 key 在 codebuddy 上失败 20 次，不应连坐 muse 的成功请求。"""
+    headers = {"authorization": f"Bearer {bearer_key}", "x-provider": "codebuddy"}
+    for _ in range(20):
+        failed = anon.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": "fake-chat-1-err-400", "messages": USERS},
+        )
+        assert failed.status_code == 400, failed.text
+
+    ok = anon.post(
+        "/v1/chat/completions",
+        headers=_gateway(bearer_key),
+        json={"model": "muse-spark", "messages": USERS},
+    )
+    assert ok.status_code == 200, f"其他 provider 被连坐：{ok.status_code} {ok.text}"
+    assert "[fake] muse" in ok.json()["choices"][0]["message"]["content"]
 
 
 def test_muse_v1_timeout_maps_to_502(

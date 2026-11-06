@@ -252,12 +252,14 @@ async def test_accounts_404_says_where_to_look(tmp_path: Path) -> None:
     assert "管理面板" in page.note
 
 
-async def test_accounts_unreachable_raises_with_port(tmp_path: Path) -> None:
+async def test_accounts_unreachable_hides_internal_port(tmp_path: Path) -> None:
     adapter = trae_sidecar.build(_settings(tmp_path), base_url=_refused_base())
     with pytest.raises(ProviderError) as caught:
         await adapter.sync_accounts()
     assert caught.value.status_code == 502
-    assert "侧车未运行（端口" in caught.value.message
+    assert "侧车未运行" in caught.value.message
+    assert "端口" not in caught.value.message
+    assert "127.0.0.1" not in caught.value.message
 
 
 async def test_accounts_unknown_shape_is_not_empty_success(tmp_path: Path) -> None:
@@ -311,7 +313,8 @@ async def test_refused_chat_becomes_human_502(tmp_path: Path) -> None:
     with pytest.raises(ProviderError) as caught:
         await adapter.chat_completion({"model": "m", "messages": []}, stream=False)
     assert caught.value.status_code == 502
-    assert "侧车未运行（端口" in caught.value.message
+    assert "侧车未运行" in caught.value.message
+    assert "端口" not in caught.value.message and "127.0.0.1" not in caught.value.message
 
 
 async def test_deepseek_messages_path_rewrite_and_stream_501(tmp_path: Path) -> None:
@@ -501,6 +504,7 @@ async def test_v1_gateway_reaches_fake_sidecar_end_to_end(tmp_path: Path) -> Non
                 )
                 assert down.status_code in (502, 504), down.text
                 assert "侧车" in down.json()["error"]["message"]
-                assert "端口" in down.json()["error"]["message"]
+                assert "端口" not in down.json()["error"]["message"], "对外文案不暴露侧车端口"
+                assert "127.0.0.1" not in down.text
             finally:
                 client.close()

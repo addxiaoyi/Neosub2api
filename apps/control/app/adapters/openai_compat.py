@@ -22,13 +22,19 @@ class OpenAICompatAdapter(ProviderAdapter):
         headers = self.options.get("extra_headers")
         return headers if isinstance(headers, dict) else None
 
-    def _client(self, timeout: float | None = None) -> UnifiedApiClient:
+    def _client(self, timeout: float | None = None, *, headers: dict[str, str] | None = None) -> UnifiedApiClient:
+        merged = dict(self._extra_headers() or {})
+        user_agent = self.client_user_agent()
+        if user_agent:
+            merged.setdefault("user-agent", user_agent)
+        if headers:
+            merged.update(headers)
         return UnifiedApiClient(
             self.base_url,
             api_key=self.api_key,
             timeout=timeout or float(self.options.get("timeout") or 120.0),
             proxy=str(self.options.get("proxy") or ""),
-            extra_headers=self._extra_headers(),
+            extra_headers=merged or None,
         )
 
     def _transform_chat(self, payload: dict[str, Any]) -> dict[str, Any]:

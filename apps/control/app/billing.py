@@ -437,28 +437,40 @@ def matching_policies(
 
 
 def check_failure_rate(
-    conn: sqlite3.Connection, *, key_id: int | None, window_sec: int, max_failures: int, at: int
+    conn: sqlite3.Connection, *, key_id: int | None, provider: str = "", window_sec: int, max_failures: int, at: int
 ) -> dict[str, Any] | None:
     """失败请求滑动窗口限流：窗内失败条数达到上限就返回拒绝详情，否则 None。
 
     计数直接聚合 request_logs（status>=400 或 error 非空），不另起累加器，
     这样日志与限流只有一份真相。窗口是滑动的：最早一条失败记录过期即释放名额，
     因此 reset_after 取「最早一条失败 + 窗长 - 当前时刻」，而不是整段窗口重开。
+    429 是本层自己的拒绝（quota / 失败限流），不计入失败窗口：否则客户端被拒后
+    持续重试会不断续上窗口，永远退不出来。
+
+    计数按 (key, provider) 隔离：一家上游故障不能把同一把 key 下的其他 provider 连坐。
+    provider 传空串时保持旧口径（只按 key 聚合），供显式运维查询使用。
     """
     if key_id is None or max_failures <= 0 or window_sec <= 0:
         return None
     since = int(at) - int(window_sec)
+    where = (
+        "key_id = ? AND ts >= ? AND status <> 429 "
+        "AND (status >= 400 OR COALESCE(error, '') <> '')"
+    )
+    params: list[Any] = [int(key_id), since]
+    if provider:
+        where += " AND provider = ?"
+        params.append(provider)
     row = conn.execute(
-        "SELECT COUNT(*) AS n, MIN(ts) AS first_ts FROM request_logs "
-        "WHERE key_id = ? AND ts >= ? AND (status >= 400 OR COALESCE(error, '') <> '')",
-        (int(key_id), since),
+        f"SELECT COUNT(*) AS n, MIN(ts) AS first_ts FROM request_logs WHERE {where}",
+        params,
     ).fetchone()
     used = int(row["n"] or 0)
     if used < max_failures:
         return None
     first_ts = int(row["first_ts"] or at)
     reset_after = max(1, first_ts + int(window_sec) - int(at))
-    return {
+    detail = {
         "type": "failure_rate_limited",
         "layer": "key",
         "metric": "failures",
@@ -474,6 +486,9 @@ def check_failure_rate(
             f"请在 {reset_after} 秒后重试"
         ),
     }
+    if provider:
+        detail["provider"] = provider  # 计数按 (key, provider) 隔离，拒因要能指认是哪家
+    return detail
 
 
 def window_usage(conn: sqlite3.Connection, policy: sqlite3.Row, at: int) -> dict[str, Any]:
@@ -662,12 +677,30 @@ def import_price_books(conn: sqlite3.Connection, path: Path, *, dry_run: bool = 
     except ImportError as exc:  # 运行时缺依赖时给出可执行的修复指令
         raise RuntimeError("导入价格表需要 PyYAML：pip install PyYAML") from exc
 
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    try:
+        raw_text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"读取 prices.yaml 失败：{exc}") from exc
+    # 空文件喂给 safe_load 只会得到 None，必须单独拦下：否则界面拿到 0 条却以为导入成功
+    if not raw_text.strip():
+        raise ValueError("prices.yaml 内容为空，没有可导入的价格条目")
+    try:
+        data = yaml.safe_load(raw_text) or {}
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f"第 {mark.line + 1} 行第 {mark.column + 1} 列：" if mark else ""
+        raise ValueError(f"prices.yaml 解析失败（{where}{getattr(exc, 'problem', None) or exc}）") from exc
     if not isinstance(data, dict):
         raise ValueError("prices.yaml 顶层必须是映射")
-    rows = data.get("prices") or []
+    rows = data.get("prices")
+    if rows is None:
+        raise ValueError("prices.yaml 缺少 prices 段")
     if not isinstance(rows, list):
         raise ValueError("prices 必须是列表")
+    if not rows:
+        raise ValueError("prices.yaml 的 prices 段为空，没有可导入的价格条目")
+    if not isinstance(data.get("unpriced") or [], list):
+        raise ValueError("prices.yaml 的 unpriced 段必须是列表")
 
     inserted = 0
     skipped = 0

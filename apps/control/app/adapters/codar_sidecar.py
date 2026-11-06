@@ -37,6 +37,7 @@ class CodarSidecarAdapter(SidecarLink):
             count_tokens=True,
         ),
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
+        user_agent="codar-desktop/0.3.3",
         risk_level="safe",
         risk_note="MIT sidecar：主仓只经 HTTP 代理，不复制不内置上游源码。Codar 平台限本人名下账号，转售/共享风险由部署方承担。",
         readiness="needs_config",

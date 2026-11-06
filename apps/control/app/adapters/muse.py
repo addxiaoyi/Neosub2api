@@ -24,6 +24,7 @@ from .stream_util import Reply
 
 CHAT_PATH = "/v1/chat/completions"
 RESPONSES_PATH = "/v1/responses"
+CLIENT_UA = "muse2api/1.6.6"
 MODELS_PATH = "/v1/models"
 IMAGES_GENERATIONS_PATH = "/v1/images/generations"
 IMAGES_EDITS_PATH = "/v1/images/edits"
@@ -67,6 +68,7 @@ class MuseAdapter(ProviderAdapter):
             media=True,
         ),
         protocols=("openai.chat.completions", "openai.responses"),
+        user_agent=CLIENT_UA,
         readiness="needs_config",
         requires=(
             "官方 OpenAI 兼容入口的 api_key：在 api.meta.ai 创建 API key 后导入；"
@@ -133,6 +135,7 @@ class MuseAdapter(ProviderAdapter):
             "authorization": f"Bearer {token}",
             "content-type": "application/json",
             "accept": "text/event-stream" if stream else "application/json",
+            "user-agent": self.client_user_agent() or CLIENT_UA,
         }
         cookie = str(self.options.get("cookie") or "").strip()
         if cookie:

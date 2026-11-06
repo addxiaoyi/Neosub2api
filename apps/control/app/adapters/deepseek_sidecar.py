@@ -39,6 +39,7 @@ class DeepseekSidecarAdapter(SidecarLink):
             "sidecar": True,
         },
         protocols=("openai.chat.completions", "anthropic.messages"),
+        user_agent="DeepSeek/1.3.0",
         risk_level="danger",
         risk_note="上游无 LICENSE，版权全保留。本 provider 仅供个人评估，商用前必须移除 sidecar 及其适配器。",
         readiness="needs_config",

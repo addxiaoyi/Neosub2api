@@ -76,11 +76,37 @@ def _real_method(adapter: Any, name: str) -> bool:
     return callable(impl) and impl is not base
 
 
+def test_every_forwarding_provider_declares_client_user_agent() -> None:
+    """裸 HTTP 外呼的每家都必须有明确 UA 常量，禁止退回 httpx 默认 UA。"""
+    forwarding = [pid for pid in ADAPTERS if pid != "grok-register"]
+    assert len(forwarding) == 13
+    for pid in forwarding:
+        user_agent = ADAPTERS[pid].spec.user_agent
+        assert user_agent, f"{pid} 缺 user_agent"
+        assert "python-httpx" not in user_agent.lower(), f"{pid} 退回默认 UA：{user_agent}"
+    assert ADAPTERS["gptgrok"].spec.user_agent.startswith("Mozilla/5.0"), "gptgrok 必须保留 Chrome UA"
+
+
+def test_trae_retry_after_is_bounded() -> None:
+    """上游给巨大 Retry-After 时必须放弃重试，不能把工作线程占死。"""
+
+    class _Reply:
+        def __init__(self, value: str) -> None:
+            self.headers = {"retry-after": value}
+
+    adapter = _fresh("trae")
+    assert adapter._retry_wait(_Reply("7")) is None, "7s 已超过默认 5s 阈值，应直接按 429 返回"
+    assert adapter._retry_wait(_Reply("3")) == 3.0
+    adapter.configure(options={"retry_after_max_sec": "10"})
+    assert adapter._retry_wait(_Reply("7")) == 7.0, "阈值可配置后再允许 7s"
+
+
 # 能力位 → (匹配模式, 方法名组)：any=任一覆写即真，all=必须全部覆写
 CAP_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "chat": ("any", ("chat_completion",)),
     "messages": ("any", ("messages",)),
     "responses": ("any", ("responses",)),
+    "search": ("any", ("search",)),
     "models": ("any", ("fetch_models", "declared_models")),
     "oauth": ("all", ("start_login", "poll_login")),
     "checkin": ("all", ("checkin_all", "account_action")),
@@ -100,9 +126,9 @@ EXTENSION_CAPS = frozenset({"embeddings", "images", "videos", "media", "rerank",
 
 # 扩展位全是透传端点：覆写方法体必须真有上游外呼，空壳覆写不算实现。
 # sidecar 型 adapter 的扩展位（如 codar_sidecar 的 count_tokens）属于「经 sidecar 转发、
-# 本进程不实现业务逻辑」的合法形态，判据是方法体里有 forward/_forward/_send 调用，
+# 本进程不实现业务逻辑」的合法形态，判据是方法体里有 forward/_forward/_forward_with_tokens/_send 调用，
 # 而不是要求本地重写一遍算法。
-UPSTREAM_CALL_MARKERS = (".forward(", "_forward(", "_send(")
+UPSTREAM_CALL_MARKERS = (".forward(", "_forward(", "_forward_with_tokens(", "_send(")
 
 # 读端点：images/videos 位同时放行 POST 创建与 GET 查询（routers/v1.py 的 _proxy_get）
 READ_ENDPOINTS: dict[str, str] = {"images": "image_task", "videos": "video_task"}
@@ -128,6 +154,8 @@ EXTENSION_STATIC_PATHS: dict[tuple[str, str], tuple[str, str]] = {
     ("sub2api", "rerank"): ("exact", "/v1/rerank"),
     ("sub2api", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
     ("sub2api", "usage"): ("prefix", "/v1/usage"),
+    ("codebuddy", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
+    ("codar", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
     ("codar_sidecar", "count_tokens"): ("exact", "/v1/messages/count_tokens"),
 }
 
@@ -589,16 +617,18 @@ async def test_codebuddy_account_ops_hit_real_http_paths(monkeypatch: pytest.Mon
 
 FORWARD_CASES = [
     pytest.param("codebuddy", "chat_completion", _chat_payload(), False, "/v1/chat/completions", False, id="codebuddy-chat"),
-    pytest.param("codebuddy", "messages", _messages_payload(), False, "/v1/messages", False, id="codebuddy-messages"),
+    pytest.param("codebuddy", "messages", _messages_payload(), False, "/v1/messages", True, id="codebuddy-messages"),
+    pytest.param("codebuddy", "responses", _responses_payload(), False, "/v1/responses", False, id="codebuddy-responses"),
+    pytest.param("codebuddy", "count_tokens", _messages_payload(), False, "/v1/messages/count_tokens", True, id="codebuddy-count-tokens"),
     pytest.param("codar", "chat_completion", _chat_payload(), False, "/v1/chat/completions", False, id="codar-chat"),
     pytest.param("codar", "messages", _messages_payload(), False, "/v1/messages", True, id="codar-messages"),
     pytest.param("codar", "responses", _responses_payload(), False, "/v1/responses", False, id="codar-responses"),
     pytest.param("opencode", "chat_completion", _chat_payload(), False, "/v1/chat/completions", False, id="opencode-chat"),
     pytest.param("opencode", "messages", _messages_payload(), False, "/v1/messages", True, id="opencode-messages"),
-    pytest.param("deepseek_sidecar", "messages", _messages_payload(), False, "/anthropic/v1/messages", False, id="deepseek-messages-nonstream"),
-    pytest.param("codar_sidecar", "messages", _messages_payload(), False, "/v1/messages", False, id="codar-sidecar-messages"),
+    pytest.param("deepseek_sidecar", "messages", _messages_payload(), False, "/anthropic/v1/messages", True, id="deepseek-messages-nonstream"),
+    pytest.param("codar_sidecar", "messages", _messages_payload(), False, "/v1/messages", True, id="codar-sidecar-messages"),
     pytest.param("trae_sidecar", "chat_completion", _chat_payload(), False, "/v1/chat/completions", False, id="trae-sidecar-chat"),
-    pytest.param("qoder_sidecar", "messages", _messages_payload(stream=True), True, "/v1/messages", False, id="qoder-sidecar-messages-stream"),
+    pytest.param("qoder_sidecar", "messages", _messages_payload(stream=True), True, "/v1/messages", True, id="qoder-sidecar-messages-stream"),
     pytest.param("qoder_sidecar", "responses", _responses_payload(), False, "/v1/responses", False, id="qoder-sidecar-responses"),
     pytest.param("codar_sidecar", "responses", _responses_payload(), False, "/v1/responses", False, id="codar-sidecar-responses"),
     pytest.param("muse", "responses", _responses_payload(), False, "/v1/responses", False, id="muse-responses"),
@@ -616,8 +646,7 @@ async def test_protocol_forwards_hit_correct_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _fresh(pid)
-    if pid in ("codar", "opencode", "muse"):
-        adapter.configure(api_key="test-key-123")
+    adapter.configure(api_key="test-key-123")
     recorded: list[httpx.Request] = []
     reply_body = (
         _sse_recorder(recorded, b"data: [DONE]\n\n")
@@ -630,8 +659,13 @@ async def test_protocol_forwards_hit_correct_paths(
             await reply.aclose()
     request = recorded[-1]
     assert request.url.path.endswith(expect_suffix), request.url.path
+    # 每家外呼都要带贴近真实客户端的 UA，不能暴露 python-httpx
+    user_agent = request.headers.get("user-agent", "")
+    assert user_agent == adapter.spec.user_agent, f"{pid} UA={user_agent!r}"
+    assert "python-httpx" not in user_agent.lower()
     if anthropic_header:
         assert request.headers.get("anthropic-version") == ANTHROPIC_VERSION
+        assert request.headers.get("x-api-key"), f"{pid} 走 anthropic messages 但缺 x-api-key"
     if pid == "opencode" and anthropic_header:
         assert request.headers.get("x-api-key") == "test-key-123"
     if pid == "muse":
@@ -655,6 +689,18 @@ def test_sub2api_forward_path_table_is_protocol_correct() -> None:
 
 
 # ---------- 9. qoder messages：Anthropic 形状与完整 SSE 事件序列 ----------
+
+
+def test_qoder_upstream_auth_status_is_not_rewritten() -> None:
+    """上游 401/403 原样透传；只有业务码判死且 HTTP 2xx 时才兜底 401。"""
+    adapter = _fresh("qoder")
+    err = adapter._classify(401, '{"code":12153,"message":"session expired"}')
+    assert err.status_code == 401, f"401 被改写成 {err.status_code}"
+    assert getattr(err, "session_dead", False)
+    forbidden = adapter._classify(403, '{"code":403,"message":"forbidden"}')
+    assert forbidden.status_code == 403, f"403 被改写成 {forbidden.status_code}"
+    biz_only = adapter._classify(200, '{"code":12153,"message":"session expired"}')
+    assert biz_only.status_code == 401
 
 
 async def test_qoder_messages_renders_full_anthropic_sse(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -936,9 +982,13 @@ async def test_undeclared_responses_adapters_still_raise_501() -> None:
     assert not problems, problems
 
 
-def test_responses_capability_gate_501_openai_shell(anon, bearer_key) -> None:
-    # codebuddy 未声明 responses：能力位门槛先于上游调用，壳必须是 OpenAI 形状
-    r = _responses_req(anon, bearer_key, "fake-chat-1", "codebuddy")
+def test_undeclared_capability_gate_501_openai_shell(anon, bearer_key) -> None:
+    # codebuddy 未声明 embeddings：能力位门槛先于上游调用，壳必须是 OpenAI 形状
+    r = anon.post(
+        "/v1/embeddings",
+        headers={"authorization": f"Bearer {bearer_key}", "x-provider": "codebuddy"},
+        json={"model": "fake-chat-1", "input": "hello"},
+    )
     assert r.status_code == 501, f"{r.status_code} {r.text}"
     body = r.json()
     assert "type" not in body, "OpenAI 协议错误壳不得带顶层 type"

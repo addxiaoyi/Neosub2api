@@ -452,6 +452,7 @@ class QoderAdapter(ProviderAdapter):
         default_base_url=REGIONS["cn"]["gateway"],
         capabilities=stub_capabilities(chat=True, messages=True, models=True, responses=True),
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
+        user_agent="Qoder/1.1.64",
         risk_level="safe",
         risk_note="本直连路径为 clean-room 重写（本仓自研 MIT），不复制上游源码，不受上游许可约束；"
         "PolyForm Noncommercial 1.0.0 的非商用限制针对的是 qoder_sidecar，而非本直连路径。",
@@ -618,7 +619,9 @@ class QoderAdapter(ProviderAdapter):
                     break
         joined = f"{code or ''} {text}"
         if status == 401 or code in SESSION_DEAD_CODES or any(word in joined for word in SESSION_DEAD_WORDS):
-            err = ProviderError(429, f"Qoder 会话已失效或鉴权被拒（需重新登录刷新 token）：{text[:160]}")
+            # 上游给 401/403 就按原状态透传；只有业务码判死但 HTTP 是 2xx 时才兜底 401
+            public = status if status in (401, 403) else 401
+            err = ProviderError(public, f"Qoder 会话已失效或鉴权被拒（需重新登录刷新 token）：{text[:160]}")
             err.session_dead = True
         elif status == 429:
             retry_after = self._retry_after(text)

@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from ..adapters.base import ProviderError
+from ..adapters.base import ProviderAdapter, ProviderError
 from ..adapters.stream_util import DONE, sse_error
 from ..api_utils import mask_text, now, parse_bool
 from ..billing import (
@@ -25,8 +25,9 @@ from ..billing import (
     usage_from_stream,
     usage_in_chunk,
 )
+from ..config import GATEWAY_MAX_BODY_BYTES_DEFAULT
 from ..db import get_json_setting
-from ..gateway_errors import GatewayError, from_provider_error, from_upstream_reply
+from ..gateway_errors import GatewayError, from_provider_error, from_upstream_reply, public_status
 from ..model_resolve import (
     MODE_CATALOG,
     failover_enabled,
@@ -44,9 +45,10 @@ LAST_USED_THROTTLE_SEC = 60
 # 流式响应单请求最大时长，防止上游持续出块长期占用连接（S-06）
 DEFAULT_SSE_MAX_SECONDS = 600
 # 本批新增的能力端点：请求一律非流式（客户端误传 stream 不改传输方式，也不透传上游）；
-# 响应也没有可计费的 token 用量（images/videos 按张按秒、count_tokens/rerank 只有非标准 usage），
+# 响应也没有可计费的 token 用量（images/videos 按张按秒、count_tokens/rerank 只有非标准 usage；
+# search 虽走会话通道，但响应体只回 answer/sources，同样不带 usage），
 # 全零 usage 一律按 usage_missing 落账，不许静默记成 billed(0)
-EXTENSION_CAPABILITIES = frozenset({"embeddings", "images", "videos", "media", "count_tokens", "rerank"})
+EXTENSION_CAPABILITIES = frozenset({"embeddings", "images", "videos", "media", "count_tokens", "rerank", "search"})
 # 这三类端点的响应正文能按文本口径估算；其他端点没有可提取的正文，一律维持原状
 ESTIMATABLE_CAPABILITIES = frozenset({"chat", "responses", "messages"})
 
@@ -185,7 +187,12 @@ def _failure_guard(request: Request, conn, key: dict[str, Any], provider: str, m
     denial: dict[str, Any] | None = None
     try:
         denial = check_failure_rate(
-            conn, key_id=int(key_id), window_sec=window_sec, max_failures=max_failures, at=now()
+            conn,
+            key_id=int(key_id),
+            provider=provider,
+            window_sec=window_sec,
+            max_failures=max_failures,
+            at=now(),
         )
         if denial is not None:
             _log_rejection(conn, key=key, provider=provider, model=model, denial=denial)
@@ -301,6 +308,39 @@ def _try_estimate(kind: str, payload: Any, source: Any) -> dict[str, Any] | None
         return None
 
 
+def _body_limit(request: Request) -> int:
+    return int(
+        getattr(request.app.state.settings, "gateway_max_body_bytes", GATEWAY_MAX_BODY_BYTES_DEFAULT)
+    )
+
+
+def _body_too_large(limit: int) -> GatewayError:
+    return GatewayError(
+        413,
+        f"请求体超过网关上限 {limit} 字节（UNIFIED_GATEWAY_MAX_BODY_BYTES），已拒绝且未向上游转发",
+        type_="invalid_request_error",
+        code="request_too_large",
+    )
+
+
+async def _read_body_limited(request: Request, limit: int) -> bytes:
+    """按字节上限读请求体：Content-Length 先拦，再按流累计，超限立刻中止。
+
+    只在这里读一次请求体；超限时直接抛 413，不把剩余字节读进内存。
+    """
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > limit:
+        raise _body_too_large(limit)
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise _body_too_large(limit)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _json_payload(request: Request) -> dict[str, Any]:
     media_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     if media_type.startswith("multipart/"):
@@ -309,8 +349,9 @@ async def _json_payload(request: Request) -> dict[str, Any]:
             415, "本网关只透传 application/json 请求体，multipart 变体暂不支持，请改用 JSON",
             type_="invalid_request_error", code="unsupported_media_type",
         )
+    raw = await _read_body_limited(request, _body_limit(request))
     try:
-        payload = await request.json()
+        payload = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise GatewayError(
             400, f"请求体不是合法 JSON：{exc}", type_="invalid_request_error", code="invalid_json"
@@ -416,7 +457,7 @@ def _log_transfer(request_id: str, from_pid: str, to_pid: str, status: int, deta
     )
 
 
-async def _proxy(request: Request, capability: str, method: str | None = None):
+async def _proxy(request: Request, capability: str, method: str | None = None, *, default_model: str = ""):
     # 准入段（鉴权/解析/配额/失败限流/取价）共用一条连接：这些小表读各开各关时，
     # 建连+首查+关连接约 1.4ms/次、SQL 本身不到 0.05ms（见 PERFORMANCE.md 3.3）。
     # 连接随请求创建、随请求关闭，不跨请求复用；整段在事件循环线程内同步使用。
@@ -425,6 +466,9 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
     try:
         key = _gateway_key(request, conn)
         payload = await _json_payload(request)
+        # 上游 /v1/search 允许省略 model 并用它的默认值；其余端点仍在 _resolve 里按缺 model 拒绝
+        if default_model and not str(payload.get("model") or "").strip():
+            payload["model"] = default_model
         targets = await _resolve(request, payload, capability, conn, request_id)
         primary_adapter, primary_effective, _ = targets[0]
         payload["model"] = primary_effective
@@ -468,7 +512,7 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
         except ProviderError as exc:
             await _record_safe(
                 request, key=key, provider=adapter.spec.id, model=effective,
-                status=exc.status_code, usage=None,
+                status=public_status(exc.status_code), usage=None,
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 stream=stream,
                 error=_attempt_text(index, len(attempt_targets), exc.message, on),
@@ -496,7 +540,7 @@ async def _proxy(request: Request, capability: str, method: str | None = None):
             detail = mask_text(raw[:200].decode("utf-8", "ignore"))
         await _record_safe(
             request, key=key, provider=adapter.spec.id, model=effective,
-            status=reply.status_code, usage=None,
+            status=public_status(reply.status_code), usage=None,
             latency_ms=int((time.perf_counter() - started) * 1000),
             stream=stream, error=_attempt_text(index, len(attempt_targets), detail, on),
             pricing=pricing,
@@ -744,7 +788,8 @@ async def _client_compat(
         )
     except ProviderError as exc:
         await _record_safe(
-            request, key=key, provider=adapter.spec.id, model=model, status=exc.status_code,
+            request, key=key, provider=adapter.spec.id, model=model,
+            status=public_status(exc.status_code),
             usage=None, latency_ms=int((time.perf_counter() - started) * 1000),
             stream=stream, error=exc.message, pricing=None,
         )
@@ -879,6 +924,66 @@ async def openai_models(request: Request):
             if model_id:
                 data.append({"id": model_id, "object": "model", "owned_by": adapter.spec.id})
     return {"object": "list", "data": data}
+
+
+def _model_object(item: dict[str, Any], adapter: ProviderAdapter) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id") or ""),
+        "object": "model",
+        "owned_by": str(item.get("owned_by") or adapter.spec.id),
+    }
+
+
+@router.get("/v1/models/{model_id}")
+async def openai_model(request: Request, model_id: str):
+    model_id = model_id.strip()
+    conn = request.app.state.db.connect()
+    try:
+        _gateway_key(request, conn)
+    finally:
+        conn.close()
+    providers = [
+        adapter
+        for adapter in request.app.state.registry.enabled()
+        if adapter.spec.capabilities.get("models")
+    ]
+    pid = (request.headers.get("x-provider") or "").strip()
+    if pid:
+        providers = [adapter for adapter in providers if adapter.spec.id == pid]
+        if not providers:
+            raise GatewayError(
+                404,
+                f"provider 未启用或不支持模型目录：{mask_text(pid)}",
+                type_="invalid_request_error",
+                code="provider_not_found",
+            )
+    for adapter in providers:
+        hit = next((m for m in adapter.declared_models() if str(m.get("id") or "") == model_id), None)
+        if hit is not None:
+            return _model_object(hit, adapter)
+    # 未显式指定 provider 且有多家模型源时只查静态表：一次明细请求不该把全部上游都打一遍
+    if pid or len(providers) == 1:
+        for adapter in providers:
+            if type(adapter).fetch_models is ProviderAdapter.fetch_models:
+                continue
+            try:
+                items = await adapter.fetch_models()
+            except ProviderError:
+                continue
+            hit = next((m for m in items if str(m.get("id") or "") == model_id), None)
+            if hit is not None:
+                return _model_object(hit, adapter)
+    raise GatewayError(
+        404,
+        f"模型不存在：{mask_text(model_id)}",
+        type_="invalid_request_error",
+        code="model_not_found",
+    )
+
+
+@router.post("/v1/search")
+async def openai_search(request: Request):
+    return await _proxy(request, "search", "search", default_model="gpt-4o-search-preview")
 
 
 @router.post("/v1/embeddings")

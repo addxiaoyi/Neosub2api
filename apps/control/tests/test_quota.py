@@ -477,6 +477,12 @@ class FailureRateTests(_DbCase, unittest.TestCase):
             self.add_log(910, 500, "boom")
         self.assertIsNone(self.check(at=1000), "窗外失败不占名额")
 
+    def test_gateway_429_rejections_do_not_count(self):
+        # 失败限流 / 配额拒绝本身落 status=429；若计入窗口，客户端持续重试就会自锁
+        for index in range(3):
+            self.add_log(990 + index, 429, '{"type": "failure_rate_limited"}')
+        self.assertIsNone(self.check(at=1000), "429 拒绝不得占失败名额")
+
     def test_disabled_when_limit_or_key_absent(self):
         for _ in range(5):
             self.add_log(990, 500, "boom")

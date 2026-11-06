@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from .adapters.base import ProviderError
-from .api_utils import mask_access_args
+from .api_utils import mask_access_args, mask_text, redact_endpoints
 from .config import ADMIN_PASSWORD_FILE, LEGACY_ADMIN_PASSWORD, load_settings
 from .db import Database
 from .gateway_errors import PROTOCOL_ANTHROPIC, GatewayError, framework_payload, protocol_for_path
@@ -279,7 +279,9 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(ProviderError)
     async def provider_error_handler(request: Request, exc: ProviderError):
-        return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
+        # 非 /v1 的管理接口同样要脱敏：提取端点原文只进服务端日志
+        logger.warning("provider 错误 status=%s message=%s", exc.status_code, mask_text(exc.message))
+        return JSONResponse({"detail": redact_endpoints(mask_text(exc.message))}, status_code=exc.status_code)
 
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(request: Request, exc: GatewayError):

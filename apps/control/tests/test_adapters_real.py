@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -100,6 +101,19 @@ async def test_codebuddy_chat_success(fake_base: str, tmp_path: Path) -> None:
     raw = await _collect_with_timeout(streamed)
     assert "model=fake-chat-1" in _text(raw)
     assert raw.endswith(b"data: [DONE]\n\n")
+
+
+async def test_codebuddy_timeout_respects_options(fake_base: str, tmp_path: Path) -> None:
+    """options.timeout 必须生效：假上游拖 1.5s，0.3s 超时要快速失败而不是硬等 120s。"""
+    adapter = _codebuddy(fake_base, tmp_path)
+    adapter.configure(api_key="wbt-fake", options={"timeout": "0.3"})
+    started = time.monotonic()
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion(_chat_payload("fake-chat-1-slow", stream=False), stream=False)
+    elapsed = time.monotonic() - started
+    assert caught.value.status_code == 504, caught.value.message
+    assert elapsed < 1.4, f"超时未生效，实际耗时 {elapsed:.2f}s"
+    assert "127.0.0.1" not in caught.value.message and "7899" not in caught.value.message
 
 
 @pytest.mark.parametrize("code", [401, 500])

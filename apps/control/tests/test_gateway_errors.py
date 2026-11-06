@@ -96,12 +96,13 @@ def test_upstream_401_is_openai_shaped(anon: httpx.Client, bearer_key: str) -> N
     assert body["detail"], "旧的 detail 字段要保留，前端还在读它"
 
 
-def test_upstream_403_merges_into_401(anon: httpx.Client, bearer_key: str) -> None:
+def test_upstream_403_passes_through_as_403(anon: httpx.Client, bearer_key: str) -> None:
     r = _chat(anon, bearer_key, "err-403")
-    assert r.status_code == 401, f"{r.status_code} {r.text}"
+    assert r.status_code == 403, f"{r.status_code} {r.text}"
     error = r.json()["error"]
-    assert error["type"] == "authentication_error"
-    assert error["upstream_status"] == 403, "上游 403 与 401 合并，但原始状态码要能区分"
+    assert error["type"] == "permission_error"
+    assert error["code"] == "upstream_forbidden"
+    assert error["upstream_status"] == 403, "上游 403 不再被压成 401，原始状态码要能区分"
     assert error["upstream_code"] == "403"
 
 

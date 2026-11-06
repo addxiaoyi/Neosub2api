@@ -350,7 +350,8 @@ def test_first_target_500_falls_over_and_bills_once(failover_env: types.SimpleNa
     assert "from-trae_sidecar" in r.json()["choices"][0]["message"]["content"]
 
     items = _logs(env, MODEL_500, 2)
-    failed = [row for row in items if row["status"] == 500]
+    # 上游 500 对外映射为 502，日志跟随对外状态，保证日志与响应同一口径
+    failed = [row for row in items if row["status"] == 502]
     ok = [row for row in items if row["status"] == 200]
     assert len(failed) == 1 and failed[0]["provider"] == "codebuddy"
     assert failed[0]["credit_status"] == "not_billed"
@@ -417,7 +418,7 @@ def test_stream_failure_before_first_byte_falls_over(failover_env: types.SimpleN
     assert "data: [DONE]" in body
 
     items = _logs(env, MODEL_STREAM, 2)
-    assert {row["status"] for row in items} == {500, 200}
+    assert {row["status"] for row in items} == {502, 200}
     ok = next(row for row in items if row["status"] == 200)
     assert ok["stream"] is True and ok["credit_status"] == "billed"
     ledger = _wait_ledger(env.db_path, before, 1)

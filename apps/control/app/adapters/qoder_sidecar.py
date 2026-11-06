@@ -37,6 +37,7 @@ class QoderSidecarAdapter(SidecarLink):
             "sidecar": True,
         },
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
+        user_agent="Qoder/1.1.64",
         risk_level="danger",
         risk_note="PolyForm Noncommercial 1.0.0 禁止任何商用（包括内部商业项目与托管服务）。作者书面授权前不得商用。",
         readiness="needs_config",

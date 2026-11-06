@@ -85,6 +85,39 @@ def safe_url(url: str) -> str:
     return mask_text(cleaned)
 
 
+# 对外错误文案里的内部端点形态：URL、回环/内网主机、端口提及、内部 API 路径
+_INTERNAL_URL = re.compile(r"(?i)\b(?:https?|wss?|ftp)://[^\s\"'<>，。；、）)]+")
+_INTERNAL_HOST = re.compile(
+    r"(?i)(?<![A-Za-z0-9._-])("
+    r"localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\]|::1|"
+    r"10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|"
+    r"172\.(?:1[6-9]|2[0-9]|3[01])(?:\.\d{1,3}){2}"
+    r")(?::\d{1,5})?"
+)
+_PORT_WORD = re.compile(r"(?i)(?:端口|port)\s*[:：]?\s*\d{1,5}")
+_BARE_PORT = re.compile(r"(?<![\d:]):\d{4,5}(?![\d:])")
+_INTERNAL_PATH = re.compile(
+    r"(?<![A-Za-z0-9])/(?:v1|v2|api|internal|anthropic|backend-api|rest)"
+    r"(?:/[A-Za-z0-9._~%\-]*)+"
+)
+_HIDDEN_ENDPOINT = "[内部地址已隐藏]"
+_HIDDEN_PATH = "[内部路径已隐藏]"
+
+
+def redact_endpoints(value: str) -> str:
+    """对外错误文案脱敏：去掉 URL、回环/内网主机、端口与内部路径。
+
+    原始端点信息只允许进服务端日志；调用方不该从错误体反推内网拓扑。
+    """
+    text = "" if value is None else str(value)
+    text = _INTERNAL_URL.sub(_HIDDEN_ENDPOINT, text)
+    text = _INTERNAL_HOST.sub(_HIDDEN_ENDPOINT, text)
+    text = _PORT_WORD.sub("端口已隐藏", text)
+    text = _BARE_PORT.sub("", text)
+    text = _INTERNAL_PATH.sub(_HIDDEN_PATH, text)
+    return text
+
+
 def exc_summary(exc: BaseException, *, limit: int = 160) -> str:
     """对外错误只留异常类型名 + 脱敏后的 str(exc)；repr 会带完整 URL/请求对象，不原样透出。"""
     detail = mask_text(safe_url(str(exc) or "").strip())[:limit].strip()

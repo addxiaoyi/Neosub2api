@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -13,6 +14,11 @@ import httpx
 from ..services import sidecar_status
 from .base import AccountsPage, ProviderError
 from .openai_compat import OpenAICompatAdapter
+
+logger = logging.getLogger("unified.gateway")
+
+# Anthropic Messages 协议要求的最小头；上游是否强制本地无法验证，但协议上必须带
+ANTHROPIC_VERSION = "2023-06-01"
 
 
 class SidecarLink(OpenAICompatAdapter):
@@ -62,20 +68,37 @@ class SidecarLink(OpenAICompatAdapter):
         }
 
     def _link_error(self, exc: ProviderError) -> ProviderError:
-        """把 client 层笼统的「上游不可达」拆成超时 / 拒绝连接两种人话。"""
+        """把 client 层笼统的「上游不可达」拆成超时 / 拒绝连接两种人话。
+
+        端口只写服务端日志：对外错误体不暴露内网端点。
+        """
         if exc.status_code != 502:
             return exc
         cause = exc.__cause__
         port = self._port()
+        logger.warning(
+            "sidecar 链路失败 provider=%s port=%s cause=%s", self.spec.id, port, type(cause).__name__
+        )
         if isinstance(cause, httpx.TimeoutException):
-            return ProviderError(504, f"侧车无响应（端口 {port}）：请求超时，进程可能卡死")
+            return ProviderError(504, "侧车无响应：请求超时，进程可能卡死（详情见服务端日志）")
         if isinstance(cause, httpx.ConnectError):
-            return ProviderError(502, f"侧车未运行（端口 {port}）：连接被拒绝，请先启动对应进程")
+            return ProviderError(502, "侧车未运行：连接被拒绝，请先启动对应进程")
         return exc
 
+    def _anthropic_headers(self) -> dict[str, str]:
+        headers = {"anthropic-version": ANTHROPIC_VERSION}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return headers
+
     async def _sidecar_forward(self, path: str, payload: dict[str, Any], *, stream: bool):
+        headers = (
+            self._anthropic_headers()
+            if path.startswith("/v1/messages") or path.startswith("/anthropic/v1/messages")
+            else None
+        )
         try:
-            return await self._client().forward(path, payload, stream=stream)
+            return await self._client(headers=headers).forward(path, payload, stream=stream)
         except ProviderError as exc:
             raise self._link_error(exc) from exc.__cause__
 

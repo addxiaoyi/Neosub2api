@@ -432,11 +432,11 @@ def test_v1_messages_400_ambiguous_model(
     assert {item["provider"] for item in body["error"]["candidates"]} >= {"codebuddy", "opencode"}
 
 
-# ---------------- 上游 403 合并到 401 ----------------
+# ---------------- 上游 403 原样透传 ----------------
 
 
 @pytest.mark.parametrize("path,shell", V1_CASES[:1] + V1_CASES[2:], ids=["chat", "messages"])
-def test_v1_upstream_403_merges_to_401(
+def test_v1_upstream_403_passes_through_as_403(
     anon: httpx.Client, contract_key: dict, path: str, shell: str
 ) -> None:
     r = _post(
@@ -445,14 +445,34 @@ def test_v1_upstream_403_merges_to_401(
         model="err-403",
     )
     if shell == "anthropic":
-        body = _assert_anthropic_shell(r, 401, inner_type="authentication_error")
+        body = _assert_anthropic_shell(r, 403, inner_type="permission_error")
         error = body["error"]
     else:
-        body = _assert_openai_shell(r, 401, code="upstream_auth_failed", type_="authentication_error")
+        body = _assert_openai_shell(r, 403, code="upstream_forbidden", type_="permission_error")
         error = body["error"]
-    assert error["upstream_status"] == 403, "上游 403 合并为对外 401，但原始状态码要保留"
+    assert error["upstream_status"] == 403, "上游 403 原样透传，原始状态码要保留"
     assert error["upstream_code"] == "403"
     assert r.headers.get("retry-after") is None
+
+
+def test_v1_error_body_redacts_internal_endpoint_but_log_keeps_it(
+    admin: httpx.Client, anon: httpx.Client, contract_key: dict
+) -> None:
+    """上游原文里的回环地址/端口只允许留在服务端日志，错误体必须脱敏。"""
+    model = "err-url"
+    r = _post(
+        anon, "/v1/chat/completions",
+        headers={**_bearer(contract_key["key"]), "x-provider": "codebuddy"},
+        model=model,
+    )
+    assert r.status_code == 403, f"{r.status_code} {r.text}"
+    for needle in ("127.0.0.1", "localhost", "http://", "8505", "端口 8505"):
+        assert needle not in r.text, f"错误体泄露内部端点「{needle}」：{r.text[:400]}"
+    assert "[内部地址已隐藏]" in r.text
+    rows = admin.get("/api/logs", params={"model": model, "size": 50}).json()["items"]
+    row = next(item for item in rows if item["model"] == model)
+    assert row["status"] == r.status_code, "日志状态必须与响应状态一致"
+    assert "127.0.0.1:8505" in (row.get("error") or ""), "原始端点必须能在服务端日志里查到"
 
 
 # ---------------- 429 ----------------
@@ -566,14 +586,17 @@ def test_api_429_login_throttle_uses_detail_shell(base_url: str) -> None:
 # ---------------- 501 / 502 / 503 ----------------
 
 
-def test_v1_responses_501_is_openai_shell(anon: httpx.Client, contract_key: dict) -> None:
+def test_v1_responses_501_is_openai_shell(
+    anon: httpx.Client, contract_key: dict, trae_sidecar_on: None
+) -> None:
+    # trae_sidecar 声明 responses=False；启用后能力门槛先于上游调用触发 501
     r = _post(
         anon, "/v1/responses",
-        headers={**_bearer(contract_key["key"]), "x-provider": "codebuddy"},
-        model="fake-chat-1",
+        headers=_bearer(contract_key["key"]),
+        model="trae_sidecar/fake-chat-1",
     )
     body = _assert_openai_shell(r, 501, code="capability_unsupported", type_="invalid_request_error")
-    assert body["error"]["provider"] == "codebuddy"
+    assert body["error"]["provider"] == "trae_sidecar"
     assert r.headers.get("retry-after") is None
 
 

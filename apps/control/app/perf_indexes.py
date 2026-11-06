@@ -44,14 +44,16 @@ INDEXES = (
         "ON billing_ledger(key_id, ts, billed_micro)",
     ),
     # 失败限流：billing.py:check_failure_rate
-    #   WHERE key_id = ? AND ts >= ? AND (status >= 400 OR COALESCE(error, '') <> '')
+    #   WHERE key_id = ? [AND provider = ?] AND ts >= ? AND status <> 429
+    #         AND (status >= 400 OR COALESCE(error, '') <> '')
     # 部分索引只收录失败行，窗口内成功行不进索引，COUNT 不必逐行回表判状态。
+    # provider 进索引是为了按 (key, provider) 隔离计数，不让一家上游的故障连坐其他 provider。
     # 实测（20 万行全部落在 60s 窗口）：945ms -> 1.75ms；规划器确实选中该索引。
     # 代价：仅失败写入时多一次谓词判断 + 一条索引项；成功路径几乎零成本。
     (
         "idx_request_logs_failure",
         "CREATE INDEX IF NOT EXISTS idx_request_logs_failure "
-        "ON request_logs(key_id, ts) WHERE status >= 400 OR COALESCE(error, '') <> ''",
+        "ON request_logs(key_id, provider, ts) WHERE status >= 400 OR COALESCE(error, '') <> ''",
     ),
 )
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -146,6 +147,17 @@ async def test_sub2api_stream_break_does_not_hang(fake_base: str, tmp_path: Path
     assert not isinstance(caught.value, asyncio.TimeoutError)
 
 
+async def test_sub2api_messages_sends_anthropic_headers(fake_base: str, tmp_path: Path) -> None:
+    adapter = _sub2api(fake_base, tmp_path)
+    payload = {"model": "fake-chat-1", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+    reply = await adapter.messages(payload, stream=False)
+    assert reply.status_code == 200
+    text = (reply.body or b"").decode()
+    assert "anthropic-version=2023-06-01" in text
+    assert "x-api-key=sub-key" in text
+    assert "user-agent=sub2api/1.0" in text
+
+
 # ---------------------------------------------------------------- Codar JWT
 
 
@@ -183,6 +195,28 @@ async def test_codar_stream_break_does_not_hang(fake_base: str, tmp_path: Path) 
     with pytest.raises(Exception) as caught:
         await asyncio.wait_for(_collect(reply), timeout=10)
     assert not isinstance(caught.value, asyncio.TimeoutError)
+
+
+async def test_codar_messages_sends_anthropic_headers(fake_base: str, tmp_path: Path) -> None:
+    adapter = _codar(fake_base, tmp_path, token="codar-token-1")
+    payload = {"model": "fake-chat-1", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+    reply = await adapter.messages(payload, stream=False)
+    assert reply.status_code == 200, reply.body
+    text = (reply.body or b"").decode()
+    assert "anthropic-version=2023-06-01" in text
+    assert "x-api-key=codar-token-1" in text
+    assert "user-agent=codar-desktop/0.3.3" in text
+
+
+async def test_codar_external_refresh_is_opt_in(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """401 续期是设计行为，但默认不得静默外呼 api.kuaipaper.com。"""
+    adapter = _codar("http://127.0.0.1:9", tmp_path, token="tok-1")
+    await adapter._rotation()  # 同步 token 列表，_refresh 才有可续期的索引
+    with caplog.at_level(logging.WARNING, logger="unified.codar"):
+        fresh = await adapter._refresh(0, "tok-1")
+    assert fresh == ""
+    assert "已跳过" in caplog.text
+    assert "api.kuaipaper.com" in caplog.text, "服务端日志要能查到被拦下的外呼目标"
 
 
 # ---------------------------------------------------------------- 校验接口

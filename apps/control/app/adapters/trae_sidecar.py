@@ -31,6 +31,7 @@ class TraeSidecarAdapter(SidecarLink):
             "sidecar": True,
         },
         protocols=("openai.chat.completions",),
+        user_agent="Trae/0.1.52",
         risk_level="safe",
         risk_note="",
         readiness="needs_config",
