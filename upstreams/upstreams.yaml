@@ -103,7 +103,7 @@ upstreams:
     checked_at: 2026-11-03
     our_files: ["apps/control/app/adapters/trae_sidecar.py", "apps/control/app/adapters/trae.py", "providers/trae2api/README.md"]
     protocols: ["openai.chat.completions"]
-    notes: "Go（go.mod）。双路径：trae.py 为仓内自研 MIT 直连 Solo/Work，已注册为一等 provider（status implemented，chat/models 能力位，readiness ready）；trae_sidecar 仅代理 127.0.0.1:7871，作可选替代（needs_config，缺 sidecar 进程不通）。许可证 MIT（可入主仓）。"
+    notes: "Go（go.mod）。双路径：trae.py 为仓内自研 MIT 直连 Solo/Work，已注册为一等 provider（status implemented，chat/models 能力位，readiness needs_config，缺真实 Cloud-IDE JWT 且无真机外呼证据）；trae_sidecar 仅代理 127.0.0.1:7871，作可选替代（needs_config，缺 sidecar 进程不通）。许可证 MIT（可入主仓）。"
 
   - repo: ColudAI/Deepseek2Go
     license: unknown

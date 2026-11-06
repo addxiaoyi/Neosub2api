@@ -51,7 +51,7 @@
 - `readiness`：`ready` = 填好 api_key / base_url 就能调用；`needs_config` = 还有核实过的卡点，光填 key 不够。
 - `requires`：字符串数组，缺什么（给人看的短句，带症状说明）；`ready` 时为空数组。
 
-只标注**已核实**的卡点。没有真机或文档证据的依赖不写进 `needs_config`，宁可先算 `ready`。
+只标注**已核实**的卡点；**「有代码」不等于「就绪」**，没有一条真实外呼跑通的 provider 一律按 `needs_config` 展示。
 
 同一接口还带 `base_url_warning` / `credential_base_warnings`，用于提示数据库里残留的历史默认地址（当前只有 `deepseek_sidecar` 的 `http://127.0.0.1:7872`，真实默认是 5001）。它们只提示、不改值，字段定义见 [API-REFERENCE.md](API-REFERENCE.md) §3。
 
@@ -78,8 +78,11 @@
 | `qoder_sidecar` | needs_config | sidecar 进程（buddy-switch-gateway，默认端口 7873） | 同上，连不上 | 起 sidecar 后 `curl http://127.0.0.1:7873/v1/models` |
 | `codar` | needs_config | Codar 账号 JWT（扫码/短信登录仍需 codar2api sidecar） | 未填时模型列表与对话全部 401；token 过期且续期失败时同样 401 | 在「服务商」页 api_key 或 `options.tokens` 填 JWT，点测活能返回模型数量即通 |
 | `codar_sidecar` | needs_config | sidecar 进程（codar2api，默认端口 8801） | 同上，连不上 | 起 sidecar 后 `curl http://127.0.0.1:8801/v1/models`；调用时另填 sidecar 本地 API Key |
+| `opencode` | needs_config | OpenCode Zen/Go 密钥（`api_key` 或 `options.extra_keys`，静态无刷新） | 未填时推理请求 **503**（模型发现可走匿名通道，不保证成功） | 带 key 请求 `/v1/models` 与 `/v1/chat/completions` 各一条，返回 200 且 usage 正常即通 |
+| `trae` | needs_config | Trae 登录后的 **Cloud-IDE JWT**（填 `api_key`） | JWT 缺失或被拒时 **401**；Work 通道还需 `options.channel=work` 与账号积分 | Solo 发一条 `glm-5.2` 非流式请求返回 200；Work 通道另测一次流式与降级 |
+| `qoder` | needs_config | Qoder **access token** + `uid` / `refresh_token` 身份字段（`api_key` + `options`） | 未填或会话失效报 **429 session_dead**，需重新登录换 token | 填真实 token 后请求一次 `/v1/models` 与 chat，能返回模型与正常 usage 即通 |
 
-其余 3 家为 `ready`：`opencode`、`trae`、`qoder`——填好 api_key / base_url 即可调用。
+三家（`opencode`、`trae`、`qoder`）当前**没有任何真实外呼证据**：测试全部基于假上游/桩响应，文档也各自列有未真机验证项。因此不按 `ready` 展示，等各自跑通一条真实链路后再回填 `ready`。
 
 > `codar` 与 `codar_sidecar` 是同一上游的两种接入方式，有意同时保留：前者在仓内直连 Codar 私有 API（自带 token 轮换与 401 续期），后者透传到独立 codar2api 进程（扫码/短信登录、签到留在 sidecar）。两者 provider id、默认地址、凭据来源都不同，可按需启停其一或同时启用；请求按 provider 显式选择，不做自动回退，因此不会互相抢占账号或 token。
 
@@ -108,9 +111,9 @@
 
 - **是什么**：不是推理 provider，没有 chat/models 协议，`protocols` 为空。是控制面内一等的**注册任务编排服务**：任务队列、并发控制、状态机、指数退避重试，浏览器执行外置。
 - **协议/契约**：见 [providers/grok-register.md](providers/grok-register.md)；API 见 [API-REFERENCE.md](API-REFERENCE.md) 第 12 节。
-- **必填配置**：环境变量 `GROK_REGISTER_EXECUTOR_URL`（外部浏览器运行时的 HTTP 入口）。**留空则任务入队后以明确原因失败**（不假装注册成功）。
+- **必填配置**：环境变量 `GROK_REGISTER_EXECUTOR_URL`（外部浏览器运行时的 HTTP 入口，协议 `grok-register-executor/v1`）。**留空则任务入队后以明确原因失败**（不假装注册成功）。可选 `GROK_REGISTER_EXECUTOR_TIMEOUT_SEC`（默认 900）与 `GROK_REGISTER_POLL_INTERVAL_SEC`（默认 2）。
 - **options**：无。
-- **已知限制**：执行器不随仓交付；邮箱渠道、浏览器自动化、CPA/Grok2API 产物生成都是外部执行器职责。并发上限来自 `GROK_REGISTER_MAX_CONCURRENCY` / `GROK_REGISTER_MAX_WORKERS`。
+- **已知限制**：浏览器自动化不随仓交付（邮箱渠道、CPA/Grok2API 产物生成同属外部执行器职责）；仓内提供 `apps/control/scripts/grok_executor_stub.py` 仅用于无真执行器时验证链路，不做真实注册。并发上限来自 `GROK_REGISTER_MAX_CONCURRENCY` / `GROK_REGISTER_MAX_WORKERS`。
 
 ## 4. gptgrok — GPT/Grok 2API
 
@@ -239,6 +242,28 @@
 
 ---
 
+## 附：单个服务商自助排查（scripts/selfcheck_provider.py）
+
+从**仓库根**运行（不是 `apps/control` 下）：
+
+```powershell
+python scripts/selfcheck_provider.py --provider demo_local --fake
+python scripts/selfcheck_provider.py --provider zcode
+python scripts/selfcheck_provider.py --provider zcode --live
+python scripts/selfcheck_provider.py --list
+```
+
+五个阶段每阶段一行 PASS / SKIP / FAIL：配置、readiness、连通、流式、计费与日志（`credit_status`：billed / usage_missing / estimated / unpriced / not_billed / unlinked）。
+
+- **默认**：只以只读方式打开真实配置库（`UNIFIED_DB_PATH`，默认 `data/unified.db`）读 `providers` / `provider_credentials` / `provider_config` / 上次探活结果，**绝不外呼**，连通与流式阶段 SKIP。
+- **`--fake`**：只用于 `demo_local`。临时目录里建临时库并开启演示模式，复用 `scripts/fake_upstream.py` 的进程内假上游、真实适配器与网关；验证请求 → 响应 → usage → 计费 → 日志。**不读写真实配置库**。
+- **`--live`**：先在真实库建一次性网关 key（`selfcheck-<随机>`，最小配额 2 次请求），进程内装配控制面 ASGI（不监听 13100/18090），经 `/v1/chat/completions` 打一次 `max_tokens=1` 的非流式 + 一次流式。`request_logs` / `usage_records` / `billing_ledger` 会留下本次记录，计费阶段打印三张表行数、`credit_status` 与金额；跑完无论成败都按临时 key 精确删除本次三表行、临时 key 与本次价格快照，不碰历史。无凭据 / 未启用 / sidecar 未起仍保持 SKIP，不外呼。
+- sidecar 四家（`trae_sidecar` / `deepseek_sidecar` / `qoder_sidecar` / `codar_sidecar`）进程未起时，readiness 与连通阶段 SKIP（退出码 2），并打印仓内 README 的真实启动命令。
+
+退出码：全 PASS = **0**；无 FAIL 但有 SKIP = **2**；有 FAIL = **1**；未知 id / 缺 `--provider` = **1**。最后一行固定打印「下一件该做的事」。
+
+---
+
 ## 附：有意不做的取舍（2026-11-04 盘点）
 
 下列 10 类功能**属于有意不做**，依据来自许可证隔离、设计边界或执行器外置，都有仓内出处，不是能力缺口；后续评审按「取舍」对待，不要重复按缺口提出。引用以章节锚点为准，行号仅作辅证。
@@ -252,7 +277,7 @@
 | 5 | sidecar 路径只做 HTTP 代理（不复制上游代码）；`trae` 产品线 501 | qoder-switch（NextAgentX/qoder-trae-workbuddy-switch） | **PolyForm-NC 禁商用**：`apps/control/app/adapters/qoder_sidecar.py:3-5`（「不复制不修改」上游源码、仅作 HTTP 代理）、本文件 §10 qoder_sidecar「风险」；§13 qoder「协议」：`trae` 产品线 501 并指引改用 provider `trae` |
 | 6 | 扫码/短信登录、每日签到、领免费模型、四策略账号调度、非 401 不换号 | codar2api（AiXiaoc/codar2api） | **设计边界**：`docs/providers/codar2api.md:263-264`（登录、签到、免费模型领取、代理池、账号调度与管理面板继续由 sidecar 承担）、`:175`（四策略 `round_robin`/`weighted_round_robin`/`sticky`/`least_connections` 在 sidecar）、`:289`（账号池调度不实现，仅 token 轮换）、本文件 §12 codar_sidecar「形态」；「非 401 不换号」指本仓直连只在 401 时续期换号（`apps/control/app/adapters/codar.py:185-200,219-233`）；许可证 MIT |
 | 7 | 网页 DOM / Noise-XX 对话通道、账号池导入、代理、签到 | muse2api（czg86389-hub/muse2api） | **设计边界**：本文件 §2 muse「已知限制」（网页账号只有浏览器 DOM / Noise-XX WebSocket 通道，本仓不复刻）、`upstreams/upstreams.yaml:40`（同因改为直连官方入口）、`docs/design/frontend-integration-plan.md:55`（账号导入留 sidecar `admin.html`）；许可证 MIT |
-| 8 | 浏览器执行器、邮箱渠道、CPA / Grok2API 产物、GrokIQ 联动 | grok-register（kaibush/grok-register） | **执行器外置**：`docs/providers/grok-register.md:134`（属外部执行器职责）、本文件 §3 grok-register「已知限制」（执行器不随仓交付）、`docs/design/frontend-integration-plan.md:77`（外部执行器职责，不进控制面）；执行器入口为 `GROK_REGISTER_EXECUTOR_URL`；许可证 MIT |
+| 8 | 浏览器执行器、邮箱渠道、CPA / Grok2API 产物、GrokIQ 联动 | grok-register（kaibush/grok-register） | **执行器外置**：`docs/providers/grok-register.md` §5.4「执行器协议 v1」（属外部执行器职责）、本文件 §3 grok-register「已知限制」（执行器不随仓交付）、`docs/design/frontend-integration-plan.md:77`（外部执行器职责，不进控制面）；执行器入口为 `GROK_REGISTER_EXECUTOR_URL`；许可证 MIT |
 | 9 | **本项目取舍（非许可证限制）**：本仓不**转发**上游的原生 `/v1/responses`、`/v1/messages`、`/v1/images` 端点（上游确有这些端点：`upstreams/upstreams.yaml:73`「上游另有 responses/messages/images，本仓未接」），改为在网关层提供等价能力——`messages` / `responses` 由适配器在控制面**合成**（`gptgrok.py:400` 声明、`:1323` / `:1353` 实现，流式也是合成），图片输入走 chat 内嵌 `image_url`（`gptgrok.py:57-59`），独立 `/v1/images/generations` 仍不声明（调用 501，见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。上游管理控制台与 iCloud Privacy Mail sidecar 不透传 | gptGrok2api（addxiaoyi/gptGrok2api） | 上游为 **MIT、可入主仓**，未接是本项目自己选的，不是许可证不允许——`upstreams/upstreams.yaml:65`（license MIT）、`:73`（「上游另有 responses/messages/images，本仓未接」）；控制台与 iCloud sidecar 属上游自有面，不透传：`docs/design/frontend-integration-plan.md:97-101`（gptGrok 各项「不进界面」）、`:182`（上游管理控制台结构只借「实时请求」结构）、上游 README 能力概览（分析基线 `0335d62`：管理控制台、iCloud 隐私邮箱 sidecar） |
 | 10 | 只做协议层，不做各家上游 Web UI；各家 Web 面板由控制面自建等价界面 | 全局（12 个上游） | **设计边界**：`docs/design/frontend-integration-plan.md:190`（借法结论：仅 sub2api 三页结构与 gptGrok 实时请求列表可借，其余「能力留在 sidecar 内、或许可证不允许复制」）、`:235`（sidecar 内部能力不进界面）、本文件文首说明（无章节锚点，引用待核；运行态信息一律由管理页「服务商」或 `PATCH /api/providers/{id}` 下发） |
 
