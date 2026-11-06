@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -6,6 +7,12 @@ import httpx
 from ..config import Settings
 from .base import AccountsPage, ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient, UpstreamReply
+
+logger = logging.getLogger("unified.gateway")
+
+# 贴近真实 CodeBuddy 客户端的 UA；裸 httpx 头很容易被风控挑出来
+CLIENT_UA = "CodeBuddy/2.50.0"
+ANTHROPIC_VERSION = "2023-06-01"
 
 # 管理端设置下发时只透传这些组（与 workbuddy2api config.json 的分组一致）
 PUSH_GROUPS = (
@@ -48,11 +55,13 @@ class _AdminClient(UnifiedApiClient):
             return exc
         base = self.base_url.rstrip("/")
         cause = exc.__cause__
+        # 原文（含本机地址/端口）只进服务端日志，对外只说能做什么
+        logger.warning("CodeBuddy 管理端不可达 base=%s cause=%s", base, type(cause).__name__)
         if isinstance(cause, httpx.ConnectError):
-            return ProviderError(502, f"CodeBuddy 管理端进程未运行（{base} 连接被拒绝）；请先启动 7864 管理端")
+            return ProviderError(502, "CodeBuddy 管理端进程未运行：连接被拒绝，请先启动管理端")
         if isinstance(cause, httpx.TimeoutException):
-            return ProviderError(504, f"CodeBuddy 管理端响应超时（{base}）")
-        return ProviderError(502, f"CodeBuddy 管理端不可达（{base}）：{cause}")
+            return ProviderError(504, "CodeBuddy 管理端响应超时（详情见服务端日志）")
+        return ProviderError(502, "CodeBuddy 管理端不可达：连接失败（详情见服务端日志）")
 
     async def _guard(self, call: Any) -> Any:
         try:
@@ -105,17 +114,20 @@ class CodeBuddyAdapter(ProviderAdapter):
         license="MIT",
         runtime="Python 管理端（7864）+ Go 数据面（workbuddy2api, 7863）",
         status="implemented",
-        description="腾讯 CodeBuddy 账号池反向代理，OpenAI Chat Completions / Anthropic Messages 双协议。",
+        description="腾讯 CodeBuddy 账号池反向代理，OpenAI Chat Completions / Responses 与 Anthropic Messages 协议。",
         default_base_url="http://127.0.0.1:7864",
         capabilities=stub_capabilities(
             chat=True,
             messages=True,
             models=True,
+            responses=True,
+            count_tokens=True,
             oauth=True,
             checkin=True,
             credits=True,
         ),
-        protocols=("openai.chat.completions", "anthropic.messages"),
+        protocols=("openai.chat.completions", "openai.responses", "anthropic.messages"),
+        user_agent=CLIENT_UA,
         readiness="needs_config",
         requires=(
             "7864 管理端进程 + wbt_ token：先启动 codebuddy2api 管理端（默认本机 7864 端口），"
@@ -128,8 +140,16 @@ class CodeBuddyAdapter(ProviderAdapter):
         self._settings = settings
         super().__init__(base_url)
 
-    def _client(self, timeout: float = 120.0) -> UnifiedApiClient:
-        return _AdminClient(self.base_url, api_key=self.api_key, timeout=timeout)
+    def _client(
+        self, timeout: float | None = None, *, headers: dict[str, str] | None = None
+    ) -> UnifiedApiClient:
+        merged = {"user-agent": self.client_user_agent()}
+        if headers:
+            merged.update(headers)
+        effective = timeout or float(self.options.get("timeout") or 120.0)
+        return _AdminClient(
+            self.base_url, api_key=self.api_key, timeout=effective, extra_headers=merged
+        )
 
     def credential_problem(self, credential_type: str, text: str) -> str:
         if credential_type not in ADMIN_CREDENTIAL_TYPES:
@@ -235,14 +255,26 @@ class CodeBuddyAdapter(ProviderAdapter):
         return await self._client().forward("/v1/chat/completions", payload, stream=stream)
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
-        return await self._client().forward("/v1/messages", payload, stream=stream)
+        headers = {"anthropic-version": ANTHROPIC_VERSION}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return await self._client(headers=headers).forward("/v1/messages", payload, stream=stream)
+
+    async def responses(self, payload: dict[str, Any], *, stream: bool):
+        return await self._client().forward("/v1/responses", payload, stream=stream)
+
+    async def count_tokens(self, payload: dict[str, Any], *, stream: bool):
+        headers = {"anthropic-version": ANTHROPIC_VERSION}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return await self._client(headers=headers).forward("/v1/messages/count_tokens", payload, stream=False)
 
     async def start_login(self, realm: str = "cn") -> dict[str, Any]:
         payload = await self._client(timeout=30.0).post_json("/api/auth/start", {"realm": realm})
         url = str(payload.get("authUrl") or payload.get("auth_url") or "")
         state = str(payload.get("state") or "")
         if not state or not url:
-            raise ProviderError(502, "上游未返回二维码链接，请确认 CodeBuddy 管理端（7864）已就绪")
+            raise ProviderError(502, "上游未返回二维码链接，请确认 CodeBuddy 管理端已就绪")
         return {"state": state, "authUrl": url, "realm": str(payload.get("realm") or realm)}
 
     async def poll_login(self, state: str, realm: str | None = None, region: str | None = None) -> dict[str, Any]:

@@ -98,13 +98,15 @@ def test_extension_capability_truth_in_both_directions() -> None:
 
 
 def test_declared_extension_caps_match_local_evidence() -> None:
-    """声明必须等于本地证据：sub2api 六项（gateway.go 源码核实），codar 直连无 count_tokens。"""
+    """声明必须等于本地证据：sub2api 六项（gateway.go 源码核实），直连 codar 补 count_tokens。"""
     declared = {
         pid: sorted(cap for cap in EXTENSION_CAPS if adapter.spec.capabilities.get(cap) is True)
         for pid, adapter in sorted(ADAPTERS.items())
         if any(adapter.spec.capabilities.get(cap) is True for cap in EXTENSION_CAPS)
     }
     assert declared == {
+        "codebuddy": ["count_tokens"],
+        "codar": ["count_tokens"],
         "codar_sidecar": ["count_tokens"],
         "muse": ["images", "media", "videos"],
         "sub2api": ["count_tokens", "embeddings", "images", "rerank", "usage", "videos"],
@@ -333,7 +335,7 @@ def test_new_endpoints_enforce_auth(anon: httpx.Client) -> None:
 
 
 def test_extension_capability_gate_rejects_without_capability(anon: httpx.Client, bearer_key: str) -> None:
-    # codebuddy 没有本批能力位：POST/GET 两个协议族都明确 501，不假装成功
+    # codebuddy 有 count_tokens，但没有 embeddings/videos/rerank/usage：这些仍必须明确 501
     embeddings = anon.post(
         "/v1/embeddings", headers=_auth(bearer_key, "codebuddy"), json={"model": "fake-chat-1", "input": "hi"}
     )
@@ -341,16 +343,6 @@ def test_extension_capability_gate_rejects_without_capability(anon: httpx.Client
     error = embeddings.json()["error"]
     assert error["code"] == "capability_unsupported"
     assert error["provider"] == "codebuddy"
-
-    count = anon.post(
-        "/v1/messages/count_tokens",
-        headers=_auth(bearer_key, "codebuddy"),
-        json={"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert count.status_code == 501, count.text
-    body = count.json()
-    assert body["type"] == "error", "Anthropic 端点必须出 Anthropic 壳"
-    assert body["error"]["code"] == "capability_unsupported"
 
     video = anon.get("/v1/videos/vt-9", headers=_auth(bearer_key, "codebuddy"))
     assert video.status_code == 501, video.text

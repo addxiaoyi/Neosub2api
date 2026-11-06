@@ -13,6 +13,9 @@ from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilitie
 from .client import UnifiedApiClient, UpstreamReply
 from .sub2api_store import QuotaStore, build_store
 
+CLIENT_UA = "sub2api/1.0"
+ANTHROPIC_VERSION = "2023-06-01"
+
 MAX_ACCOUNT_ATTEMPTS = 3
 ACCOUNT_RETRY_STATUS = {429, 500, 502, 503, 504}
 # 上游根路径即对外协议端点，透传不改写（docs/providers/sub2api.md:14-19；
@@ -74,6 +77,7 @@ class Sub2ApiAdapter(ProviderAdapter):
             usage=True,
         ),
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
+        user_agent=CLIENT_UA,
         risk_level="warn",
         risk_note="上游 sub2api 为 LGPL-3.0，只能进程隔离；"
         "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
@@ -120,13 +124,22 @@ class Sub2ApiAdapter(ProviderAdapter):
         base = str(account.get("upstream_base") or self.base_url or "").rstrip("/")
         if not base:
             raise ProviderError(503, f"sub2api 账号 {account['id']} 未配置 upstream_base，且 provider 未设 base_url")
+        merged = dict(headers or {})
+        merged.setdefault("user-agent", self.client_user_agent() or CLIENT_UA)
         return UnifiedApiClient(
             base,
             api_key=str(account.get("api_key") or self.api_key or "") if authenticated else "",
             timeout=float(self.options.get("timeout") or 120.0),
             proxy=str(self.options.get("proxy") or ""),
-            extra_headers=headers,
+            extra_headers=merged,
         )
+
+    def _anthropic_headers(self, account: dict[str, Any]) -> dict[str, str]:
+        headers = {"anthropic-version": ANTHROPIC_VERSION}
+        key = str(account.get("api_key") or self.api_key or "")
+        if key:
+            headers["x-api-key"] = key
+        return headers
 
     def _charge(
         self,
@@ -177,7 +190,12 @@ class Sub2ApiAdapter(ProviderAdapter):
                     reason="no_available_account",
                 )
                 raise
-            client = self._client(account)
+            client = self._client(
+                account,
+                headers=self._anthropic_headers(account)
+                if capability in ("messages", "count_tokens")
+                else None,
+            )
             path = _FORWARD_PATHS[capability]
             replied = await client.forward(path, payload, stream=stream)
             if replied.status_code not in ACCOUNT_RETRY_STATUS:

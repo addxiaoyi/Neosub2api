@@ -400,8 +400,9 @@ class GptGrokAdapter(ProviderAdapter):
         status="implemented",
         description="直连 ChatGPT Web 与 Grok Web 的 OpenAI chat 客户端，支持多凭证轮换与指纹头开关。",
         default_base_url="https://chatgpt.com",
-        capabilities=stub_capabilities(chat=True, models=True, responses=True, messages=True),
+        capabilities=stub_capabilities(chat=True, models=True, responses=True, messages=True, search=True),
         protocols=("openai.chat.completions", "openai.responses", "anthropic.messages"),
+        user_agent=DEFAULT_UA,
         readiness="needs_config",
         requires=(
             "sentinel_token（须用户自备：本地无法生成，由官方 "
@@ -1392,6 +1393,24 @@ class GptGrokAdapter(ProviderAdapter):
         usage = _responses_usage(data.get("usage"))
         if usage:
             body["usage"] = usage
+        return Reply(200, body=json.dumps(body, ensure_ascii=False).encode())
+
+    async def search(self, payload: dict[str, Any], *, stream: bool = False) -> Reply:
+        # 上游 /v1/search 本身也是把 prompt 交给会话通道再包成 answer/sources（server.go 的 searchAPI），
+        # 没有独立的检索后端；这里只能做到语义等价，返回体里不会有可核验的 results[]
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            raise ProviderError(400, "search 请求缺少 prompt")
+        model = str(payload.get("model") or "gpt-4o-search-preview")
+        chat = await self.chat_completion(
+            {"model": model, "messages": [{"role": "user", "content": prompt}]}, stream=False
+        )
+        data = json.loads(chat.body or b"{}")
+        try:
+            answer = str(data["choices"][0]["message"]["content"] or "")
+        except (KeyError, IndexError, TypeError):
+            answer = ""
+        body = {"answer": answer, "sources": [], "status": "completed", "model": model}
         return Reply(200, body=json.dumps(body, ensure_ascii=False).encode())
 
     async def messages(self, payload: dict[str, Any], *, stream: bool) -> Reply:

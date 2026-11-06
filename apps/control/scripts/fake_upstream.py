@@ -16,6 +16,31 @@ app = FastAPI(title="fake-upstream")
 
 MODELS = ["fake-chat-1", "fake-chat-2"]
 
+# 最近一次真实外呼：测试用它断言网关发到上游的路径、头与 body，而不是只看响应形状
+RECENT: list[dict] = []
+
+
+def _remember(request: Request, payload=None) -> None:
+    body = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode()
+    RECENT.append({
+        "method": request.method,
+        "path": request.url.path,
+        "headers": {key.lower(): value for key, value in request.headers.items()},
+        "body": body.decode("utf-8", "ignore"),
+    })
+    del RECENT[:-20]
+
+
+@app.delete("/__fake/last")
+def clear_last():
+    RECENT.clear()
+    return {"ok": True}
+
+
+@app.get("/__fake/last")
+def last_request():
+    return RECENT[-1] if RECENT else {}
+
 # codar 假上游的 token 约定：expired 触发 401（续期后换成 fresh），forbidden 触发 403
 CODAR_EXPIRED = "codar-expired"
 CODAR_FRESH = "codar-fresh-1"
@@ -64,7 +89,8 @@ def status():
 
 
 @app.get("/v1/models")
-def models():
+def models(request: Request):
+    _remember(request)
     return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "fake"} for m in MODELS]}
 
 
@@ -114,7 +140,12 @@ async def chat(request: Request):
     err = _vendor_error(str(model))
     if err is not None:
         return err
-    text = f"[fake] model={model} system={_first_system(payload)!r}"
+    if "slow" in str(model):
+        await asyncio.sleep(1.5)
+    text = (
+        f"[fake] model={model} system={_first_system(payload)!r} "
+        f"{_echo(request, 'user-agent', 'anthropic-version', 'x-api-key')}"
+    )
     usage = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
     if payload.get("stream"):
         if "stream-break" in str(model):
@@ -150,7 +181,10 @@ async def messages(request: Request):
     err = _vendor_error(str(model))
     if err is not None:
         return err
-    text = f"[fake] model={model} system={_first_system(payload)!r}"
+    text = (
+        f"[fake] model={model} system={_first_system(payload)!r} "
+        f"{_echo(request, 'user-agent', 'anthropic-version', 'x-api-key')}"
+    )
     if payload.get("stream"):
         async def gen():
             events = [
@@ -181,6 +215,7 @@ async def responses(request: Request):
     if denied is not None:
         return denied
     payload = await request.json()
+    _remember(request, payload)
     model = payload.get("model", "?")
     err = _vendor_error(str(model))
     if err is not None:
@@ -203,12 +238,20 @@ async def responses(request: Request):
     })
 
 
+@app.post("/v1/messages/count_tokens")
+async def count_tokens(request: Request):
+    payload = await request.json()
+    _remember(request, payload)
+    size = len(json.dumps(payload, ensure_ascii=False))
+    return {"input_tokens": max(1, size // 3)}
+
+
 # ---------------------------------------------------------------------------
 # 仓内自研三家（muse / gptgrok / zcode）的假上游路由
 # 约定：响应正文回显关键鉴权头，便于断言；model 里带 err-<code> 时返回该状态码。
 # ---------------------------------------------------------------------------
 
-VENDOR_ERROR_CODES = (400, 401, 403, 422, 429, 500, 502, 503)
+VENDOR_ERROR_CODES = (400, 401, 402, 403, 408, 422, 429, 500, 502, 503)
 
 
 def _echo(request: Request, *names: str) -> str:
@@ -224,6 +267,13 @@ def _bad_key(request: Request) -> JSONResponse | None:
 
 
 def _vendor_error(model: str) -> JSONResponse | None:
+    if "err-url" in model:
+        # 模拟真实厂商错误体里带请求端点，用来验证网关对外脱敏、服务端留底
+        return JSONResponse(
+            {"error": {"message": "upstream POST http://127.0.0.1:8505/v1/messages failed on port 8505",
+                       "code": 403}},
+            status_code=403,
+        )
     for code in VENDOR_ERROR_CODES:
         if f"err-{code}" in model:
             return JSONResponse({"error": {"message": f"fake vendor error {code}", "code": code}},
@@ -358,6 +408,7 @@ async def chatgpt_chat(request: Request):
     if denied is not None:
         return denied
     payload = await request.json()
+    _remember(request, payload)
     model = str(payload.get("model", "?"))
     err = _vendor_error(model)
     if err is not None:

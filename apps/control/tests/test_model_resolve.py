@@ -157,11 +157,10 @@ def test_three_protocols_resolve_the_same_provider(anon: httpx.Client, gateway_k
     messages = _post(anon, "/v1/messages", gateway_key, CATALOG_MODEL)
     assert messages.status_code == 200, f"{messages.status_code} {messages.text}"
 
-    # codebuddy 没声明 responses：解析照样命中，能力位在统一的 501 门槛上拦下
+    # codebuddy 已声明 responses：三协议解析同一 provider，且 responses 真打到上游
     responses = _post(anon, "/v1/responses", gateway_key, CATALOG_MODEL)
-    assert responses.status_code == 501, f"{responses.status_code} {responses.text}"
-    assert responses.json()["error"]["provider"] == "codebuddy"
-    assert responses.json()["error"]["code"] == "capability_unsupported"
+    assert responses.status_code == 200, f"{responses.status_code} {responses.text}"
+    assert responses.json()["object"] == "response"
 
 
 def test_404_shell_follows_each_protocol(anon: httpx.Client, gateway_key: str) -> None:

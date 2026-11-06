@@ -58,9 +58,9 @@ CASES: tuple[Case, ...] = (
          x_provider=CODEBUDDY, setup=("codebuddy_on",), upstream_model=MODEL),
     Case("explicit_ok_messages", MSGS, MODEL, 200, providers=(CODEBUDDY,),
          x_provider=CODEBUDDY, setup=("codebuddy_on",), upstream_model=MODEL),
-    # codebuddy 不支持 responses：解析仍命中，被 501 能力门槛拦下
-    Case("explicit_ok_responses", RESP, MODEL, 501, code="capability_unsupported",
-         providers=(CODEBUDDY,), x_provider=CODEBUDDY, setup=("codebuddy_on",)),
+    # codebuddy 已声明 responses：解析命中后直打到上游
+    Case("explicit_ok_responses", RESP, MODEL, 200, providers=(CODEBUDDY,),
+         x_provider=CODEBUDDY, setup=("codebuddy_on",), upstream_model=MODEL),
     Case("explicit_unknown_chat", CHAT, MODEL, 404, code="provider_not_found",
          providers=(GHOST,), x_provider=GHOST, setup=("codebuddy_on",)),
     Case("explicit_unknown_messages", MSGS, MODEL, 404, code="provider_not_found",
@@ -186,9 +186,9 @@ CASES: tuple[Case, ...] = (
     Case("external_style_prefix_404", CHAT, "openai/gpt-4o", 404, code="model_not_found",
          detail_model="openai/gpt-4o"),
 
-    # --- 能力位 501 ---
-    Case("capability_responses_catalog", RESP, MODEL, 501, code="capability_unsupported",
-         providers=(CODEBUDDY,), setup=("codebuddy_on",)),
+    # --- 能力位 ---
+    Case("capability_responses_catalog", RESP, MODEL, 200, providers=(CODEBUDDY,),
+         setup=("codebuddy_on",), upstream_model=MODEL),
     # Anthropic 壳的 501（GatewayError 类）现在与 OpenAI 壳一样带 code
     Case("capability_messages_shell", MSGS, "trae_sidecar/fake-chat-1", 501,
          code="capability_unsupported", providers=("trae_sidecar",),
@@ -303,6 +303,8 @@ def _echoed_text(resp: httpx.Response, path: str) -> str:
         return str(data["choices"][0]["message"]["content"])
     if path == MSGS:
         return str(data["content"][0]["text"])
+    if path == RESP:
+        return str(data["output"][0]["content"][0]["text"])
     raise AssertionError(f"没有为 {path} 定义 200 回显取法")
 
 
