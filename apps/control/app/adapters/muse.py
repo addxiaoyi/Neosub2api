@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx
 
 from ..api_utils import exc_summary, safe_url
 from ..config import Settings
+from ..services.rotation import CredentialPool, sticky_key_from_payload
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
 from .stream_util import Reply
+
+logger = logging.getLogger("unified.upstream")
 
 CHAT_PATH = "/v1/chat/completions"
 RESPONSES_PATH = "/v1/responses"
@@ -35,8 +39,43 @@ DEFAULT_MODELS = ("muse-spark", "muse-image", "muse-video")
 # 上游建视频任务的默认等待是 600s，客户端超时必须更长（muse2api-protocols.md §5）
 VIDEO_TIMEOUT = 660.0
 
-RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
+# 与池分档同集：401/403 鉴权、402 余额、408 超时、429 限流、5xx 服务端，全部换号并登记冷却
+POOL_COOLDOWN_STATUSES = {401, 402, 403, 408, 429, 500, 502, 503, 504}
+RETRYABLE = POOL_COOLDOWN_STATUSES
 REQUEST_ERRORS = {400, 413, 422}
+
+
+class _TrackedReply:
+    """流式响应包装：读到正常收尾才回写健康度，中途断流只解绑粘性。
+
+    拿到 200 响应头就记成功，会把随后上游断开的事件掩盖掉：该冷却的账号不会被
+    冷却，后续请求还会继续撞同一把坏号（与 trae 流式口径一致）。
+    """
+
+    def __init__(self, inner, on_done, on_break) -> None:
+        self.status_code = inner.status_code
+        self.headers = inner.headers
+        self.body = inner.body
+        self.response = inner.response
+        self._inner = inner
+        self._on_done = on_done
+        self._on_break = on_break
+
+    async def iter_bytes(self):
+        completed = False
+        try:
+            async for chunk in self._inner.iter_bytes():
+                yield chunk
+            completed = True
+        except Exception:  # noqa: BLE001 - 断流/连接错误按出口问题处理，不判死账号
+            await self._on_break()
+            raise
+        finally:
+            if completed:
+                await self._on_done()
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class MuseAdapter(ProviderAdapter):
@@ -78,6 +117,8 @@ class MuseAdapter(ProviderAdapter):
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
+        # 账号池：健康度、分档冷却、粘性与权重都在 services/rotation.py 的统一口径里
+        self._pool = CredentialPool()
         super().__init__(base_url)
 
     def credential_problem(self, credential_type: str, text: str) -> str:
@@ -186,6 +227,25 @@ class MuseAdapter(ProviderAdapter):
             return raw.decode("utf-8", "ignore")
         return (reply.body or b"").decode("utf-8", "ignore")
 
+    async def _note_failure(self, key: str, status: int, keys: list[str]) -> bool:
+        """登记分档冷却；没有别的可用账号时不冷却，避免把唯一账号关进冷却后请求全 429。"""
+        others = [item for item in keys if item != key]
+        if others and await self._pool.available(others):
+            await self._pool.report_failure(key, status)
+            return True
+        return False
+
+    def _tracked(self, inner, key: str, sticky: str):
+        async def done() -> None:
+            await self._pool.report_success(key)
+            if sticky:
+                await self._pool.bind_sticky(sticky, key)
+
+        async def broke() -> None:
+            await self._pool.report_network_error(key)
+
+        return _TrackedReply(inner, done, broke)
+
     async def _send(
         self,
         path: str,
@@ -197,10 +257,18 @@ class MuseAdapter(ProviderAdapter):
         keys = self._keys()
         if not keys:
             raise ProviderError(503, "Muse 未配置凭证（服务商页 api_key 或 options.extra_keys）")
+        # 权重每次请求前同步：options 改动后无需重建适配器
+        self._pool.set_weights(keys, self.options.get("key_weights"))
+        sticky = sticky_key_from_payload(payload)
         attempts = self._attempts(len(keys))
         last: ProviderError | None = None
         for attempt in range(attempts):
-            token = keys[attempt % len(keys)]
+            pick = await self._pool.acquire(keys, sticky_key=sticky)
+            if pick is None:
+                raise ProviderError(429, f"Muse {len(keys)} 个账号全部处于冷却中，请稍后重试")
+            token = pick.key
+            if len(keys) > 1:
+                logger.info("Muse 选号 cred=%s 规则=%s %s", pick.cred_id, pick.rule, pick.note or "-")
             client = self._client(token, stream=stream, timeout=timeout)
             try:
                 reply = await client.forward(
@@ -214,18 +282,31 @@ class MuseAdapter(ProviderAdapter):
                 last = exc
                 if exc.status_code in REQUEST_ERRORS:
                     raise
-                await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
-                continue
+                # client 抛出的 ProviderError 是连接层失败：只解绑粘性，不进冷却
+                await self._pool.report_network_error(token)
             except httpx.HTTPError as exc:
                 last = ProviderError(502, f"Muse 上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
-                await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
-                continue
-            if reply.status_code < 400:
-                return reply
-            err = self._classify(reply.status_code, await self._read_error(reply))
-            last = err
-            if not getattr(err, "retryable", err.status_code in RETRYABLE):
-                raise err
+                await self._pool.report_network_error(token)
+            else:
+                if reply.status_code < 400:
+                    if stream:
+                        # 流式成功只在读完后再回写，避免把中途断流记成健康
+                        return self._tracked(reply, token, sticky)
+                    await self._pool.report_success(token)
+                    if sticky:
+                        await self._pool.bind_sticky(sticky, token)
+                    return reply
+                err = self._classify(reply.status_code, await self._read_error(reply))
+                last = err
+                if not getattr(err, "retryable", err.status_code in RETRYABLE):
+                    raise err
+                # 冷却按事实登记：即便这是最后一次尝试，健康度也要如实反映坏号
+                cooled = await self._note_failure(token, err.status_code, keys)
+                if attempt == attempts - 1:
+                    raise err
+                # 没有替代账号时不换号也不冷却，直接抛这次错误
+                if not cooled:
+                    raise err
             await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
         raise last or ProviderError(502, "Muse 上游不可用")
 
@@ -322,21 +403,39 @@ class MuseAdapter(ProviderAdapter):
 
     async def health(self) -> dict[str, Any]:
         keys = self._keys()
+        rotation = await self._pool.snapshot(keys)
         if not keys:
             return {
                 "connected": False,
                 "error": "未配置 Muse 凭证：请在 api.meta.ai 创建 api_key 后导入",
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
             }
         try:
             reply = await self._send(self._path("health_path", MODELS_PATH), None, stream=False)
         except ProviderError as exc:
-            return {"connected": False, "error": exc.message}
+            return {
+                "connected": False,
+                "error": exc.message,
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
+            }
         try:
             data = json.loads(reply.body or b"{}")
         except json.JSONDecodeError:
-            return {"connected": True, "note": "凭证可用，但模型接口返回非 JSON"}
+            return {
+                "connected": True,
+                "note": "凭证可用，但模型接口返回非 JSON",
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
+            }
         items = data.get("data") if isinstance(data.get("data"), list) else None
-        return {"connected": True, "models": len(items) if items else len(DEFAULT_MODELS)}
+        return {
+            "connected": True,
+            "models": len(items) if items else len(DEFAULT_MODELS),
+            "rotation": rotation,
+            "cooling": rotation.get("cooling", 0),
+        }
 
 
 def build(settings: Settings, base_url: str = "") -> MuseAdapter:

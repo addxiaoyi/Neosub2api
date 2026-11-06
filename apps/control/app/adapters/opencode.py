@@ -15,19 +15,53 @@ from ..config import Settings
 from ..services.rotation import CredentialPool, RotationStore, pick_in_group, sticky_key_from_payload
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
-from .key_pool import COOLDOWN_STATUSES
 
 logger = logging.getLogger("unified.upstream")
 
 # 请求级错误不重试，换 key/出口也改变不了结果
 REQUEST_ERRORS = {400, 413, 422}
-RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
+# 与池分档同集：401/403 鉴权、402 余额、408 超时、429 限流、5xx 服务端，全部换号并登记冷却
+POOL_COOLDOWN_STATUSES = {401, 402, 403, 408, 429, 500, 502, 503, 504}
+RETRYABLE = POOL_COOLDOWN_STATUSES
 CLIENT_UA = "opencode/0.6.2"
 # 只有鉴权类失败才值得改走匿名通道：网络/5xx 换不换凭证结果一样
 AUTH_ERRORS = {401, 403}
 NO_KEY_MESSAGE = "OpenCode 未配置上游密钥（服务商页填写 api_key 或 options.extra_keys）"
 # 网络层错误与可重试状态码走同一套换 key 退避；连接失败/超时不是密钥问题也是出口问题
 NETWORK_ERRORS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectTimeout)
+
+
+class _TrackedReply:
+    """流式响应包装：读到正常收尾才回写健康度，中途断流只解绑粘性。
+
+    拿到 200 响应头就记成功，会把随后上游断开的事件掩盖掉：该冷却的账号不会被
+    冷却，后续请求还会继续撞同一把坏号（与 trae 流式口径一致）。
+    """
+
+    def __init__(self, inner, on_done, on_break) -> None:
+        self.status_code = inner.status_code
+        self.headers = inner.headers
+        self.body = inner.body
+        self.response = inner.response
+        self._inner = inner
+        self._on_done = on_done
+        self._on_break = on_break
+
+    async def iter_bytes(self):
+        completed = False
+        try:
+            async for chunk in self._inner.iter_bytes():
+                yield chunk
+            completed = True
+        except Exception:  # noqa: BLE001 - 断流/连接错误按出口问题处理，不判死账号
+            await self._on_break()
+            raise
+        finally:
+            if completed:
+                await self._on_done()
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class OpenCodeAdapter(ProviderAdapter):
@@ -132,6 +166,25 @@ class OpenCodeAdapter(ProviderAdapter):
         await self._pool.report_network_error(key)
         self._store.clear("opencode", self._group())
 
+    async def _note_failure(self, key: str, status: int, keys: list[str]) -> bool:
+        """登记分档冷却；没有别的可用账号时不冷却，避免把唯一账号关进冷却后请求全 429。"""
+        others = [item for item in keys if item != key]
+        if others and await self._pool.available(others):
+            await self._pool.report_failure(key, status)
+            return True
+        return False
+
+    def _tracked(self, inner, key: str, sticky_key: str):
+        async def done() -> None:
+            await self._pool.report_success(key)
+            if sticky_key:
+                await self._pool.bind_sticky(sticky_key, key)
+
+        async def broke() -> None:
+            await self._pool.report_network_error(key)
+
+        return _TrackedReply(inner, done, broke)
+
     async def _request(
         self,
         method: str,
@@ -147,6 +200,9 @@ class OpenCodeAdapter(ProviderAdapter):
         keys = [""] if anonymous else self._keys()
         if not keys:
             raise ProviderError(503, NO_KEY_MESSAGE)
+        if not anonymous:
+            # 权重每次请求前同步：options 改动后无需重建适配器
+            self._pool.set_weights(keys, self.options.get("key_weights"))
         attempts = 1 if anonymous else self._attempts(len(keys))
         last: Any = None
         # 记录最后一次连接错误的原文，重试耗尽后如实抛给调用方，不伪造空响应
@@ -160,7 +216,7 @@ class OpenCodeAdapter(ProviderAdapter):
                     provider="opencode", group=self._group(), keys=keys, sticky_key=sticky_key,
                 )
                 if pick is None:
-                    raise ProviderError(429, "OpenCode 轮转组内账号全部冷却，请稍后重试")
+                    raise ProviderError(429, "OpenCode 轮转组内账号全部处于冷却中，请稍后重试")
                 key, rule = pick.key, pick.rule
                 if len(keys) > 1:
                     logger.info("OpenCode 选号 group=%s cred=%s 规则=%s", self._group(), pick.cred_id, rule)
@@ -173,17 +229,24 @@ class OpenCodeAdapter(ProviderAdapter):
                     return data
                 reply = await client.forward(path, payload or {}, stream=stream)
             except ProviderError as exc:
+                # client 抛出的 ProviderError 是连接层（502「上游不可达」）或读到的错误体；
+                # 5xx 归为出口问题只解绑粘性，鉴权/限流类按池分档冷却
                 last = exc
+                if exc.status_code in REQUEST_ERRORS:
+                    raise
                 if exc.status_code >= 500:
                     network_error = exc
                     await self._rotate_away(key)
-                if exc.status_code in REQUEST_ERRORS:
-                    raise
+                elif key and exc.status_code in POOL_COOLDOWN_STATUSES:
+                    await self._note_failure(key, exc.status_code, keys)
             except NETWORK_ERRORS as exc:
                 last = network_error = ProviderError(502, f"上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
                 await self._rotate_away(key)
             else:
                 if reply.status_code < 400:
+                    if stream:
+                        # 流式成功只在读完后再回写，避免把中途断流记成健康
+                        return self._tracked(reply, key, sticky_key if key else "")
                     await self._pool.report_success(key)
                     if sticky_key:
                         await self._pool.bind_sticky(sticky_key, key)
@@ -191,12 +254,13 @@ class OpenCodeAdapter(ProviderAdapter):
                 last = reply
                 if reply.status_code not in RETRYABLE:
                     return reply
+                # 冷却按事实登记：即便这是最后一次尝试，健康度也要如实反映坏号
+                cooled = await self._note_failure(key, reply.status_code, keys)
                 if attempt == attempts - 1:
                     return reply
-                # 只有账号本身不可用才进冷却表；5xx 换号即可，不占用账号。
-                # 单账号池不做冷却：没有替代对象，关进冷却等于让后续请求直接 429
-                if reply.status_code in COOLDOWN_STATUSES and len(keys) > 1:
-                    await self._pool.report_failure(key, reply.status_code)
+                # 没有替代账号时不换号也不冷却，原样透传这次响应
+                if not cooled:
+                    return reply
                 await reply.aclose()
             # 500ms / 1s / 2s 退避，避免把上游限流打成雪崩
             await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
@@ -241,14 +305,21 @@ class OpenCodeAdapter(ProviderAdapter):
         return [item for item in items if isinstance(item, dict) and item.get("id")]
 
     async def health(self) -> dict[str, Any]:
+        rotation = await self._pool.snapshot(self._keys(), group=self._group())
         try:
             data = await self._discover(f"{self._tier_prefix()}/v1/models")
         except ProviderError as exc:
-            return {"connected": False, "error": exc.message}
+            return {
+                "connected": False,
+                "error": exc.message,
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
+            }
         items = data.get("data") if isinstance(data, dict) else []
         count = len(items) if isinstance(items, list) else 0
-        result: dict[str, Any] = {"connected": True, "models": count, "tier": str(self.options.get("tier") or "zen")}
+        # 探测过程本身会改写池状态，快照以探测后为准
         rotation = await self._pool.snapshot(self._keys(), group=self._group())
+        result: dict[str, Any] = {"connected": True, "models": count, "tier": str(self.options.get("tier") or "zen")}
         result["rotation"] = rotation
         result["cooling"] = rotation.get("cooling", 0)
         if count == 0:

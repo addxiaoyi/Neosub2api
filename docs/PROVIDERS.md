@@ -33,7 +33,7 @@
 | `trae` | Trae（Solo / Work） | Trae IDE 客户端协议（主仓 clean-room 重写） | OpenAI | `https://trae-api-cn.mchost.guru` | chat, models | 内置直连 | safe |
 
 > 2026-11-05 已更正（原单元格值逐字留档）：`muse` 一行原为「协议 `OpenAI`、能力位 `chat, models`」；`gptgrok` 一行原为「协议 `OpenAI`、能力位 `chat, models`」；`sub2api` 一行原为「协议 `OpenAI + Anthropic`、能力位 `chat, messages, models`」。三处同因与代码不符：
-> - `muse`：`apps/control/app/adapters/muse.py:63` 声明 `responses=True`、`:225-241` 实现；流式分支（`:230-236`）直接 `reply.iter_bytes()`，上游 `response.*` 事件**原样透传**，不重排不拼接；仍不声明 `messages`（理由见 §2 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) §8）。
+> - `muse`：`apps/control/app/adapters/muse.py:101-109` 声明 `responses=True`、`:344-360` 实现；流式分支（`:349-355`）直接 `reply.iter_bytes()`，上游 `response.*` 事件**原样透传**，不重排不拼接；仍不声明 `messages`（理由见 §2 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) §8）。
 > - `gptgrok`：`apps/control/app/adapters/gptgrok.py:400` 声明 `messages=True, responses=True`（`protocols` 见 `:401`），`:1323` / `:1353` 分别由 `_render_responses` / `_render_anthropic` 把 ChatGPT 帧**合成**为 Responses / Anthropic 帧——**流式也是合成，不是透传**。
 > - `sub2api`：`apps/control/app/adapters/sub2api.py:67` 声明 `responses=True`、`:181` 的 `responses()` 走 `_forward(..., stream=stream)`，路径表 `:23` → `/v1/responses`，流式为**透传**（由账号上游决定）。
 > 误判后果：客户端若按旧表以为 `muse` / `sub2api` 没有 `/v1/responses`、`gptgrok` 没有 `/v1/messages`，会绕开网关直连上游或降级到 chat 兼容层；`gptgrok` 的合成流被误记为不支持时，Anthropic / Responses 客户端会直接放弃该 provider。网关侧真实入口在 `apps/control/app/routers/v1.py:644`（messages）与 `:649`（responses）。核验口径与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 / §3 一致。
@@ -87,7 +87,7 @@
 
 三家（`opencode`、`trae`、`qoder`）当前**没有任何真实外呼证据**：测试全部基于假上游/桩响应，文档也各自列有未真机验证项。因此不按 `ready` 展示，等各自跑通一条真实链路后再回填 `ready`。
 
-> 2026-11-06 口径统一：`ready` 只表示「配置齐备、填 key 能调用」，**不等于真机跑通**；当前 14 家 provider 的 `ProviderSpec` 全部为 `needs_config`（`apps/control/app/adapters/codebuddy.py:129`、`opencode.py:47`、`qoder.py:459`、`trae.py:157` 等），没有任何一家按 `ready` 对外展示。上句只点名三家，是因为它们最容易被误当成「无卡点」；其余 11 家的卡点各自列在上表。此结论与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 同步，原先把三家标成 `ready` 的口径一律作废。
+> 2026-11-06 口径统一：`ready` 只表示「配置齐备、填 key 能调用」，**不等于真机跑通**；当前 14 家 provider 的 `ProviderSpec` 全部为 `needs_config`（`apps/control/app/adapters/codebuddy.py:129`、`opencode.py:83`、`qoder.py:459`、`trae.py:157` 等），没有任何一家按 `ready` 对外展示。上句只点名三家，是因为它们最容易被误当成「无卡点」；其余 11 家的卡点各自列在上表。此结论与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 同步，原先把三家标成 `ready` 的口径一律作废。
 
 > `codar` 与 `codar_sidecar` 是同一上游的两种接入方式，有意同时保留：前者在仓内直连 Codar 私有 API（自带 token 轮换与 401 续期），后者透传到独立 codar2api 进程（扫码/短信登录、签到留在 sidecar）。两者 provider id、默认地址、凭据来源都不同，可按需启停其一或同时启用；请求按 provider 显式选择，不做自动回退，因此不会互相抢占账号或 token。
 
@@ -108,9 +108,10 @@
 ## 2. muse — Muse2API
 
 - **上游**：czg86389-hub/muse2api（MIT，协议参考）；仓内自研，直连 Muse 官方 OpenAI 兼容入口。
-- **协议**：OpenAI Chat Completions + OpenAI Responses（responses 流式逐帧透传，`muse.py:225-241`）；**不支持** Anthropic `/v1/messages`，调用返回 501。（2026-11-05 已更正，原句逐字留档：「仅 OpenAI Chat Completions（无 `/v1/messages`，调用返回 501）。」——原句写死「仅」，会让客户端误判 muse 没有 `/v1/responses` 而绕行直连；真实能力位是 `muse.py:62-67` 的 `chat / models / responses`，外加 `images / videos / media` 三个转发端点（归属见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。）
+- **协议**：OpenAI Chat Completions + OpenAI Responses（responses 流式逐帧透传，`muse.py:344-360`）；**不支持** Anthropic `/v1/messages`，调用返回 501。（2026-11-05 已更正，原句逐字留档：「仅 OpenAI Chat Completions（无 `/v1/messages`，调用返回 501）。」——原句写死「仅」，会让客户端误判 muse 没有 `/v1/responses` 而绕行直连；真实能力位是 `muse.py:101-109` 的 `chat / models / responses`，外加 `images / videos / media` 三个转发端点（归属见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。）
 - **必填配置**：api_key 以 `Authorization: Bearer` 注入；Base URL 默认 `https://api.meta.ai`（公开资料推断，未用真实凭证验证；旧部署可指回 sidecar `http://127.0.0.1:7865`）。
 - **options**：`timeout`（默认 300）、`cookie`（`hatch_sess`）、`extra_keys` / `max_attempts`、`chat_path` / `models_path` / `health_path`。
+- **账号池**：已接 `CredentialPool`（`muse.py:121`）。多 key 时按 sticky → weighted → 轮转选号（`:249-311`）；401/403/429/402/408/5xx 换号并登记分档冷却（401/403 600s、402 900s、429 120s、408/5xx 60s，唯一或无替代账号不冷却，`:230-236`）；成功回写健康度与粘性，流式读完才算成功（`:48-78`）；`health()` 返回 `rotation` / `cooling`（`:404-438`）。
 - **已知限制**：网页账号（`hatch_sess`）只有浏览器 DOM / Noise-XX WebSocket 对话通道，没有 HTTP 对话端点，本仓不复刻该通道；默认官方入口与鉴权未用真实凭证验证（链路验证走假上游）。
 
 ## 3. grok-register — Grok Register
@@ -153,7 +154,8 @@
   - `max_attempts`：换 key 重试次数（默认 3，夹逼 1–10，且不超过 密钥数×2）；
   - `timeout`：上游超时秒数（默认 300）；
   - `proxy` / `extra_headers`：出口代理与自定义头。
-- **重试语义**：`400/413/422` 属请求级错误，立即返回不重试；`401/403/408/429/5xx` 换 key 重试，退避 0.5s→1s→2s（封顶 2s）。
+- **重试语义**：`400/413/422` 属请求级错误，立即返回不重试；`401/402/403/408/429/5xx` 换 key 重试并登记分档冷却，退避 0.5s→1s→2s（封顶 2s）。
+- **账号池**：已接 `CredentialPool` + `RotationStore`（`opencode.py:93-94`）。多 key 时按 组内粘性 → sticky → weighted → 轮转选号（`:188-274`）；401/403 600s、402 900s、429 120s、408/5xx 60s 分档冷却（档位表 `:24`，登记 `:169-175`），唯一或无替代账号不冷却；成功回写健康度与粘性，流式读完才算成功（`_TrackedReply` `:34-64`、包装 `:177-186`）；`health()` 返回 `rotation` / `cooling`（`:307-327`）。
 - **已知限制**：真实 Zen 凭证未验证过，`tier=go` 路径前缀与真实模型清单需实际账号确认。
 
 ## 7. sub2api — Sub2API
@@ -226,9 +228,11 @@
 
 实现：`apps/control/app/adapters/key_pool.py`。当前接入的是 `zcode` 与 `gptgrok`；其余多密钥适配器（`opencode`、`muse`、`codar`）仍走各自的重试循环，没有冷却表。
 
-> **（2026-11-06 已更正，原句逐字留档）** 上句原写「当前接入的是 `zcode` 与 `gptgrok`；其余多密钥适配器（`opencode`、`muse`、`codar`）仍走各自的重试循环，没有冷却表。」现状已变：`zcode` 改用 `CredentialPool`（`apps/control/app/adapters/zcode.py:98`），`opencode` 用 `CredentialPool` + `RotationStore`（`opencode.py:59-60`），`codar` 用 `Scheduler`（`codar.py:170-171`），`trae` 用 `CredentialPool`（`trae.py:171`）；仍用 `KeyPool` 的只剩 `gptgrok`（`gptgrok.py:417`），`muse` 仍未接池。下面 KeyPool 的语义对 `gptgrok` 继续成立；`zcode` / `opencode` / `codar` 的分档冷却、熔断、粘性、权重与四档策略见 [SCHEDULING.md](SCHEDULING.md)。
+> **（2026-11-06 已更正，原句逐字留档）** 上句原写「当前接入的是 `zcode` 与 `gptgrok`；其余多密钥适配器（`opencode`、`muse`、`codar`）仍走各自的重试循环，没有冷却表。」现状已变：`zcode` 改用 `CredentialPool`（`apps/control/app/adapters/zcode.py:98`），`opencode` 用 `CredentialPool` + `RotationStore`（`opencode.py:93-94`），`codar` 用 `Scheduler`（`codar.py:170-171`），`trae` 用 `CredentialPool`（`trae.py:171`）；仍用 `KeyPool` 的只剩 `gptgrok`（`gptgrok.py:417`），`muse` 仍未接池。下面 KeyPool 的语义对 `gptgrok` 继续成立；`zcode` / `opencode` / `codar` 的分档冷却、熔断、粘性、权重与四档策略见 [SCHEDULING.md](SCHEDULING.md)。
 > 误判后果：照旧句会以为 `opencode` / `codar` 没有冷却表而重复实现；排障时也会去 `key_pool.py` 找它们的冷却状态（实际在 `services/rotation.py`），并把「按状态码分档 + 连败升级/熔断」误当成 KeyPool 的单档 30 秒冷却。
 > **（2026-11-06 接线 trae 后补充）** `trae` 现在也接池（`CredentialPool`），可产生的 401/402/429/5xx 会登记冷却（402 档 900s、5xx 档 60s，`trae.py:202-207,924-958`）；`opencode` 仍只登记 401/403/429（`opencode.py:198`），其 402/408/5xx 未接线（5xx 仅解绑粘性，`opencode.py:125-132`）；`trae` 不产生 408。
+> **（2026-11-06 接线 opencode / muse 后补充）** 上一块的「`opencode` 仍只登记 401/403/429，其 402/408/5xx 未接线」与首块的「`muse` 仍未接池」均已过时：`muse` 已用 `CredentialPool`（`muse.py:121`），选号与失败登记见 `:249-311`，流式读完才回写健康度见 `:48-78`，`health()` 见 `:404-438`；`opencode` 的池分档已扩到 401/402/403/408/429/5xx（档位表 `opencode.py:24`），登记见 `:169-175`，选号见 `:188-274`，流式跟踪见 `:34-64,177-186`，`health()` 见 `:307-327`。两家都按「唯一或无替代账号不冷却」，档位与 `services/rotation.py:32-42` 对齐（401/403 600s、402 900s、429 120s、408/5xx 60s）；`gptgrok` 仍是 `key_pool.py` 的租约模型（`reserve/release/feedback`），与这两家的轮转池不是一套状态。
+> 误判后果：照旧句会以为 `muse` 没有冷却表、`opencode` 的 402/408/5xx 只换号不冷却，排障时会去 `key_pool.py` 找状态（实际在 `services/rotation.py`），也会漏掉「流式拿到 200 头不算成功、要读完才回写」这一条。
 
 - **状态按实例隔离**：每个适配器实例各有一份游标与冷却表，模块级不存可变状态，同进程多实例互不打乱顺序。
 - **轮换**：`pick()` 在可用密钥上按游标轮询并推进；`peek()` 只读不推进，供热身/健康探测用。
