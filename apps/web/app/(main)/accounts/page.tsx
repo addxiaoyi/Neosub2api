@@ -20,6 +20,7 @@ import {
   ExternalLink,
   FileUp,
   RefreshCw,
+  TriangleAlert,
 } from 'lucide-react';
 import {useProviders} from '@/lib/use-providers';
 import {providerLabel} from '@/lib/providers';
@@ -160,7 +161,7 @@ export default function AccountsPage() {
     () =>
       Object.values(opsMeta)
         .filter((p) => p.enabled && canImportManaged(p.managed))
-        .map((p) => ({id: p.id, name: p.label})),
+        .map((p) => ({id: p.id, name: p.label, readiness: p.readiness, requires: p.requires})),
     [opsMeta],
   );
   /**
@@ -1250,7 +1251,21 @@ export default function AccountsPage() {
                     : undefined
                 }
               >
-                {item.label}
+                <span>{item.label}</span>
+                {meta && (
+                  <>
+                    {/* readiness 与 enabled 各自独立展示：就绪不等于已启用，已启用也不等于可用 */}
+                    <span
+                      aria-hidden
+                      className={'size-1.5 shrink-0 rounded-full ' + (meta.readiness === 'ready' ? 'bg-emerald-500' : 'bg-amber-500')}
+                    />
+                    <span className="shrink-0">
+                      {t(meta.readiness === 'ready' ? 'accounts.readinessReady' : 'accounts.readinessNeedsConfig')}
+                    </span>
+                    <span className="opacity-40">·</span>
+                    <span className="shrink-0 opacity-70">{t(meta.enabled ? 'accounts.enabledOn' : 'accounts.enabledOff')}</span>
+                  </>
+                )}
               </Button>
             );
           })}
@@ -1508,6 +1523,17 @@ export default function AccountsPage() {
                   <div className="flex flex-wrap items-center gap-1.5">
                     {renderStatus(a)}
                     {renderModelLimit(a)}
+                    {/* 上游是否就绪只看 readiness，不拿 enabled / managed 反推 */}
+                    {opsMeta[a.provider ?? 'codebuddy']?.readiness === 'needs_config' && (
+                      <Badge
+                        variant="secondary"
+                        className="rounded-full bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
+                        title={providerTitle(a)}
+                      >
+                        <TriangleAlert className="mr-1 h-3 w-3" />
+                        {t('accounts.upstreamUnavailable')}
+                      </Badge>
+                    )}
                   </div>
                 </TableCell>
                 <TableCell>{renderCredits(a)}</TableCell>

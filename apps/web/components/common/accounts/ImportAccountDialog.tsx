@@ -5,7 +5,7 @@
  * 探测结果只提示不拦截——很多上游要额外配置，一次探测失败不该拒绝入库。
  */
 import {useEffect, useMemo, useState} from 'react';
-import {Loader2} from 'lucide-react';
+import {Loader2, TriangleAlert} from 'lucide-react';
 import {Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle} from '@/components/animate-ui/radix/dialog';
 import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
@@ -49,8 +49,8 @@ export function ImportAccountDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 可导入的服务商候选（由页面按 managed 过滤后传入） */
-  providers: {id: string; name: string}[];
+  /** 可导入的服务商候选（由页面按 managed 过滤后传入；readiness 用于顶部警示） */
+  providers: {id: string; name: string; readiness: 'ready' | 'needs_config'; requires: string[]}[];
   defaultProvider?: string;
   onSaved?: () => void;
 }) {
@@ -77,6 +77,8 @@ export function ImportAccountDialog({
   }, [open, defaultProvider, providers]);
 
   const providerName = useMemo(() => providers.find((p) => p.id === provider)?.name ?? provider, [providers, provider]);
+  const providerMeta = useMemo(() => providers.find((p) => p.id === provider), [providers, provider]);
+  const requiresText = providerMeta?.requires.join(t('common.listSeparator')) ?? '';
   const buildBody = (): AccountImportInput => ({
     provider,
     label: label.trim(),
@@ -124,6 +126,13 @@ export function ImportAccountDialog({
           <DialogDescription>{t('accounts.importDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          {/* 未就绪不封死入口（前置可能只是运行时未起），但必须说清保存后也不会生效 */}
+          {providerMeta?.readiness === 'needs_config' && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t('accounts.importNotReadyWarning', {provider: providerName, requires: requiresText})}</span>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>{t('accounts.importProvider')}</Label>
             <Select value={provider} onValueChange={setProvider}>

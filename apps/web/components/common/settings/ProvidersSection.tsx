@@ -169,7 +169,16 @@ export function ProvidersSection() {
       setDrafts((prev) => ({...prev, [updated.id]: updated.base_url}));
       setOptDrafts((prev) => ({...prev, [updated.id]: {...updated.options}}));
       setKeyDrafts((prev) => ({...prev, [updated.id]: ''}));
-      notify.ok(t('providers.saved'), t('providers.savedDetail', {name: updated.label}));
+      // 启用不校验前置（允许先启用后配），但必须把「仍不可用」说出来，不能静默成功
+      if (body.enabled === true && updated.readiness === 'needs_config') {
+        notify.warn(
+          t('providers.enabledButUnavailable', {
+            requires: updated.requires.join(t('common.listSeparator')),
+          }),
+        );
+      } else {
+        notify.ok(t('providers.saved'), t('providers.savedDetail', {name: updated.label}));
+      }
     } catch (e) {
       notify.err(errText(e));
     } finally {
@@ -473,6 +482,18 @@ export function ProvidersSection() {
                         {t(p.readiness === 'needs_config' ? 'providers.needsConfig' : 'providers.ready')}
                       </Badge>
                     </div>
+                    {/* 启用状态与就绪状态分开看：已启用但缺前置，卡片上直接标不可用 */}
+                    {p.enabled && p.readiness === 'needs_config' && (
+                      <div className="mt-1">
+                        <Badge
+                          variant="secondary"
+                          className="rounded-full bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
+                          title={p.requires.join('；')}
+                        >
+                          {t('providers.enabledUnavailable')}
+                        </Badge>
+                      </div>
+                    )}
                     {(() => {
                       const entry = healthOf(p);
                       const status = entry?.status ?? null;
