@@ -23,7 +23,7 @@ from ..api_utils import exc_summary
 from ..config import Settings
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
-from .key_pool import COOLDOWN_STATUSES, DEFAULT_COOLDOWN_SEC, KeyPool
+from .key_pool import COOLDOWN_STATUSES, DEFAULT_COOLDOWN_SEC, KeyLease, KeyPool
 from .stream_util import (
     DONE, Reply, iter_json_lines, openai_chunk, openai_completion,
 )
@@ -706,9 +706,10 @@ class GptGrokAdapter(ProviderAdapter):
         attempts = self._attempts(len(keys))
         last: ProviderError | None = None
         for attempt in range(attempts):
-            token = await self._keys_pool.pick(keys)
-            if token is None:
+            lease = await self._keys_pool.reserve(keys)
+            if lease is None:
                 raise self._all_keys_error(channel, keys, last)
+            token = lease.key
             headers = self._chatgpt_headers(token, stream=True) if channel == "chatgpt" else self._grok_headers(token)
             client = UnifiedApiClient(
                 self._base(channel),
@@ -720,29 +721,38 @@ class GptGrokAdapter(ProviderAdapter):
                 reply = await client.forward(path, body, stream=True)
             except ProviderError as exc:
                 last = exc
+                await self._keys_pool.release(lease)
                 if exc.status_code in REQUEST_ERRORS:
                     raise
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             except httpx.HTTPError as exc:
                 last = ProviderError(502, f"{channel} 上游连接失败：{exc_summary(exc)}")
+                await self._keys_pool.release(lease)
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
+            except BaseException:
+                await self._keys_pool.release(lease)
+                raise
             if reply.status_code < 400:
-                return reply, token
+                return reply, lease
             err = self._classify(reply.status_code, await self._read_error(reply), channel)
             if reply.status_code in (401, 403):
                 logger.warning("GPT/Grok %s 上游 %s：%s", channel, reply.status_code, err.message)
             last = err
             if not getattr(err, "retryable", err.status_code in RETRYABLE):
+                await self._keys_pool.release(lease)
                 raise err
             # 凭证级失败（401/403/429）冷却该 key；5xx 只换 key 不退避冷却
             if err.status_code in COOLDOWN_STATUSES:
-                others = await self._keys_pool.available([key for key in keys if key != token])
+                others = await self._keys_pool.uncooled([key for key in keys if key != token])
                 if not others:
+                    await self._keys_pool.release(lease)
                     # 冷却唯一可用的 key 会让后续请求全部变成冷却错误，直接明确失败
                     raise self._all_keys_error(channel, keys, err)
-                await self._keys_pool.cool(token, self._cooldown_sec())
+                await self._keys_pool.feedback(lease, ok=False, cooldown_seconds=self._cooldown_sec())
+            else:
+                await self._keys_pool.release(lease)
             await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
         if last is None:
             raise ProviderError(502, f"{channel} 上游不可用")
@@ -829,10 +839,11 @@ class GptGrokAdapter(ProviderAdapter):
     def _deltas(self, raw: AsyncIterator[bytes], channel: str):
         return self._chatgpt_deltas(raw) if channel == "chatgpt" else self._grok_deltas(raw)
 
-    async def _stream(self, raw: AsyncIterator[bytes], channel: str, model: str) -> AsyncIterator[bytes]:
+    async def _stream(
+        self, raw: AsyncIterator[bytes], channel: str, model: str, lease: KeyLease
+    ) -> AsyncIterator[bytes]:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:20]}"
         created = int(time.time())
-        yield openai_chunk(completion_id, model, created, {"role": "assistant"})
         scanner = _ToolCallScanner()
         tool_index = 0
         finish_reason = "stop"
@@ -853,6 +864,7 @@ class GptGrokAdapter(ProviderAdapter):
             return chunks
 
         try:
+            yield openai_chunk(completion_id, model, created, {"role": "assistant"})
             async for delta, kind in self._deltas(raw, channel):
                 if kind == "thinking":
                     yield openai_chunk(completion_id, model, created, {"reasoning_content": delta})
@@ -864,10 +876,13 @@ class GptGrokAdapter(ProviderAdapter):
         finally:
             if hasattr(raw, "aclose"):
                 await raw.aclose()
+            await self._keys_pool.release(lease)
         yield openai_chunk(completion_id, model, created, {}, finish_reason=finish_reason)
         yield DONE
 
-    async def _collect(self, raw: AsyncIterator[bytes], channel: str, model: str) -> dict[str, Any]:
+    async def _collect(
+        self, raw: AsyncIterator[bytes], channel: str, model: str, lease: KeyLease
+    ) -> dict[str, Any]:
         content: list[str] = []
         reasoning: list[str] = []
         calls: list[dict[str, Any]] = []
@@ -884,6 +899,7 @@ class GptGrokAdapter(ProviderAdapter):
         finally:
             if hasattr(raw, "aclose"):
                 await raw.aclose()
+            await self._keys_pool.release(lease)
         message: dict[str, Any] = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)
@@ -917,10 +933,14 @@ class GptGrokAdapter(ProviderAdapter):
             if channel == "chatgpt"
             else self._grok_body(payload, model, tools_text)
         )
-        reply, _ = await self._open(channel, body)
+        reply, lease = await self._open(channel, body)
         if stream:
-            return Reply(200, stream=self._stream(reply.iter_bytes(), channel, model), content_type="text/event-stream")
-        data = await self._collect(reply.iter_bytes(), channel, model)
+            return Reply(
+                200,
+                stream=self._stream(reply.iter_bytes(), channel, model, lease),
+                content_type="text/event-stream",
+            )
+        data = await self._collect(reply.iter_bytes(), channel, model, lease)
         return Reply(200, body=json.dumps(data, ensure_ascii=False).encode())
 
     # ---------- Responses / Anthropic 本地协议转换 ----------
