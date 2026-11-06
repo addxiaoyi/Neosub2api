@@ -22,6 +22,7 @@ import {useT} from '@/lib/i18n/provider';
 import type {
   ProviderCredential,
   ProviderCredentialInput,
+  ProviderCredentialStateSupport,
   ProviderHealth,
   ProviderInfo,
   ProviderTokenCheck,
@@ -62,6 +63,14 @@ const HEALTH_LABEL_KEY: Record<string, string> = {
   ok: 'providers.healthOk',
   failed: 'providers.healthFailed',
   unsupported: 'providers.healthUnsupported',
+};
+
+/** 判不出时能给用户的下一步动作；后端 support 决定走哪一条。 */
+const CREDENTIAL_NEXT_KEY: Record<ProviderCredentialStateSupport, string> = {
+  auth_probe: 'providers.credentialNoteNextGeneric',
+  token_expiry: 'providers.credentialNoteNextGeneric',
+  request_log: 'providers.credentialNoteNextRequestLog',
+  unavailable: 'providers.credentialNoteNextUnavailable',
 };
 
 /** ok 用主色，failed 才用告警色，unsupported/未检测保持中性，避免把「不支持」画成故障。 */
@@ -575,6 +584,18 @@ export function ProvidersSection() {
                         {t(p.readiness === 'needs_config' ? 'providers.needsConfig' : 'providers.ready')}
                       </Badge>
                     </div>
+                    {/* 判不出失效时别硬判：徽标写「未知」，tooltip 带上后端给的判定说明 */}
+                    {p.credential_state === 'unknown' && (
+                      <div className="mt-1">
+                        <Badge
+                          variant="secondary"
+                          className="rounded-full text-[10px]"
+                          title={p.credential_state_note || p.credential_state_reason}
+                        >
+                          {t('providers.credentialUnknown')}
+                        </Badge>
+                      </div>
+                    )}
                     {/* 凭据已被上游明确拒掉：不是「还没配」，给出直达重新粘贴的入口 */}
                     {p.credential_state === 'invalidated' && (
                       <div className="mt-1 flex flex-wrap items-center gap-1">
@@ -764,6 +785,22 @@ export function ProvidersSection() {
                                 {tokenBadge(`draft:${p.id}`)}
                               </>
                             )}
+                          </div>
+                        )}
+                        {/* 为什么只能给「未知」、用户能做什么：后端 note 是唯一说明，原样展示 */}
+                        {(p.credential_state === 'unknown' || p.credential_state_note !== '') && (
+                          <div className="flex items-start gap-2 rounded-xl bg-muted/60 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <div className="flex min-w-0 flex-col gap-0.5">
+                              <span className="whitespace-normal">
+                                <span className="text-foreground/80">{t('providers.credentialNoteWhy')}</span>
+                                {p.credential_state_note || p.credential_state_reason}
+                              </span>
+                              <span className="whitespace-normal">
+                                <span className="text-foreground/80">{t('providers.credentialNoteNext')}</span>
+                                {t(CREDENTIAL_NEXT_KEY[p.credential_state_support])}
+                              </span>
+                            </div>
                           </div>
                         )}
                         {p.id === 'sub2api' && (
