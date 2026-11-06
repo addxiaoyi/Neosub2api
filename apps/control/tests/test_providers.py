@@ -153,6 +153,27 @@ def test_patch_enable_disable(admin: httpx.Client) -> None:
         admin.patch("/api/providers/opencode", json={"enabled": was_opencode})
 
 
+def test_patch_enable_reports_readiness_without_blocking(admin: httpx.Client) -> None:
+    """允许先启用后配前置：PATCH 仍 200，但响应必须如实带 readiness / requires。"""
+    before = _by_id(admin.get("/api/providers").json(), "codebuddy")
+    was_enabled = bool(before.get("enabled"))
+
+    try:
+        r = admin.patch("/api/providers/codebuddy", json={"enabled": True})
+        assert r.status_code == 200, f"patch enable: {r.status_code} {r.text}"
+        body = r.json()
+        assert body["enabled"] is True
+        # 启用动作不改变就绪判据，也不能把缺前置说成已就绪
+        assert body["readiness"] == "needs_config"
+        assert body["requires"], "needs_config 必须在响应里列出缺项"
+
+        listed = _by_id(admin.get("/api/providers").json(), "codebuddy")
+        assert listed["readiness"] == body["readiness"]
+        assert listed["requires"] == body["requires"]
+    finally:
+        admin.patch("/api/providers/codebuddy", json={"enabled": was_enabled})
+
+
 def test_patch_base_url_takes_effect(
     admin: httpx.Client, fake_base: str, restore_codebuddy_base_url: None
 ) -> None:

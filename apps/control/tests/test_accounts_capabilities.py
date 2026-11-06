@@ -45,6 +45,18 @@ def test_codebuddy_is_the_only_unified_account_provider(admin):
         assert cb["ops"][op] is True, f"codebuddy 应支持 {op}"
 
 
+def test_capabilities_expose_readiness_and_requires(admin):
+    """前端判「上游是否可用」只看 readiness；caps 必须逐家给出，且 ready 时缺项为空。"""
+    rows = _rows(admin)
+    for pid, row in rows.items():
+        assert row["readiness"] in {"ready", "needs_config"}, pid
+        assert isinstance(row["requires"], list), pid
+        if row["readiness"] == "ready":
+            assert row["requires"] == [], f"{pid} 标 ready 却列了缺项"
+        else:
+            assert row["requires"], f"{pid} 标 needs_config 却没列缺项"
+
+
 def test_sidecar_does_not_advertise_unimplemented_account_ops(admin):
     rows = _rows(admin)
     ts = rows["trae_sidecar"]
