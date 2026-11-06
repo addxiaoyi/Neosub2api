@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -46,6 +47,21 @@ FINISH_REASON = {
     "refusal": "content_filter",
 }
 
+logger = logging.getLogger("unified.zcode")
+
+
+def _official_system_ok(raw: Any) -> bool:
+    """只判「有没有可用正文」：字符串非空白，或文本块数组里至少有一段非空 text。"""
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                return True
+            if isinstance(item, dict) and str(item.get("text") or "").strip():
+                return True
+    return False
+
 
 class ZCodeAdapter(ProviderAdapter):
     """ZCode 上游的 OpenAI / Anthropic 双协议客户端。
@@ -69,7 +85,8 @@ class ZCodeAdapter(ProviderAdapter):
         protocols=("openai.chat.completions", "anthropic.messages"),
         readiness="needs_config",
         requires=(
-            "official_system（官方 system 原文，约 10701 字符；缺失时上游回 3012）",
+            "official_system（须用户自备：官方 system 原文约 10701 字符，本仓不内置；"
+            "缺失时上游回 3012，导入后发一条 chat 不再回 3012 即有效）",
         ),
     )
 
@@ -107,6 +124,28 @@ class ZCodeAdapter(ProviderAdapter):
     def _attempts(self, key_count: int) -> int:
         configured = int(self.options.get("max_attempts") or 3)
         return max(1, min(configured, 10, max(key_count, 1) * 2))
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        options = options or {}
+        missing: list[str] = []
+        if not has_credential:
+            missing.append("api_key（ZCode 账号 JWT；本仓不内置）")
+        if credential_problem:
+            missing.append(credential_problem)
+        official = options.get("official_system") or options.get("official_system_prompt")
+        if not _official_system_ok(official):
+            missing.append("official_system（官方 system 原文缺失或为空；缺失时上游回 3012）")
+        if missing:
+            return "needs_config", tuple(missing)
+        return "ready", ()
 
     @staticmethod
     def _jwt_sub(token: str) -> str:
@@ -172,8 +211,7 @@ class ZCodeAdapter(ProviderAdapter):
 
     # ---------- 错误分类 ----------
 
-    @staticmethod
-    def _classify(status: int, text: str) -> ProviderError:
+    def _classify(self, status: int, text: str) -> ProviderError:
         code: int | None = None
         try:
             obj = json.loads(text)
@@ -186,11 +224,18 @@ class ZCodeAdapter(ProviderAdapter):
                     code = value
                     break
         if code == 3012:
-            err = ProviderError(
-                403,
-                "ZCode 3012 风控：上游校验 system 指纹未通过。"
-                "请在服务商页 options.official_system 填入 ZCode 客户端官方 system 原文（本仓不内置）",
-            )
+            official = self._official_system()
+            if official:
+                message = (
+                    "ZCode 3012 风控：已配置 official_system 但上游仍回 3012（system 指纹不匹配），"
+                    "原文可能不是当前客户端版本，请核对后重新导入 options.official_system（本仓不内置）"
+                )
+            else:
+                message = (
+                    "ZCode 3012 风控：缺 official_system（options.official_system 未配置），上游回 3012。"
+                    "请导入 ZCode 客户端官方 system 原文（约 10701 字符，本仓不内置）"
+                )
+            err = ProviderError(403, message)
             err.retryable = False  # type: ignore[attr-defined]
             return err.with_vendor_detail(text)
         if code in (1005, 3009):
@@ -254,6 +299,8 @@ class ZCodeAdapter(ProviderAdapter):
             if reply.status_code < 400:
                 return reply
             err = self._classify(reply.status_code, await self._read_error(reply))
+            if err.status_code in (401, 403):
+                logger.warning("ZCode 上游 %s：%s", reply.status_code, err.message)
             last = err
             if not getattr(err, "retryable", err.status_code in RETRYABLE):
                 raise err

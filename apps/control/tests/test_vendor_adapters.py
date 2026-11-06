@@ -144,6 +144,33 @@ async def test_zcode_error_codes_and_key_rotation(tmp_path, fake_base):
     assert "authorization=Bearer tok-good" in reply.body.decode()
 
 
+async def test_zcode_3012_names_missing_official_system(tmp_path, fake_base, caplog):
+    """缺 official_system 时 3012 必须自曝缺项，并留下可检索日志。"""
+    caplog.set_level("WARNING")
+    adapter = zcode.build(_settings(tmp_path), fake_base)
+    adapter.configure(api_key="tok-z", options={"max_attempts": 1})
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion({"model": "risk-3012", "messages": USERS}, stream=False)
+    err = caught.value
+    assert err.status_code == 403
+    assert "official_system" in err.message and "3012" in err.message
+    assert "未配置" in err.message
+    assert err.upstream_code == "3012"
+    assert any("official_system" in record.message for record in caplog.records)
+
+
+async def test_zcode_3012_with_official_system_reports_mismatch(tmp_path, fake_base):
+    """已导入仍回 3012：说明原文不匹配，而不是重复说「缺」。"""
+    adapter = zcode.build(_settings(tmp_path), fake_base)
+    adapter.configure(api_key="tok-z", options={
+        "max_attempts": 1, "official_system": "OFFICIAL-SYSTEM-TEXT",
+    })
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion({"model": "risk-3012", "messages": USERS}, stream=False)
+    assert caught.value.status_code == 403
+    assert "已配置" in caught.value.message and "3012" in caught.value.message
+
+
 async def test_zcode_models_and_health(tmp_path, fake_base):
     adapter = zcode.build(_settings(tmp_path), fake_base)
     adapter.configure(api_key="tok-z", options={"models": ["GLM-5.3-Air"]})
@@ -309,6 +336,36 @@ async def test_gptgrok_error_passthrough_and_models(tmp_path, fake_base):
     grok_only = gptgrok.build(_settings(tmp_path), fake_base)
     grok_only.configure(api_key="tok-g", options={"channel": "grok"})
     assert all(item["id"].startswith("grok") for item in await grok_only.list_models())
+
+
+async def test_gptgrok_403_names_missing_sentinel(tmp_path, fake_base, caplog):
+    """缺 sentinel_token 的 403 必须点名缺项，并留下可检索日志。"""
+    caplog.set_level("WARNING")
+    adapter = gptgrok.build(_settings(tmp_path), fake_base)
+    adapter.configure(api_key="tok-g", options={"max_attempts": 1})
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion({"model": "gpt-5-err-403", "messages": USERS}, stream=False)
+    err = caught.value
+    assert err.status_code == 403
+    assert "sentinel_token" in err.message and "403" in err.message
+    assert "未配置" in err.message
+    assert err.upstream_code == "403"
+    assert any("sentinel_token" in record.message for record in caplog.records)
+
+
+async def test_gptgrok_403_with_sentinel_configured_distinguishes_expiry(tmp_path, fake_base):
+    """已导入仍 403：提示可能过期/会话不匹配，同时确认 token 真的进了请求头。"""
+    adapter = gptgrok.build(_settings(tmp_path), fake_base)
+    adapter.configure(api_key="tok-g", options={
+        "max_attempts": 1, "sentinel_token": "old-sentinel", "fingerprint": True,
+    })
+    headers = adapter._chatgpt_headers("tok-g", stream=True)
+    assert headers["openai-sentinel-chat-requirements-token"] == "old-sentinel"
+
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion({"model": "gpt-5-err-403", "messages": USERS}, stream=False)
+    assert caught.value.status_code == 403
+    assert "已配置" in caught.value.message and "过期" in caught.value.message
 
 
 async def test_gptgrok_health(tmp_path, fake_base):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -46,6 +47,8 @@ FINISHED = {"finished_successfully", "finished_details", "finished"}
 # 两家上游都没有原生 tools 字段，走提示词注入（行为对齐上游 gptGrok2api 的做法，
 # 格式为本仓自定：行首 [tool_call] + 单行 JSON，避免与上游实现产生表达纠缠）
 TOOL_MARK = "[tool_call] "
+
+logger = logging.getLogger("unified.gptgrok")
 
 
 def _stable_id(token: str, salt: str) -> str:
@@ -401,7 +404,9 @@ class GptGrokAdapter(ProviderAdapter):
         protocols=("openai.chat.completions", "openai.responses", "anthropic.messages"),
         readiness="needs_config",
         requires=(
-            "sentinel_token（ChatGPT sentinel token，本地无法生成；缺失时上游可能 403）",
+            "sentinel_token（须用户自备：本地无法生成，由官方 "
+            "/backend-api/sentinel/chat-requirements 换取后导入 options.sentinel_token；"
+            "缺失时上游可能 403，导入后发一条 gpt-* 请求不再 403 即有效）",
         ),
     )
 
@@ -455,6 +460,32 @@ class GptGrokAdapter(ProviderAdapter):
     def _attempts(self, key_count: int) -> int:
         configured = int(self.options.get("max_attempts") or 3)
         return max(1, min(configured, 10, max(key_count, 1) * 2))
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        options = options or {}
+        channel = str(options.get("channel") or "").strip().lower()
+        missing: list[str] = []
+        if not has_credential:
+            missing.append("api_key（ChatGPT / Grok 会话凭证；服务商页 api_key 或 options.extra_keys）")
+        if credential_problem:
+            missing.append(credential_problem)
+        # Grok 通道不走 ChatGPT sentinel：显式 channel=grok 时只看凭证
+        if channel != "grok" and not str(options.get("sentinel_token") or "").strip():
+            missing.append(
+                "sentinel_token（ChatGPT 通道必需：由 /backend-api/sentinel/chat-requirements "
+                "换取后导入 options.sentinel_token；缺失时上游可能 403；channel=grok 时不需要）"
+            )
+        if missing:
+            return "needs_config", tuple(missing)
+        return "ready", ()
 
     def _proxy(self) -> str:
         return str(self.options.get("proxy") or "")
@@ -624,12 +655,23 @@ class GptGrokAdapter(ProviderAdapter):
 
     # ---------- 错误分类 ----------
 
-    @staticmethod
-    def _classify(status: int, text: str, channel: str) -> ProviderError:
+    def _classify(self, status: int, text: str, channel: str) -> ProviderError:
         if status == 401:
             err = ProviderError(401, f"{channel} 凭证失效或未登录：{text[:160]}")
         elif status == 403:
-            err = ProviderError(403, f"{channel} 拒绝访问（可能触发风控/需要 sentinel）：{text[:160]}")
+            sentinel = str(self.options.get("sentinel_token") or "").strip()
+            if sentinel:
+                err = ProviderError(
+                    403,
+                    f"{channel} 403：已配置 sentinel_token 但上游仍拒绝（可能已过期或与会话不匹配），"
+                    f"请重新换取后导入 options.sentinel_token：{text[:160]}",
+                )
+            else:
+                err = ProviderError(
+                    403,
+                    f"{channel} 403：缺 sentinel_token（options.sentinel_token 未配置），"
+                    f"上游可能因 sentinel 校验拒绝访问；请导入后重试：{text[:160]}",
+                )
         elif status == 429:
             err = ProviderError(429, f"{channel} 上游限流：{text[:160]}")
         elif status == 404:
@@ -688,6 +730,8 @@ class GptGrokAdapter(ProviderAdapter):
             if reply.status_code < 400:
                 return reply, token
             err = self._classify(reply.status_code, await self._read_error(reply), channel)
+            if reply.status_code in (401, 403):
+                logger.warning("GPT/Grok %s 上游 %s：%s", channel, reply.status_code, err.message)
             last = err
             if not getattr(err, "retryable", err.status_code in RETRYABLE):
                 raise err
