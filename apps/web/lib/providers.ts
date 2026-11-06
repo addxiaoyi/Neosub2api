@@ -30,6 +30,15 @@ export type ProviderStatus = 'implemented' | 'stub' | 'sidecar';
 /** 就绪状态：ready = 填好密钥/地址即可调用；needs_config = 还需补齐 requires 里列出的项。 */
 export type ProviderReadiness = 'ready' | 'needs_config';
 
+/** 本地 JWT 判定结果（不验签、不发起外呼，明文不回显）。 */
+export interface ProviderTokenCheck {
+  state: 'valid' | 'expired' | 'invalid' | 'missing';
+  expires_at: number | null;
+  expires_in: number | null;
+  reason: string;
+  next_step: string;
+}
+
 /** 统一凭据库里的一条记录（secret 只回掩码，明文永不下发）。 */
 export interface ProviderCredential {
   id: number;
@@ -111,6 +120,17 @@ export interface ProviderInfo {
   readiness: ProviderReadiness;
   /** needs_config 时仍缺的项，给人看的短句 */
   requires: string[];
+  /** sidecar 存活探测结果；非 sidecar 家没有这个字段 */
+  sidecar_status?: {
+    state: 'alive' | 'auth' | 'timeout' | 'refused' | 'http_error';
+    port: number;
+    base_url: string;
+    path: string;
+    http_status: number | null;
+    latency_ms: number | null;
+    checked_at: number;
+    message: string;
+  };
   base_url_source: string;
   /** 上游默认地址是否 loopback，决定本地地址能不能保存 */
   allows_local_base_url: boolean;

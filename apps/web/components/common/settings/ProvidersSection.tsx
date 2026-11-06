@@ -1,16 +1,17 @@
 'use client';
 
 import {Fragment, useCallback, useEffect, useState} from 'react';
+import Link from 'next/link';
 import {
   AlertCircle,
   ChevronDown,
   ChevronRight,
-  Info,
   Pencil,
   Plus,
   PlugZap,
   RefreshCw,
   Save,
+  ShieldCheck,
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
@@ -23,12 +24,14 @@ import type {
   ProviderCredentialInput,
   ProviderHealth,
   ProviderInfo,
+  ProviderTokenCheck,
 } from '@/lib/providers';
 import {formatDateTime} from '@/lib/utils';
 import {CAPABILITY_LABELS, exposedOptionFields, STATUS_LABEL_KEY} from '@/lib/provider-schema';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {GrokRegisterTasks} from '@/components/common/settings/GrokRegisterTasks';
+import {ProviderChecklist} from '@/components/common/settings/ProviderChecklist';
 import {QoderSessionsPanel} from '@/components/common/settings/QoderSessionsPanel';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
@@ -106,6 +109,7 @@ export function ProvidersSection() {
   const [addDrafts, setAddDrafts] = useState<Record<string, CredDraft>>({});
   const [editing, setEditing] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<CredDraft | null>(null);
+  const [tokenChecks, setTokenChecks] = useState<Record<string, ProviderTokenCheck>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -369,6 +373,48 @@ export function ProvidersSection() {
     setEditDraft(draftOfCred(c));
   }
 
+  const TOKEN_STATE_LABEL: Record<ProviderTokenCheck['state'], string> = {
+    valid: 'providers.codarTokenValid',
+    expired: 'providers.codarTokenExpired',
+    invalid: 'providers.codarTokenInvalid',
+    missing: 'providers.codarTokenMissing',
+  };
+
+  function tokenStateText(result: ProviderTokenCheck): string {
+    const head = t(TOKEN_STATE_LABEL[result.state]);
+    const detail = result.next_step || result.reason;
+    return detail ? `${head}：${detail}` : head;
+  }
+
+  async function checkToken(p: ProviderInfo, opts: {credentialId?: number; token?: string}) {
+    const key = opts.credentialId ? `cred:${opts.credentialId}` : `draft:${p.id}`;
+    setBusy(key);
+    try {
+      const result = await credentialApi.validate(p.id, {
+        credential_id: opts.credentialId,
+        token: opts.token,
+      });
+      setTokenChecks((prev) => ({...prev, [key]: result}));
+      if (result.state === 'valid') notify.ok(tokenStateText(result));
+      else notify.err(tokenStateText(result));
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function tokenBadge(key: string) {
+    const result = tokenChecks[key];
+    if (!result) return null;
+    const variant = result.state === 'valid' ? 'default' : result.state === 'missing' ? 'secondary' : 'destructive';
+    return (
+      <Badge variant={variant} className="rounded-full text-[10px]" title={result.reason || result.next_step}>
+        {t(TOKEN_STATE_LABEL[result.state])}
+      </Badge>
+    );
+  }
+
   function credFields(p: ProviderInfo, draft: CredDraft, onChange: (next: CredDraft) => void, masked: string) {
     return (
       <>
@@ -454,7 +500,7 @@ export function ProvidersSection() {
           <TableBody>
             {items.map((p) => (
               <Fragment key={p.id}>
-                <TableRow className="border-b border-border/40">
+                <TableRow id={'provider-' + p.id} className="border-b border-border/40">
                   <TableCell className="pl-4">
                     <div className="flex items-center gap-1">
                       <Button
@@ -482,6 +528,18 @@ export function ProvidersSection() {
                         {t(p.readiness === 'needs_config' ? 'providers.needsConfig' : 'providers.ready')}
                       </Badge>
                     </div>
+                    {/* sidecar 存活是独立事实：在线时单独标一句，异常时由 requires 行给出原因 */}
+                    {p.sidecar_status?.state === 'alive' && (
+                      <div className="mt-1">
+                        <Badge
+                          variant="secondary"
+                          className="rounded-full bg-emerald-500/10 text-[10px] text-emerald-700 dark:text-emerald-400"
+                          title={p.sidecar_status.message}
+                        >
+                          {p.sidecar_status.message}
+                        </Badge>
+                      </div>
+                    )}
                     {/* 启用状态与就绪状态分开看：已启用但缺前置，卡片上直接标不可用 */}
                     {p.enabled && p.readiness === 'needs_config' && (
                       <div className="mt-1">
@@ -548,19 +606,21 @@ export function ProvidersSection() {
                     />
                   </TableCell>
                 </TableRow>
-                {p.readiness === 'needs_config' && p.requires.length > 0 && (
-                  <TableRow className="border-b border-border/40 bg-background/40 hover:bg-transparent">
-                    <TableCell colSpan={5} className="px-6 py-2">
-                      <div className="flex items-start gap-2 rounded-xl bg-muted/60 px-3 py-2 text-[11px] leading-4 text-muted-foreground">
-                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span className="whitespace-normal">
-                          <span className="text-foreground">{t('providers.requiresPrefix')}</span>
-                          {p.requires.join('；')}
-                        </span>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                )}
+                <TableRow className="border-b border-border/40 bg-background/40 hover:bg-transparent">
+                  <TableCell colSpan={5} className="px-6 py-2">
+                    <ProviderChecklist
+                      provider={p}
+                      healthStatus={healthOf(p)?.status ?? null}
+                      healthError={healthOf(p)?.error ?? null}
+                      canEdit={isAdmin}
+                      onEnable={() => patch(p, {enabled: true})}
+                      onRunHealth={runHealth}
+                      onPick={() => {
+                        document.getElementById('provider-' + p.id)?.scrollIntoView({behavior: 'smooth', block: 'center'});
+                      }}
+                    />
+                  </TableCell>
+                </TableRow>
                 {p.base_url_warning && (
                   <TableRow className="border-b border-border/40 bg-background/40 hover:bg-transparent">
                     <TableCell colSpan={5} className="px-6 py-2">
@@ -619,37 +679,75 @@ export function ProvidersSection() {
                             {p.has_api_key && (
                               <span className="text-[10px] text-muted-foreground">{t('providers.apiKeySet')}</span>
                             )}
+                            {p.id === 'codar' && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 rounded-md"
+                                  title={t('providers.codarCheckToken')}
+                                  disabled={!isAdmin || busy === `draft:${p.id}` || !keyDrafts[p.id]?.trim()}
+                                  onClick={() => checkToken(p, {token: keyDrafts[p.id]})}
+                                >
+                                  <ShieldCheck className="h-3.5 w-3.5" />
+                                </Button>
+                                {tokenBadge(`draft:${p.id}`)}
+                              </>
+                            )}
+                          </div>
+                        )}
+                        {p.id === 'sub2api' && (
+                          <div className="flex items-center gap-2">
+                            <span className="w-28 text-[11px] text-muted-foreground">{t('providers.sub2apiQuota')}</span>
+                            <Button asChild size="sm" variant="outline" className="h-7 rounded-full text-[11px]">
+                              <Link href="/quota">{t('providers.sub2apiOpenQuota')}</Link>
+                            </Button>
                           </div>
                         )}
                         {fieldsOf(p).map((field) => (
-                          <div key={field.key} className="flex items-center gap-2">
-                            <span className="w-28 text-[11px] text-muted-foreground">{t(field.label)}</span>
-                            {field.type === 'switch' ? (
-                              <Switch
-                                checked={Boolean(optionValue(p, field.key))}
-                                disabled={!isAdmin || busy === p.id}
-                                onCheckedChange={(checked) => setOption(p, field.key, checked)}
-                              />
-                            ) : field.type === 'json' ? (
-                              <Textarea
-                                rows={2}
-                                value={
-                                  typeof optionValue(p, field.key) === 'string'
-                                    ? String(optionValue(p, field.key))
-                                    : JSON.stringify(optionValue(p, field.key) ?? {})
-                                }
-                                onChange={(e) => setOption(p, field.key, e.target.value)}
-                                disabled={!isAdmin || busy === p.id}
-                                placeholder='{"User-Agent": "..."}'
-                                className="w-[380px] bg-background font-mono text-[11px]"
-                              />
-                            ) : (
-                              <Input
-                                value={String(optionValue(p, field.key) ?? '')}
-                                onChange={(e) => setOption(p, field.key, e.target.value)}
-                                disabled={!isAdmin || busy === p.id}
-                                className="h-8 w-[280px] bg-background font-mono text-[11px]"
-                              />
+                          <div key={field.key} className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="w-28 text-[11px] text-muted-foreground">{t(field.label)}</span>
+                              {field.type === 'switch' ? (
+                                <Switch
+                                  checked={Boolean(optionValue(p, field.key))}
+                                  disabled={!isAdmin || busy === p.id}
+                                  onCheckedChange={(checked) => setOption(p, field.key, checked)}
+                                />
+                              ) : field.type === 'longtext' ? (
+                                <Textarea
+                                  rows={6}
+                                  value={String(optionValue(p, field.key) ?? '')}
+                                  onChange={(e) => setOption(p, field.key, e.target.value)}
+                                  disabled={!isAdmin || busy === p.id}
+                                  className="w-[380px] bg-background font-mono text-[11px]"
+                                />
+                              ) : field.type === 'json' ? (
+                                <Textarea
+                                  rows={2}
+                                  value={
+                                    typeof optionValue(p, field.key) === 'string'
+                                      ? String(optionValue(p, field.key))
+                                      : JSON.stringify(optionValue(p, field.key) ?? {})
+                                  }
+                                  onChange={(e) => setOption(p, field.key, e.target.value)}
+                                  disabled={!isAdmin || busy === p.id}
+                                  placeholder='{"User-Agent": "..."}'
+                                  className="w-[380px] bg-background font-mono text-[11px]"
+                                />
+                              ) : (
+                                <Input
+                                  value={String(optionValue(p, field.key) ?? '')}
+                                  onChange={(e) => setOption(p, field.key, e.target.value)}
+                                  disabled={!isAdmin || busy === p.id}
+                                  className="h-8 w-[280px] bg-background font-mono text-[11px]"
+                                />
+                              )}
+                            </div>
+                            {field.hint && (
+                              <div className="pl-[7.5rem] text-[10px] leading-4 text-muted-foreground">
+                                {t(field.hint)}
+                              </div>
                             )}
                           </div>
                         ))}
@@ -725,6 +823,18 @@ export function ProvidersSection() {
                                       >
                                         {t('providers.credSave')}
                                       </Button>
+                                      {p.id === 'codar' && (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 rounded-full text-[11px]"
+                                          disabled={!isAdmin || busy === `draft:${p.id}` || !editDraft.secret.trim()}
+                                          onClick={() => checkToken(p, {token: editDraft.secret})}
+                                        >
+                                          {t('providers.codarCheckToken')}
+                                        </Button>
+                                      )}
+                                      {p.id === 'codar' && tokenBadge(`draft:${p.id}`)}
                                       <Button
                                         size="sm"
                                         variant="ghost"
@@ -746,6 +856,7 @@ export function ProvidersSection() {
                                         <Badge variant="secondary" className="rounded-full text-[10px]">
                                           {t(c.has_secret ? 'providers.credSecretSet' : 'providers.credSecretUnset')}
                                         </Badge>
+                                        {p.id === 'codar' && c.has_secret && tokenBadge(`cred:${c.id}`)}
                                         {c.base_url && (
                                           <span className="truncate font-mono text-[10px] text-muted-foreground">
                                             {c.base_url}
@@ -761,6 +872,18 @@ export function ProvidersSection() {
                                         </div>
                                       )}
                                     </div>
+                                    {p.id === 'codar' && c.has_secret && (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 rounded-md"
+                                        title={t('providers.codarCheckToken')}
+                                        disabled={!isAdmin || busy === `cred:${c.id}`}
+                                        onClick={() => checkToken(p, {credentialId: c.id})}
+                                      >
+                                        <ShieldCheck className="h-3.5 w-3.5" />
+                                      </Button>
+                                    )}
                                     <Switch
                                       checked={c.enabled}
                                       disabled={!isAdmin || busy === `cred:${c.id}`}

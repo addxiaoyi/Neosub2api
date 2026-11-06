@@ -32,6 +32,12 @@ const CRED_TYPE_KEYS: Record<ImportCredentialType, string> = {
   env: 'accounts.credType_env',
 };
 
+// 前置说明按 provider 分流：写清缺什么、从哪拿，避免所有服务商共用一句「需要凭据」
+const PROVIDER_HINTS: Record<string, string> = {
+  codebuddy: 'accounts.importHint_codebuddy',
+  muse: 'accounts.importHint_muse',
+};
+
 const PROBE_BAR: Record<AccountImportProbeResult['status'], string> = {
   ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
   fail: 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400',
@@ -79,6 +85,7 @@ export function ImportAccountDialog({
   const providerName = useMemo(() => providers.find((p) => p.id === provider)?.name ?? provider, [providers, provider]);
   const providerMeta = useMemo(() => providers.find((p) => p.id === provider), [providers, provider]);
   const requiresText = providerMeta?.requires.join(t('common.listSeparator')) ?? '';
+  const providerHint = PROVIDER_HINTS[provider];
   const buildBody = (): AccountImportInput => ({
     provider,
     label: label.trim(),
@@ -176,6 +183,7 @@ export function ImportAccountDialog({
               placeholder={t('accounts.importCredentialPlaceholder')}
             />
             {credType === 'json' && <p className="text-xs text-muted-foreground">{t('accounts.importJsonHint')}</p>}
+            {providerHint && <p className="text-xs text-muted-foreground">{t(providerHint)}</p>}
           </div>
           <div className="space-y-2">
             <Label>{t('accounts.importBaseUrl')}</Label>

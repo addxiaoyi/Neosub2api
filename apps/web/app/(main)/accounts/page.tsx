@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   AlertCircle,
   Gift,
@@ -23,7 +23,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import {useProviders} from '@/lib/use-providers';
-import {providerLabel} from '@/lib/providers';
+import {providerLabel, type ProviderHealthEntry} from '@/lib/providers';
 import {
   NO_ACCOUNT_OPS,
   accountOpsApi,
@@ -31,9 +31,10 @@ import {
   type AccountOps,
   type ProviderAccountOps,
 } from '@/components/common/accounts/account-ops';
+import {AccountSourceGuide, sourceKindOf} from '@/components/common/accounts/AccountSourceGuide';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
-import {accountApi, upstreamApi, errText} from '@/lib/api';
+import {accountApi, providerApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditExpiry, CreditsMeta, UpstreamStatus} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {
@@ -226,6 +227,12 @@ export default function AccountsPage() {
    * 积分常常先返回，那时 accounts 还是空的，就地改写会落空。
    */
   const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
+  /** 各家最近一次健康检测（只读观测）；侧车可达性以它为准，不看 readiness/enabled */
+  const [health, setHealth] = useState<Record<string, ProviderHealthEntry>>({});
+  /** 正在跑检测的服务商 id；`*` = 整轮检测 */
+  const [probing, setProbing] = useState<string | null>(null);
+  /** 自动检测过的侧车：只自动跑一次，之后交给用户手动复检 */
+  const probedSidecars = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -238,6 +245,13 @@ export default function AccountsPage() {
         setCapsFailed(false);
       })
       .catch(() => setCapsFailed(true));
+    // 健康检测是只读缓存（viewer 也可读），失败不影响账号列表
+    const healthP = providerApi
+      .health()
+      .then((h) =>
+        setHealth(Object.fromEntries((h.providers ?? []).map((p) => [p.provider, p]))),
+      )
+      .catch(() => undefined);
     const [accRes, upRes] = await Promise.allSettled([accountApi.list(), upstreamApi.status()]);
     if (accRes.status === 'fulfilled') {
       setAccounts(accRes.value.accounts);
@@ -248,13 +262,55 @@ export default function AccountsPage() {
       setLoadFailed(true);
     }
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
-    await caps;
+    await Promise.all([caps, healthP]);
     setLoading(false);
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const applyHealth = useCallback((list: ProviderHealthEntry[] | undefined) => {
+    if (!list?.length) return;
+    setHealth((prev) => ({...prev, ...Object.fromEntries(list.map((p) => [p.provider, p]))}));
+  }, []);
+
+  /** 检测一家：走后端既有的 /api/providers/health/run?provider=，只读，不改启用状态 */
+  const probeProvider = useCallback(
+    async (id: string) => {
+      setProbing(id);
+      try {
+        const res = await providerApi.runHealth(id);
+        applyHealth(res.providers);
+      } catch (e) {
+        notify.err(errText(e));
+      } finally {
+        setProbing(null);
+      }
+    },
+    [applyHealth],
+  );
+
+  /** 「全部」视图没有选中态，一次跑整轮再从结果里取侧车四家 */
+  const probeAllSidecars = useCallback(async () => {
+    setProbing('*');
+    try {
+      const res = await providerApi.runHealth();
+      applyHealth(res.providers);
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setProbing(null);
+    }
+  }, [applyHealth]);
+
+  // 选中某家侧车、且本地还没有它的检测记录时，自动跑一次，避免只显示「未检测」
+  useEffect(() => {
+    if (!isAdmin || !selectedMeta || sourceKindOf(selectedMeta.managed) !== 'sidecar') return;
+    if (probing || health[selectedMeta.id]?.status || probedSidecars.current.has(selectedMeta.id)) return;
+    probedSidecars.current.add(selectedMeta.id);
+    probeProvider(selectedMeta.id);
+  }, [isAdmin, selectedMeta, health, probing, probeProvider]);
 
   // 打开页面时自动拉一次实时积分：上游 /status 的 credits 可能滞后数小时，
   // 首次进入应展示真实余额。服务端有 TTL 缓存，重复进入不会频繁请求。
@@ -1083,17 +1139,16 @@ export default function AccountsPage() {
                 {t('accounts.opsUnavailable')}
               </span>
             )}
-            {/* 未启用的分类：导入入口按判据隐藏了，这里必须说明「为什么没按钮」，
-                否则看起来像坏了。每个分类各自带自己的服务商名，点哪个分类都能对上号。 */}
-            {selectedMeta && !selectedMeta.enabled && (
+            {/* 未启用的**本页导入型**分类：导入入口按判据隐藏了，这里说明原因。
+                sidecar / demo 的账号根本不在本页，不能套用「未启用」口径。 */}
+            {selectedMeta && !selectedMeta.enabled && sourceKindOf(selectedMeta.managed) === 'local' && (
               <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
                 {t('accounts.importDisabledHint', {provider: selectedMeta.label})}
               </span>
             )}
-            {/* 非 CodeBuddy 服务商没有网页添加账号的入口。这里明说账号在哪管理，
-                否则操作区整片消失，看起来像按钮坏了。三档由后端 managed 给出，
-                可导入的（external/quota）换成能动手的口径。 */}
-            {selectedMeta && selectedMeta.enabled && selectedMeta.managed !== 'unified' && (
+            {/* 可导入型服务商（external/quota）说明本页能登记什么；sidecar / demo
+                的账号来源见下方「账号从哪来」。 */}
+            {selectedMeta && selectedMeta.enabled && selectedMeta.managed !== 'unified' && sourceKindOf(selectedMeta.managed) === 'local' && (
               <span className="max-w-[24rem] text-[11px] leading-relaxed text-muted-foreground">
                 {isAdmin && canImportManaged(selectedMeta.managed)
                   ? t(`accounts.importHint_${selectedMeta.managed}`)
@@ -1233,12 +1288,17 @@ export default function AccountsPage() {
           {[{id: 'all', label: t('providers.filterAll')}, ...providers.map((p) => ({id: p.id, label: p.label}))].map((item) => {
             const meta = item.id === 'all' ? undefined : opsMeta[item.id];
             const sep = t('common.listSeparator');
+            const requires = meta?.requires?.join(sep) || '';
+            const needs = !!meta && meta.readiness !== 'ready';
             return (
               <Button
                 key={item.id}
                 size="sm"
                 variant={providerFilter === item.id ? 'default' : 'outline'}
-                className="h-7 rounded-full px-3 text-[11px]"
+                className={
+                  'rounded-full px-3 text-[11px] ' +
+                  (needs ? 'h-auto min-h-7 flex-col items-start gap-0.5 py-1' : 'h-7')
+                }
                 onClick={() => setProviderFilter(item.id)}
                 title={
                   meta
@@ -1251,26 +1311,46 @@ export default function AccountsPage() {
                     : undefined
                 }
               >
-                <span>{item.label}</span>
-                {meta && (
-                  <>
-                    {/* readiness 与 enabled 各自独立展示：就绪不等于已启用，已启用也不等于可用 */}
-                    <span
-                      aria-hidden
-                      className={'size-1.5 shrink-0 rounded-full ' + (meta.readiness === 'ready' ? 'bg-emerald-500' : 'bg-amber-500')}
-                    />
-                    <span className="shrink-0">
-                      {t(meta.readiness === 'ready' ? 'accounts.readinessReady' : 'accounts.readinessNeedsConfig')}
-                    </span>
-                    <span className="opacity-40">·</span>
-                    <span className="shrink-0 opacity-70">{t(meta.enabled ? 'accounts.enabledOn' : 'accounts.enabledOff')}</span>
-                  </>
+                <span className="flex items-center gap-1.5">
+                  <span>{item.label}</span>
+                  {meta && (
+                    <>
+                      {/* readiness 与 enabled 各自独立展示：就绪不等于已启用，已启用也不等于可用 */}
+                      <span
+                        aria-hidden
+                        className={'size-1.5 shrink-0 rounded-full ' + (meta.readiness === 'ready' ? 'bg-emerald-500' : 'bg-amber-500')}
+                      />
+                      <span className="shrink-0">
+                        {t(meta.readiness === 'ready' ? 'accounts.readinessReady' : 'accounts.readinessNeedsConfig')}
+                      </span>
+                      <span className="opacity-40">·</span>
+                      <span className="shrink-0 opacity-70">{t(meta.enabled ? 'accounts.enabledOn' : 'accounts.enabledOff')}</span>
+                    </>
+                  )}
+                </span>
+                {/* 缺项摘要直接写在 chip 上，不能只藏在 hover title */}
+                {needs && requires && (
+                  <span className="max-w-[16rem] truncate font-normal text-amber-700 dark:text-amber-400">
+                    {t('accounts.sourceRequiresLabel', {requires})}
+                  </span>
                 )}
               </Button>
             );
           })}
         </div>
       )}
+
+      {/* 账号从哪来：按 local / sidecar / demo 三种形态分别表达，不再只有「导入 / 未启用」二元 */}
+      <AccountSourceGuide
+        filter={providerFilter}
+        items={Object.values(opsMeta)}
+        providers={providers}
+        health={health}
+        probing={probing}
+        isAdmin={isAdmin}
+        onProbe={probeProvider}
+        onProbeAllSidecars={probeAllSidecars}
+      />
 
       {/* 批量操作条：admin-only（接口本身也是 admin-only），viewer 完全看不到多选框与这一条 */}
       {isAdmin && (selected.length > 0 || batchResult) && (
@@ -1548,27 +1628,46 @@ export default function AccountsPage() {
         {!visible.length && !loading && !loadFailed && (
           <EmptyState
             icon={Users}
-            title={t('accounts.emptyTitle')}
+            title={
+              selectedMeta && sourceKindOf(selectedMeta.managed) === 'sidecar'
+                ? t('accounts.sourceSidecarEmptyTitle')
+                : selectedMeta && sourceKindOf(selectedMeta.managed) === 'demo'
+                  ? t('accounts.sourceDemoEmptyTitle')
+                  : t('accounts.emptyTitle')
+            }
             description={
-              selectedMeta && !selectedMeta.enabled
-                // 未启用的分类没有导入入口，空态里也要说清楚原因（否则「为什么没按钮」无解）
-                ? t('accounts.importDisabledHint', {provider: selectedMeta.label})
-                : selectedMeta && selectedMeta.managed !== 'unified'
-                ? // 单分类按 managed 分流：能导入的（external/quota）讲清楚在这登记什么；
-                  // sidecar/demo 不给入口，文案如实说明去哪配（详见 managed_* 重写）。
-                  (isAdmin && canImportManaged(selectedMeta.managed)
-                    ? t(`accounts.importHint_${selectedMeta.managed}`)
-                    : t(`accounts.managed_${selectedMeta.managed}`))
-                : allBarEmpty
-                  ? t('accounts.managedAll')
-                  : isAdmin
-                    ? canImport
-                      ? // 顶栏至少有「导入账号」：说明白它怎么用，别只留一句「点添加扫码」
-                        providerFilter === 'all'
-                        ? t('accounts.emptyDescImport')
-                        : t('accounts.importHint_unified')
-                      : t('accounts.emptyDescAdmin')
-                    : t('accounts.emptyDescViewer')
+              // 侧车 / demo 的账号不在本页，空态不能写「暂无账号，扫码添加」；
+              // 侧车不可达时尤其要说明「这里没有账号是预期结果」。
+              selectedMeta && sourceKindOf(selectedMeta.managed) === 'sidecar'
+                ? t('accounts.sourceSidecarEmpty', {
+                    address:
+                      providers.find((p) => p.id === selectedMeta.id)?.base_url ||
+                      t('accounts.sourceSidecarUnprobed'),
+                    requires:
+                      selectedMeta.requires.join(t('common.listSeparator')) ||
+                      t('accounts.providerNoRequires'),
+                  })
+                : selectedMeta && sourceKindOf(selectedMeta.managed) === 'demo'
+                  ? t('accounts.sourceDemoEmpty')
+                  : selectedMeta && !selectedMeta.enabled
+                    // 未启用的分类没有导入入口，空态里也要说清楚原因（否则「为什么没按钮」无解）
+                    ? t('accounts.importDisabledHint', {provider: selectedMeta.label})
+                    : selectedMeta && selectedMeta.managed !== 'unified'
+                      ? // 单分类按 managed 分流：能导入的（external/quota）讲清楚在这登记什么；
+                        // sidecar/demo 已在上面分流，不再套用「未启用 / 无入口」口径。
+                        (isAdmin && canImportManaged(selectedMeta.managed)
+                          ? t(`accounts.importHint_${selectedMeta.managed}`)
+                          : t(`accounts.managed_${selectedMeta.managed}`))
+                      : allBarEmpty
+                        ? t('accounts.managedAll')
+                        : isAdmin
+                          ? canImport
+                            ? // 顶栏至少有「导入账号」：说明白它怎么用，别只留一句「点添加扫码」
+                              providerFilter === 'all'
+                              ? t('accounts.emptyDescImport')
+                              : t('accounts.importHint_unified')
+                            : t('accounts.emptyDescAdmin')
+                          : t('accounts.emptyDescViewer')
             }
             className="flex flex-col items-center justify-center py-16 text-center"
           >

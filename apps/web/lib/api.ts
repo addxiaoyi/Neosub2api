@@ -2,7 +2,13 @@ import axios, {AxiosError} from 'axios';
 import {BASE_PATH} from './base-path';
 import {tp} from './i18n';
 import type {Realm} from './realm-context';
-import type {ProviderCredential, ProviderCredentialInput, ProviderHealth, ProviderInfo} from './providers';
+import type {
+  ProviderCredential,
+  ProviderCredentialInput,
+  ProviderHealth,
+  ProviderInfo,
+  ProviderTokenCheck,
+} from './providers';
 import type {
   Account,
   CreditsMeta,
@@ -101,8 +107,8 @@ http.interceptors.response.use(
 
 const get = async <T>(url: string, params?: Record<string, unknown>): Promise<T> =>
   (await http.get<T>(url, {params})).data;
-const post = async <T>(url: string, body?: unknown): Promise<T> =>
-  (await http.post<T>(url, body)).data;
+const post = async <T>(url: string, body?: unknown, params?: Record<string, unknown>): Promise<T> =>
+  (await http.post<T>(url, body, {params})).data;
 const patch = async <T>(url: string, body?: unknown): Promise<T> =>
   (await http.patch<T>(url, body)).data;
 const put = async <T>(url: string, body?: unknown): Promise<T> =>
@@ -125,7 +131,9 @@ export const providerApi = {
   /** 定时健康检测：只读观测，不改路由/启用状态 */
   health: (provider?: string) =>
     get<ProviderHealth>('/api/providers/health', provider ? {provider} : undefined),
-  runHealth: () => post<ProviderHealth>('/api/providers/health/run'),
+  /** 手动跑一轮检测；传 provider 时只测这一家（侧车可达性靠它，别拿 readiness 反推） */
+  runHealth: (provider?: string) =>
+    post<ProviderHealth>('/api/providers/health/run', undefined, provider ? {provider} : undefined),
 };
 
 /* ── 运行参数（这里只用到健康检测总开关） ─────────────── */
@@ -628,6 +636,11 @@ export const credentialApi = {
     body: Omit<ProviderCredentialInput, 'provider'>,
   ) => patch<ProviderCredential>(`/api/provider-credentials/${id}`, body),
   remove: (id: number) => del<{ok: boolean; id: number}>(`/api/provider-credentials/${id}`),
+  validate: (provider: string, body: {token?: string; credential_id?: number}) =>
+    post<ProviderTokenCheck>(
+      `/api/providers/${encodeURIComponent(provider)}/token/validate`,
+      body,
+    ),
 };
 
 /* ── Grok 注册任务（读写全 admin，见 tests/test_security_matrix.py）── */

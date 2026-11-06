@@ -4,7 +4,8 @@ import type {ProviderCapabilities, ProviderStatus} from './providers';
 export interface ProviderOptionField {
   key: string;
   label: string;
-  type: 'text' | 'switch' | 'json';
+  type: 'text' | 'switch' | 'json' | 'longtext';
+  hint?: string;
 }
 
 const EXPOSED_OPTIONS: Record<string, ProviderOptionField[]> = {
@@ -13,8 +14,22 @@ const EXPOSED_OPTIONS: Record<string, ProviderOptionField[]> = {
     {key: 'proxy', label: 'providers.optProxy', type: 'text'},
     {key: 'fingerprint', label: 'providers.optFingerprint', type: 'switch'},
     {key: 'extra_headers', label: 'providers.optExtraHeaders', type: 'json'},
+    {
+      key: 'sentinel_token',
+      label: 'providers.optSentinelToken',
+      type: 'longtext',
+      hint: 'providers.optSentinelHint',
+    },
   ],
-  zcode: [{key: 'system_prompt_override', label: 'providers.optSystemOverride', type: 'text'}],
+  zcode: [
+    {key: 'system_prompt_override', label: 'providers.optSystemOverride', type: 'text'},
+    {
+      key: 'official_system',
+      label: 'providers.optOfficialSystem',
+      type: 'longtext',
+      hint: 'providers.optOfficialSystemHint',
+    },
+  ],
 };
 
 /** 状态文案映射。 */
