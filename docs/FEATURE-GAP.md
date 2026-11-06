@@ -353,7 +353,7 @@
 
 ### 7.1 push 被 GitHub secret scanning 拦截
 
-- **现状**：本地分支 `baseline/unified-2api` 尚未推到远端，领先提交数随提交持续变化，以 `git rev-list --count origin/main..HEAD` 为准，push 未完成。仓库内没有任何可核对的告警原文（全仓检索 `secret scanning` / `push protection` 无命中），命中的文件、规则名、是否误报均**未核实**。
+- **现状**：本地分支 `baseline/unified-2api` 尚未推到远端，领先提交数随提交持续变化，以 `git rev-list --count @{upstream}..HEAD` 为准（当前跟踪 `origin/baseline/unified-2api`，与 `git status -sb` 里的 ahead 数一致）；远端另有 `origin/main`，与跟踪分支不是一条线，统计时不要混用。push 未完成。仓库内没有任何可核对的告警原文（全仓检索 `secret scanning` / `push protection` 无命中），命中的文件、规则名、是否误报均**未核实**。
 - **两条出路**（都必须先确认命中内容，不得强行绕过）：
   1. **确属误报**：由仓库管理员在 GitHub 的 Security → Secret scanning 对该告警标记 false positive / 加 allowlist，然后重推同一提交。不要改代码去迁就扫描器，也不要用 push protection bypass 口令。
   2. **确属真实泄露**：先把命中的凭据在对应上游轮换作废，再改成环境变量或本地未入库配置，按仓库历史清理流程重写该提交（必要时 `git filter-repo`）后重推；不得用 `--no-verify`、`--force` 或关闭 push protection 绕过。
