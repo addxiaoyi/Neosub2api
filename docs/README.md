@@ -8,7 +8,7 @@
 | --- | --- |
 | 第一次接触，想先看到界面 | [README](../README.md) → [DEMO](DEMO.md) → [GETTING-STARTED](GETTING-STARTED.md) |
 | 要接客户端、调 `/v1` | [API-REFERENCE](API-REFERENCE.md) → [examples](examples.md) → [error-contract](error-contract.md) |
-| 要上线、做运维 | [DEPLOYMENT](DEPLOYMENT.md) → [DEPLOYMENT-PROD](DEPLOYMENT-PROD.md) → [compliance](compliance.md) → [security-retest-2026-11-03](security-retest-2026-11-03.md) |
+| 要上线、做运维 | [DEPLOYMENT](DEPLOYMENT.md) → [DEPLOYMENT-PROD](DEPLOYMENT-PROD.md) → [SCHEDULING](SCHEDULING.md) → [compliance](compliance.md) → [security-retest-2026-11-03](security-retest-2026-11-03.md) |
 | 页面报错或请求失败 | [TROUBLESHOOTING](TROUBLESHOOTING.md) → [error-contract](error-contract.md) → [PERFORMANCE](PERFORMANCE.md) |
 | 要新增一家 provider | [ADDING-A-PROVIDER](ADDING-A-PROVIDER.md) → [PROTOCOL-MATRIX](PROTOCOL-MATRIX.md) → [PROVIDERS](PROVIDERS.md) |
 
@@ -29,6 +29,7 @@
 | [DEPLOYMENT.md](DEPLOYMENT.md) | docker compose 部署、端口映射、数据目录与升级方式。 |
 | [DEPLOYMENT-PROD.md](DEPLOYMENT-PROD.md) | 生产硬化版部署：nginx、HTTPS、备份恢复、权限与安全响应头。 |
 | [PERFORMANCE.md](PERFORMANCE.md) | 网关热路径的 SQL 次数、索引、压测数据与吞吐瓶颈，说明为什么 SQLite 单写者是上限。 |
+| [SCHEDULING.md](SCHEDULING.md) | 账号池的分档冷却、熔断、粘性、权重、轮转组，以及 codar 四档调度策略；含各适配器接线现状与 `readiness` 口径澄清。 |
 | [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md) | 上游仓库的巡检与同步流程：先评估、后更新，以及如何避免把上游代码直接拷进主仓。 |
 | [model-map-migration.md](model-map-migration.md) | `model_map` 从单别名迁移到「多候选 + 权重」的方案与兼容边界。 |
 
