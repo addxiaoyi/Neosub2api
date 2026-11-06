@@ -90,6 +90,97 @@ _ANTHROPIC_TYPES = {
 
 _EXTRA_KEYS = ("provider", "upstream_status", "upstream_code", "upstream_message")
 
+# provider 级的对外错误改写规则（来自 provider options.error_rules）。
+# 只改对外 status / code，upstream_status / upstream_code 永远保留上游原值。
+_RULES: dict[str, list[dict[str, Any]]] = {}
+_MATCH_FIELDS = ("upstream_status", "upstream_code", "message_contains")
+
+
+def _clean_rule(item: dict[str, Any]) -> dict[str, Any] | None:
+    rule: dict[str, Any] = {}
+    raw_upstream = item.get("upstream_status")
+    if raw_upstream is not None:
+        try:
+            rule["upstream_status"] = int(raw_upstream)
+        except (TypeError, ValueError):
+            return None
+    upstream_code = str(item.get("upstream_code") or "").strip()
+    if upstream_code:
+        rule["upstream_code"] = upstream_code
+    needle = str(item.get("message_contains") or "").strip()
+    if needle:
+        rule["message_contains"] = needle
+    code = str(item.get("code") or "").strip()
+    if code:
+        rule["code"] = code
+    raw_status = item.get("status")
+    if raw_status is not None:
+        try:
+            status = int(raw_status)
+        except (TypeError, ValueError):
+            return None
+        # 只允许改成错误状态码，防止规则把失败改写成 2xx
+        if not 400 <= status <= 599:
+            return None
+        rule["status"] = status
+    if "code" not in rule and "status" not in rule:
+        return None
+    if not any(key in rule for key in _MATCH_FIELDS):
+        return None
+    return rule
+
+
+def configure_error_rules(provider: str, rules: Any) -> None:
+    """注册某 provider 的错误改写规则；传空即清除。规则条目非法时整条忽略。"""
+    if isinstance(rules, dict):
+        rules = [rules]
+    cleaned = [
+        rule
+        for rule in (_clean_rule(item) for item in (rules or []) if isinstance(item, dict))
+        if rule
+    ]
+    if cleaned:
+        _RULES[provider] = cleaned
+    else:
+        _RULES.pop(provider, None)
+
+
+def _rule_matches(
+    rule: dict[str, Any],
+    *,
+    upstream_status: int | None,
+    upstream_code: str | None,
+    message: str,
+) -> bool:
+    if "upstream_status" in rule and rule["upstream_status"] != upstream_status:
+        return False
+    if "upstream_code" in rule and rule["upstream_code"] != (upstream_code or ""):
+        return False
+    if "message_contains" in rule and rule["message_contains"] not in message:
+        return False
+    return True
+
+
+def apply_error_rules(
+    provider: str,
+    *,
+    status: int,
+    code: str,
+    upstream_status: int | None,
+    upstream_code: str | None,
+    message: str,
+) -> tuple[int, str]:
+    """按 provider 规则改写对外 (status, code)；未命中或未注册时原样返回。"""
+    for rule in _RULES.get(provider, ()):
+        if _rule_matches(
+            rule,
+            upstream_status=upstream_status,
+            upstream_code=upstream_code,
+            message=message,
+        ):
+            return int(rule.get("status") or status), str(rule.get("code") or code)
+    return status, code
+
 
 def public_status(upstream_status: int | None) -> int:
     """上游状态码映射成稳定的对外状态码。"""
@@ -223,11 +314,19 @@ def from_provider_error(exc: ProviderError, provider: str = "") -> GatewayError:
     message = redact_endpoints(mask_text(exc.message))[:_MAX_DETAIL]
     upstream_code = mask_text(exc.upstream_code)[:_MAX_DETAIL] if exc.upstream_code else None
     upstream_message = redact_endpoints(mask_text(exc.upstream_message))[:_MAX_DETAIL] if exc.upstream_message else None
+    status, code = apply_error_rules(
+        provider,
+        status=status,
+        code=error_code(status),
+        upstream_status=exc.status_code,
+        upstream_code=exc.upstream_code,
+        message=exc.message,
+    )
     return GatewayError(
         status,
         message,
         type_=error_type(status),
-        code=error_code(status),
+        code=code,
         provider=provider,
         upstream_status=exc.status_code,
         upstream_code=upstream_code,
@@ -254,12 +353,20 @@ def from_upstream_reply(
         message = f"上游返回 {status_code}：{upstream_message}"
     else:
         message = f"上游返回 {status_code}"
+    status, code = apply_error_rules(
+        provider,
+        status=status,
+        code=error_code(status),
+        upstream_status=status_code,
+        upstream_code=upstream_code,
+        message=upstream_message or "",
+    )
     retry_after = (headers or {}).get("retry-after") if status == 429 else None
     return GatewayError(
         status,
         message,
         type_=error_type(status),
-        code=error_code(status),
+        code=code,
         provider=provider,
         upstream_status=status_code,
         upstream_code=upstream_code,

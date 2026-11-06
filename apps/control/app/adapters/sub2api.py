@@ -9,6 +9,7 @@ from typing import Any
 
 from ..billing import extract_usage, usage_from_stream, usage_in_chunk
 from ..config import Settings
+from ..services.video_tasks import parse_snapshot
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient, UpstreamReply
 from .sub2api_store import QuotaStore, build_store
@@ -95,6 +96,20 @@ class Sub2ApiAdapter(ProviderAdapter):
     @property
     def store(self) -> QuotaStore:
         return self._store
+
+    def configure(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        options: dict[str, Any] | None = None,
+        api_keys: list[str] | None = None,
+    ) -> None:
+        super().configure(base_url=base_url, api_key=api_key, options=options, api_keys=api_keys)
+        # 错误透传规则随 provider 配置走：只改对外 status/code，upstream_* 原样留档
+        from ..gateway_errors import configure_error_rules
+
+        configure_error_rules(self.spec.id, self.options.get("error_rules"))
 
     def readiness_now(
         self,
@@ -243,6 +258,13 @@ class Sub2ApiAdapter(ProviderAdapter):
 
     async def video_create(self, payload: dict[str, Any], *, stream: bool):
         return await self._forward("videos", payload, stream=stream)
+
+    def video_snapshot(self, body: bytes) -> dict[str, Any]:
+        """sub2api 上游只有 POST /v1/videos：任务 id 与初始状态只能取自创建响应。
+
+        因此这里不新增 video_task（上游没有按 id 查询），状态推进交给本地台账。
+        """
+        return parse_snapshot(body)
 
     async def compat_forward(
         self,
