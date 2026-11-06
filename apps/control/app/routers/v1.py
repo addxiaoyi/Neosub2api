@@ -38,6 +38,7 @@ from ..model_resolve import (
     retryable_status,
 )
 from ..services import video_tasks
+from ..services.task_queue import POLL_INTERVAL, POLL_LIMIT, TASK_KINDS, MediaStore, state_path
 from ..usage_estimate import StreamText, estimate_from_body, estimate_from_text
 
 router = APIRouter(tags=["gateway"])
@@ -641,6 +642,12 @@ async def _proxy(request: Request, capability: str, method: str | None = None, *
         # 上游 /v1/search 允许省略 model 并用它的默认值；其余端点仍在 _resolve 里按缺 model 拒绝
         if default_model and not str(payload.get("model") or "").strip():
             payload["model"] = default_model
+        if method == "video_create" and payload.get("input_reference"):
+            # 上游视频创建是 multipart 文件字段，网关只透传 JSON，不能把本地路径/URL 当文件
+            raise GatewayError(
+                400, "视频 input_reference 需要文件上传，本网关暂不支持",
+                type_="invalid_request_error", code="input_reference_unsupported",
+            )
         targets = await _resolve(request, payload, capability, conn, request_id)
         primary_adapter, primary_effective, _ = targets[0]
         payload["model"] = primary_effective
@@ -872,6 +879,165 @@ def _pick_capable(request: Request, capability: str, conn):
         400, f"多个 provider 支持 {capability}（{names}），请用 x-provider 指定",
         type_="invalid_request_error", code="ambiguous_provider",
     )
+
+
+# ---------- 媒体子工程（2-A3 / 2-A4 / 2-A5） ----------
+
+MEDIA_UPLOAD_LIMIT = 20 * 1024 * 1024
+EDITABLE_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+def _media_store(request: Request) -> MediaStore:
+    """队列/归属台账跟着 app 走：每个进程一个实例，测试里每个 app 互不串。"""
+    store = getattr(request.app.state, "media_store", None)
+    if store is None:
+        store = MediaStore(state_path(request.app.state.settings))
+        request.app.state.media_store = store
+    return store
+
+
+async def _media_admit(request: Request, capability: str = "media"):
+    """媒体端点的准入段：鉴权/能力选择/配额/失败限流，连接用完即关。"""
+    conn = request.app.state.db.connect()
+    try:
+        key = _gateway_key(request, conn)
+        adapter = _pick_capable(request, capability, conn)
+        _quota_guard(conn, key, adapter.spec.id, "")
+        _failure_guard(request, conn, key, adapter.spec.id, "")
+        return key, adapter
+    finally:
+        conn.close()
+
+
+def _owner_of(key: dict[str, Any]) -> str:
+    return "anon" if key.get("id") is None else str(key["id"])
+
+
+async def _media_record(
+    request: Request,
+    *,
+    key: dict[str, Any],
+    adapter: ProviderAdapter,
+    started: float,
+    status: int,
+    error: str | None = None,
+) -> None:
+    await _record_safe(
+        request, key=key, provider=adapter.spec.id, model="", status=status,
+        usage=None, latency_ms=int((time.perf_counter() - started) * 1000),
+        stream=False, error=error, pricing=None,
+    )
+
+
+async def _read_upload(request: Request) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        chunks.append(chunk)
+    if total > MEDIA_UPLOAD_LIMIT:
+        raise GatewayError(
+            413, "文件超过 20 MiB 上限", type_="invalid_request_error", code="file_too_large"
+        )
+    return b"".join(chunks)
+
+
+def _multipart_boundary(content_type: str) -> str:
+    for piece in content_type.split(";"):
+        piece = piece.strip()
+        if piece.lower().startswith("boundary="):
+            return piece[len("boundary="):].strip('"')
+    return ""
+
+
+def _parse_multipart(raw: bytes, boundary: str) -> dict[str, Any]:
+    """只解析本端点需要的字段（file/purpose）；不引入 python-multipart 依赖。"""
+    fields: dict[str, Any] = {}
+    marker = f"--{boundary}".encode()
+    for chunk in raw.split(marker):
+        if not chunk or chunk in (b"--", b"--\r\n", b"\r\n"):
+            continue
+        chunk = chunk.lstrip(b"\r\n")
+        head, sep, body = chunk.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        name = filename = ""
+        content_type = "application/octet-stream"
+        for line in head.split(b"\r\n"):
+            lowered = line.lower()
+            if lowered.startswith(b"content-disposition:"):
+                disposition = line.split(b":", 1)[1].decode("latin-1")
+                for piece in disposition.split(";"):
+                    piece = piece.strip()
+                    if piece.startswith("name="):
+                        name = piece[len("name="):].strip('"')
+                    elif piece.startswith("filename="):
+                        filename = piece[len("filename="):].strip('"')
+            elif lowered.startswith(b"content-type:"):
+                content_type = line.split(b":", 1)[1].decode("latin-1").strip()
+        if not name:
+            continue
+        if filename:
+            fields[name] = {"filename": filename, "content_type": content_type, "data": body}
+        else:
+            fields[name] = body.decode("utf-8", "replace")
+    return fields
+
+
+def _editable_view(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict) and isinstance(raw.get("task"), dict):
+        raw = raw["task"]
+    view = dict(raw) if isinstance(raw, dict) else {}
+    tid = str(view.get("id") or view.get("taskId") or "")
+    if tid:
+        view["id"] = tid
+        view.setdefault("taskId", tid)
+    return view
+
+
+def _editable_list(raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    if not isinstance(raw, dict):
+        return [], []
+    items_raw = raw.get("items") if isinstance(raw.get("items"), list) else raw.get("data")
+    items = [_editable_view(item) for item in items_raw] if isinstance(items_raw, list) else []
+    missing_raw = raw.get("missing_ids") if isinstance(raw.get("missing_ids"), list) else []
+    return [item for item in items if item.get("id")], [str(x) for x in missing_raw]
+
+
+def _task_runner(adapter: ProviderAdapter):
+    """队列 worker 的任务体：创建 + 轮询到终态，取消位每轮都看。"""
+
+    async def run(_kind: str, payload: dict[str, Any], cancelled) -> dict[str, Any]:
+        kind = "editable_file" if _kind == "editable_file" else "video"
+        if kind == "editable_file":
+            view = _editable_view(await adapter.editable_create(payload))
+            tid = str(view.get("id") or "")
+            fetch = adapter.editable_get
+        else:
+            reply = await adapter.video_create(payload)
+            view = json.loads(reply.body or b"{}")
+            tid = str(view.get("id") or view.get("task_id") or "")
+            fetch = adapter.video_task
+        if not tid:
+            raise ProviderError(502, "上游未返回任务 id")
+        deadline = time.monotonic() + POLL_LIMIT
+        while True:
+            status = str(view.get("status") or "").lower()
+            if status in EDITABLE_TERMINAL:
+                return view
+            if time.monotonic() >= deadline:
+                view["status"] = "failed"
+                view["error"] = view.get("error") or "poll_timeout"
+                return view
+            await asyncio.sleep(POLL_INTERVAL)
+            if cancelled():
+                return {"id": tid, "status": "cancelled"}
+            fetched = await fetch(tid)
+            view = json.loads(fetched.body or b"{}") if kind == "video" else _editable_view(fetched)
+
+    return run
 
 
 _CLIENT_COMPAT_REPLY_HEADERS = ("location", "etag", "vary", "cache-control", "retry-after")
@@ -1260,6 +1426,241 @@ async def openai_video_task(request: Request, task_id: str):
 @router.get("/v1/media/{name}")
 async def openai_media(request: Request, name: str):
     return await _proxy_get(request, "media", "media", name)
+
+
+# ---------- 2-A4 文件 ----------
+
+@router.post("/v1/files")
+async def openai_file_upload(request: Request):
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise GatewayError(
+            415, "文件上传只支持 multipart/form-data",
+            type_="invalid_request_error", code="unsupported_media_type",
+        )
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    try:
+        raw = await _read_upload(request)
+        boundary = _multipart_boundary(content_type)
+        if not boundary:
+            raise GatewayError(
+                400, "multipart 缺少 boundary", type_="invalid_request_error", code="invalid_multipart"
+            )
+        parts = _parse_multipart(raw, boundary)
+        item = parts.get("file")
+        if not isinstance(item, dict) or not item.get("data"):
+            raise GatewayError(
+                400, "multipart 缺少非空的 file 字段",
+                type_="invalid_request_error", code="file_missing",
+            )
+        filename = posixpath.basename(str(item.get("filename") or "").replace("\\", "/")) or "upload.bin"
+        obj = await adapter.upload_file(
+            filename=filename,
+            content_type=str(item.get("content_type") or "application/octet-stream"),
+            data=item["data"],
+            purpose=str(parts.get("purpose") or ""),
+        )
+    except ProviderError as exc:
+        await _media_record(
+            request, key=key, adapter=adapter, started=started,
+            status=public_status(exc.status_code), error=exc.message,
+        )
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    except GatewayError as exc:
+        await _media_record(
+            request, key=key, adapter=adapter, started=started, status=exc.status_code
+        )
+        raise
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(obj, status_code=200)
+
+
+@router.get("/v1/files")
+async def openai_files_list(request: Request):
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    try:
+        obj = await adapter.list_files()
+    except ProviderError as exc:
+        await _media_record(
+            request, key=key, adapter=adapter, started=started,
+            status=public_status(exc.status_code), error=exc.message,
+        )
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(obj, status_code=200)
+
+
+@router.delete("/v1/files/{file_id}")
+async def openai_file_delete(request: Request, file_id: str):
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    try:
+        obj = await adapter.delete_file(file_id)
+    except ProviderError as exc:
+        status = public_status(exc.status_code)
+        await _media_record(
+            request, key=key, adapter=adapter, started=started, status=status, error=exc.message
+        )
+        if exc.status_code == 404:
+            raise GatewayError(
+                404, "文件不存在", type_="invalid_request_error", code="file_not_found"
+            ) from exc
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(obj, status_code=200)
+
+
+# ---------- 2-A3 可编辑文件任务 ----------
+
+@router.post("/v1/editable-file-tasks")
+async def openai_editable_create(request: Request):
+    payload = await _json_payload(request)
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        raise GatewayError(
+            400, "请求体缺少 prompt", type_="invalid_request_error", code="editable_prompt_required"
+        )
+    kind = str(payload.get("kind") or "ppt").strip().lower()
+    if kind not in ("ppt", "psd"):
+        raise GatewayError(
+            400, "kind 只支持 ppt 或 psd", type_="invalid_request_error", code="editable_kind_unsupported"
+        )
+    images = payload.get("base64_images")
+    if kind == "psd" and (not isinstance(images, list) or not images):
+        raise GatewayError(
+            400, "psd 任务必须提供 base64_images",
+            type_="invalid_request_error", code="editable_images_required",
+        )
+    payload["kind"] = kind
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    try:
+        view = _editable_view(await adapter.editable_create(payload))
+        if not view.get("id"):
+            raise ProviderError(502, "上游未返回可编辑任务 id")
+    except ProviderError as exc:
+        await _media_record(
+            request, key=key, adapter=adapter, started=started,
+            status=public_status(exc.status_code), error=exc.message,
+        )
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    await _media_store(request).own_editable(_owner_of(key), str(view["id"]), view)
+    await _media_record(request, key=key, adapter=adapter, started=started, status=202)
+    return JSONResponse(view, status_code=202)
+
+
+@router.get("/v1/editable-file-tasks")
+async def openai_editable_list(request: Request):
+    key, adapter = await _media_admit(request)
+    owner = _owner_of(key)
+    store = _media_store(request)
+    requested = [item for item in request.query_params.get("ids", "").split(",") if item.strip()]
+    started = time.perf_counter()
+    try:
+        items, missing = _editable_list(await adapter.editable_list(",".join(requested)))
+    except ProviderError as exc:
+        await _media_record(
+            request, key=key, adapter=adapter, started=started,
+            status=public_status(exc.status_code), error=exc.message,
+        )
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    owned = await store.owned_editable_ids(owner)
+    kept = [item for item in items if str(item.get("id")) in owned]
+    if requested:
+        missing = [tid for tid in requested if tid not in {str(item.get("id")) for item in kept}]
+    else:
+        missing = []
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse({"items": kept, "missing_ids": missing}, status_code=200)
+
+
+@router.get("/v1/editable-file-tasks/{task_id}")
+async def openai_editable_get(request: Request, task_id: str):
+    key, adapter = await _media_admit(request)
+    owner = _owner_of(key)
+    store = _media_store(request)
+    if await store.editable_owner(task_id) != owner:
+        raise GatewayError(
+            404, "可编辑任务不存在", type_="invalid_request_error", code="editable_task_not_found"
+        )
+    started = time.perf_counter()
+    try:
+        view = _editable_view(await adapter.editable_get(task_id))
+    except ProviderError as exc:
+        status = public_status(exc.status_code)
+        await _media_record(
+            request, key=key, adapter=adapter, started=started, status=status, error=exc.message
+        )
+        if exc.status_code == 404:
+            raise GatewayError(
+                404, "可编辑任务不存在", type_="invalid_request_error", code="editable_task_not_found"
+            ) from exc
+        raise from_provider_error(exc, adapter.spec.id) from exc
+    view = await store.refresh_editable(owner, task_id, view)
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(view, status_code=200)
+
+
+# ---------- 2-A5 本地任务队列 ----------
+
+@router.post("/v1/tasks")
+async def openai_task_create(request: Request):
+    payload = await _json_payload(request)
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in TASK_KINDS:
+        raise GatewayError(
+            400, f"kind 只支持 {'、'.join(TASK_KINDS)}",
+            type_="invalid_request_error", code="task_kind_unsupported",
+        )
+    inner = payload.get("payload")
+    if not isinstance(inner, dict):
+        raise GatewayError(
+            400, "payload 必须是 JSON 对象", type_="invalid_request_error", code="invalid_task_payload"
+        )
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    view = await _media_store(request).submit(
+        owner=_owner_of(key), kind=kind, payload=inner, runner=_task_runner(adapter)
+    )
+    await _media_record(request, key=key, adapter=adapter, started=started, status=202)
+    return JSONResponse(view, status_code=202)
+
+
+@router.get("/v1/tasks")
+async def openai_task_list(request: Request):
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    items = await _media_store(request).list_tasks(_owner_of(key))
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse({"items": items}, status_code=200)
+
+
+@router.get("/v1/tasks/{task_id}")
+async def openai_task_get(request: Request, task_id: str):
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    view = await _media_store(request).get_task(_owner_of(key), task_id)
+    if view is None:
+        raise GatewayError(
+            404, "任务不存在", type_="invalid_request_error", code="task_not_found"
+        )
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(view, status_code=200)
+
+
+@router.post("/v1/tasks/{task_id}/cancel")
+async def openai_task_cancel(request: Request, task_id: str):
+    key, adapter = await _media_admit(request)
+    started = time.perf_counter()
+    view = await _media_store(request).cancel(_owner_of(key), task_id)
+    if view is None:
+        raise GatewayError(
+            404, "任务不存在或已结束", type_="invalid_request_error", code="task_not_found"
+        )
+    await _media_record(request, key=key, adapter=adapter, started=started, status=200)
+    return JSONResponse(view, status_code=200)
 
 
 @router.post("/v1/messages/count_tokens")

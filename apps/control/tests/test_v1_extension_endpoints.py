@@ -80,6 +80,13 @@ def _real_method(adapter: Any, name: str) -> bool:
     return callable(impl) and impl is not base
 
 
+def _cap_enabled(adapter: Any, cap: str) -> bool:
+    """gptgrok 的媒体能力按 options.media_base 运行时挂载，未配置时不要求反向声明。"""
+    if adapter.spec.id == "gptgrok" and cap in ("images", "videos", "media"):
+        return bool((adapter.options or {}).get("media_base"))
+    return True
+
+
 def test_extension_capability_truth_in_both_directions() -> None:
     problems: list[str] = []
     for pid, adapter in sorted(ADAPTERS.items()):
@@ -88,11 +95,11 @@ def test_extension_capability_truth_in_both_directions() -> None:
             missing = [name for name in required if not _real_method(adapter, name)]
             if caps.get(cap) is True and missing:
                 problems.append(f"{pid}: 声明 {cap}=True 却没有真实实现 {missing}")
-            if caps.get(cap) is not True and not missing:
+            if caps.get(cap) is not True and not missing and _cap_enabled(adapter, cap):
                 problems.append(f"{pid}: 已实现 {list(required)} 却没声明 {cap}")
         for cap, optional in OPTIONAL_METHODS.items():
             built = [name for name in optional if _real_method(adapter, name)]
-            if built and caps.get(cap) is not True:
+            if built and caps.get(cap) is not True and _cap_enabled(adapter, cap):
                 problems.append(f"{pid}: 实现 {built} 但 {cap} 未声明")
     assert not problems, problems
 

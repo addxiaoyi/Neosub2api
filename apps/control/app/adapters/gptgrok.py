@@ -15,12 +15,14 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 import httpx
 
 from ..api_utils import exc_summary
 from ..config import Settings
+from ..services.gptgrok_media import MediaClient, MediaReply, media_base, media_key
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
 from .key_pool import COOLDOWN_STATUSES, DEFAULT_COOLDOWN_SEC, KeyLease, KeyPool
@@ -416,6 +418,33 @@ class GptGrokAdapter(ProviderAdapter):
         # 轮换状态属于本实例；同一进程内多个适配器互不影响
         self._keys_pool = KeyPool()
         super().__init__(base_url)
+        self.spec = self._compose_spec()
+
+    def configure(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        options: dict[str, Any] | None = None,
+        api_keys: list[str] | None = None,
+    ) -> None:
+        super().configure(base_url=base_url, api_key=api_key, options=options, api_keys=api_keys)
+        # 媒体能力只在配置了子工程地址时挂上：默认部署的能力集与判定前完全一致
+        self.spec = self._compose_spec()
+
+    def _compose_spec(self) -> ProviderSpec:
+        base = GptGrokAdapter.spec
+        if not media_base(self.options):
+            return base
+        caps = dict(base.capabilities)
+        caps.update({"images": True, "videos": True, "media": True})
+        return replace(
+            base,
+            capabilities=caps,
+            requires=base.requires + (
+                "options.media_base（媒体子工程地址，图片/视频/文件/可编辑任务需要）",
+            ),
+        )
 
     # ---------- 通道与凭证 ----------
 
@@ -1472,6 +1501,55 @@ class GptGrokAdapter(ProviderAdapter):
         elif channel == "chatgpt":
             ids = [item for item in ids if not item.startswith("grok")]
         return [{"id": item, "object": "model", "owned_by": "gptgrok"} for item in ids]
+
+    # ---------- 媒体子工程（2-A1～A5） ----------
+
+    def _media(self) -> MediaClient:
+        base = media_base(self.options)
+        if not base:
+            raise ProviderError(400, "GPT/Grok 未配置媒体子工程地址 options.media_base")
+        return MediaClient(base, media_key(self.options))
+
+    @staticmethod
+    def _reply(payload: Any, status_code: int = 200) -> MediaReply:
+        return MediaReply(status_code, body=json.dumps(payload, ensure_ascii=False).encode())
+
+    async def image_generation(self, payload: dict[str, Any], *, stream: bool = False) -> MediaReply:
+        return self._reply(await self._media().images_generate(payload))
+
+    async def image_edit(self, payload: dict[str, Any], *, stream: bool = False) -> MediaReply:
+        return self._reply(await self._media().images_edit(payload))
+
+    async def video_create(self, payload: dict[str, Any], *, stream: bool = False) -> MediaReply:
+        return self._reply(await self._media().videos_create(payload))
+
+    async def video_task(self, task_id: str) -> MediaReply:
+        return self._reply(await self._media().videos_get(task_id))
+
+    async def media(self, name: str) -> MediaReply:
+        return await self._media().media_get(name)
+
+    async def upload_file(
+        self, *, filename: str, content_type: str, data: bytes, purpose: str = ""
+    ) -> dict[str, Any]:
+        return await self._media().files_upload(
+            filename=filename, content_type=content_type, data=data, purpose=purpose
+        )
+
+    async def list_files(self) -> dict[str, Any]:
+        return await self._media().files_list()
+
+    async def delete_file(self, file_id: str) -> dict[str, Any]:
+        return await self._media().files_delete(file_id)
+
+    async def editable_create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._media().editable_create(payload)
+
+    async def editable_get(self, task_id: str) -> dict[str, Any]:
+        return await self._media().editable_get(task_id)
+
+    async def editable_list(self, ids: str = "") -> dict[str, Any]:
+        return await self._media().editable_list(ids)
 
     async def health(self) -> dict[str, Any]:
         keys = self._keys()
