@@ -17,6 +17,7 @@ import hashlib
 import logging
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +27,27 @@ from fastapi.responses import JSONResponse
 from ..gateway_errors import PROTOCOL_ANTHROPIC, GatewayError, protocol_for_path
 
 logger = logging.getLogger("unified.ratelimit")
+
+# 进程内运行时计数，供 /api/metrics 读取：中间件实例被 add_middleware 收走后
+# 外部拿不到引用，所以计数放在模块级。与 G3 的两把闸同生命周期（每进程一份）。
+_runtime_lock = threading.Lock()
+_runtime_counts: dict[str, int] = {
+    "inflight": 0,
+    "key_rejected": 0,
+    "concurrency_rejected": 0,
+}
+
+
+def runtime_snapshot() -> dict[str, int]:
+    """网关运行时快照：当前在途请求数 + 两类限流命中次数。"""
+    with _runtime_lock:
+        return dict(_runtime_counts)
+
+
+def _bump(name: str, delta: int = 1) -> None:
+    with _runtime_lock:
+        _runtime_counts[name] = _runtime_counts.get(name, 0) + delta
+
 
 # 固定窗口长度：需求口径就是「每分钟」，不单独开 env 旋钮
 RATE_WINDOW_SEC = 60
@@ -119,8 +141,17 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # 在途计数覆盖流式响应的全过程：放行与拒绝都要记，闸门关闭时也要能看见负载
+        _bump("inflight")
+        try:
+            await self._dispatch(scope, receive, send, path)
+        finally:
+            _bump("inflight", -1)
+
+    async def _dispatch(self, scope: dict[str, Any], receive: Any, send: Any, path: str) -> None:
         cfg = self.config
         if cfg.max_concurrency > 0 and self._inflight >= cfg.max_concurrency:
+            _bump("concurrency_rejected")
             await self._reject(
                 scope,
                 receive,
@@ -143,6 +174,7 @@ class RateLimitMiddleware:
         if cfg.rpm > 0 and token:
             allowed, retry_after = self._take(token, time.monotonic(), cfg.rpm)
             if not allowed:
+                _bump("key_rejected")
                 await self._reject(
                     scope,
                     receive,

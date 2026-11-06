@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
 import uuid
 
 import httpx
 import pytest
+
+from app.routers.health import _collect_pools
+from app.services.rotation import CredentialPool, fingerprint
 
 pytestmark = pytest.mark.gateway
 
@@ -111,6 +115,95 @@ def test_json_metrics_kept_on_new_path(admin: httpx.Client) -> None:
     assert set(body) >= {"generated_at", "window_seconds", "requests", "providers", "failure_rate_limited"}
     assert body["window_seconds"] == 3600
     assert isinstance(body["requests"]["total"], int)
+
+
+def test_runtime_metrics_present_and_dimensioned(admin: httpx.Client) -> None:
+    """运行时指标：在途、限流命中、限流阈值都要在，且限流命中按 kind 分维度。"""
+    samples = _parse(_metrics(admin))
+    names = {name for name, _, _ in samples}
+    for expected in (
+        "unified_gateway_inflight_requests",
+        "unified_gateway_rate_limit_events_total",
+        "unified_gateway_rate_limit_limit",
+        "unified_adapter_health",
+    ):
+        assert expected in names, f"缺指标 {expected}"
+
+    assert _value(samples, "unified_gateway_inflight_requests") >= 0
+    for kind in ("key_rpm", "gateway_concurrency"):
+        assert _value(samples, "unified_gateway_rate_limit_events_total", kind=kind) >= 0
+    for metric in ("requests", "concurrency"):
+        assert _value(samples, "unified_gateway_rate_limit_limit", metric=metric) >= 0
+    assert any(status in {"ok", "failed", "unsupported", "unchecked"}
+               for name, labels, _ in samples
+               if name == "unified_adapter_health"
+               for status in [labels.get("status")])
+
+    # 账号池必须带 provider 维度；测试环境没配凭据时也应有 0 值样本
+    pool_rows = [labels for name, labels, _ in samples
+                 if name == "unified_credential_pool_available"]
+    assert pool_rows, "账号池指标缺失"
+    assert all(labels.get("provider") for labels in pool_rows)
+
+
+def test_json_metrics_runtime_section(admin: httpx.Client) -> None:
+    body = admin.get("/api/metrics/json", params={"window_seconds": 3600}).json()
+    runtime = body["runtime"]
+    assert set(runtime) >= {"inflight", "rate_limit", "pools", "adapter_health", "failure_budget"}
+    assert set(runtime["rate_limit"]) >= {
+        "window_sec", "requests_limit", "concurrency_limit", "key_rejected", "concurrency_rejected",
+    }
+    assert isinstance(runtime["pools"], list)
+    assert isinstance(runtime["failure_budget"], list)
+
+
+class _PoolAdapter:
+    """只实现指标采集用到的两个访问点，免得为一条用例构造完整适配器。"""
+
+    def __init__(self, pool: CredentialPool, keys: list[str]) -> None:
+        self._pool = pool
+        self._keys_data = keys
+
+    def _keys(self) -> list[str]:
+        return self._keys_data
+
+
+class _StubRegistry:
+    def __init__(self, adapter) -> None:
+        self._adapter = adapter
+
+    def list_public(self) -> list[dict]:
+        return [{"id": "stub"}]
+
+    def get(self, pid: str) -> object:
+        return self._adapter
+
+
+def test_pool_metrics_use_fingerprint_not_secret() -> None:
+    secret = f"sk-live-{uuid.uuid4().hex}"
+    pool = CredentialPool()
+    asyncio.run(pool.report_failure(secret, 429))
+
+    rows = asyncio.run(_collect_pools(_StubRegistry(_PoolAdapter(pool, [secret]))))
+    assert rows, "账号池快照缺失"
+    row = rows[0]
+    assert row["provider"] == "stub"
+    assert row["cooling"] == 1
+    assert row["available"] == 0
+    entry = row["credentials"][0]
+    assert entry["id"] == fingerprint(secret), "凭据维度必须是指纹口径"
+    assert entry["consecutive_failures"] == 1
+    assert secret not in repr(rows), "凭据原文进了指标结构"
+
+
+def test_pool_metrics_empty_data_does_not_raise() -> None:
+    rows = asyncio.run(_collect_pools(_StubRegistry(object())))
+    assert rows == []
+
+    empty_pool = CredentialPool()
+    rows = asyncio.run(_collect_pools(_StubRegistry(_PoolAdapter(empty_pool, []))))
+    assert rows[0]["available"] == 0 and rows[0]["cooling"] == 0
+    assert rows[0]["credentials"] == []
 
 
 def test_metrics_requires_admin(admin: httpx.Client, viewer: httpx.Client) -> None:

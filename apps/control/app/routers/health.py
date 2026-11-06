@@ -26,6 +26,7 @@ from .. import __version__
 from ..alerting import evaluate_alerts
 from ..api_utils import log_failure_sql, log_success_sql, now
 from ..billing import window_usage
+from ..middleware.rate_limit import load_rate_limit_config, runtime_snapshot
 from ..observability import (
     DURATION_BUCKETS_MS,
     current_context,
@@ -51,6 +52,10 @@ LOCAL_REJECTION_SQL = (
     "OR COALESCE(error, '') LIKE '%model_not_found%'"
 )
 CONNECTION_FAILURE_SQL = "COALESCE(error, '') LIKE '%上游不可达%'"
+
+# 账号池实例的挂载点：适配器各自持有，控制面只读借用，不新建第二份状态
+POOL_ATTRS = ("_pool", "_keys_pool", "_scheduler")
+KEYS_ATTRS = ("_keys", "_configured_tokens")
 
 
 def _database_check(db) -> dict[str, Any]:
@@ -323,7 +328,109 @@ def _alert_history(conn) -> list[Any]:
     ).fetchall()
 
 
-def _render_prometheus(conn, window: int) -> str:
+async def _collect_pools(registry) -> list[dict[str, Any]]:
+    """只读借用各适配器的账号池快照；没有池的 provider 直接跳过，不编造数据。"""
+    rows: list[dict[str, Any]] = []
+    for item in registry.list_public():
+        pid = str(item.get("id") or "")
+        try:
+            adapter = registry.get(pid)
+        except Exception:  # noqa: BLE001 - 单个适配器不可用不能带走整份指标
+            continue
+        pool = None
+        for attr in POOL_ATTRS:
+            pool = getattr(adapter, attr, None)
+            if pool is not None:
+                break
+        keys_fn = None
+        for attr in KEYS_ATTRS:
+            candidate = getattr(adapter, attr, None)
+            if callable(candidate):
+                keys_fn = candidate
+                break
+        snapshot = getattr(pool, "snapshot", None)
+        if snapshot is None or keys_fn is None:
+            continue
+        try:
+            state = await snapshot(keys_fn())
+        except Exception:  # noqa: BLE001 - 池快照失败只影响这一家
+            logger.warning("账号池快照失败 provider=%s", pid, exc_info=True)
+            continue
+        credentials = list(state.get("credentials") or [])
+        states: dict[str, int] = {}
+        for entry in credentials:
+            key = str(entry.get("state") or "unknown")
+            states[key] = states.get(key, 0) + 1
+        rows.append({
+            "provider": pid,
+            "available": int(state.get("available") or 0),
+            "cooling": int(state.get("cooling") or 0),
+            "states": states,
+            # 条目里只有 cred- 指纹，没有凭据原文
+            "credentials": credentials,
+        })
+    return rows
+
+
+def _failure_budget(conn, settings, at: int) -> list[dict[str, Any]]:
+    """失败预算余量：按 (key_id, provider) 聚合窗口内失败数，口径与 check_failure_rate 一致。"""
+    window_sec = int(getattr(settings, "failure_window_sec", 0) or 0)
+    limit = int(getattr(settings, "failure_window_max", 0) or 0)
+    if window_sec <= 0 or limit <= 0:
+        return []
+    rows = conn.execute(
+        "SELECT key_id, provider, COUNT(*) AS n FROM request_logs "
+        "WHERE key_id IS NOT NULL AND ts >= ? AND status <> 429 "
+        "AND (status >= 400 OR COALESCE(error, '') <> '') "
+        "GROUP BY key_id, provider",
+        (at - window_sec,),
+    ).fetchall()
+    return [
+        {
+            "key_id": int(row["key_id"]),
+            "provider": str(row["provider"] or ""),
+            "used": int(row["n"] or 0),
+            "limit": limit,
+            "remaining": max(0, limit - int(row["n"] or 0)),
+        }
+        for row in rows
+    ]
+
+
+async def _runtime_state(conn, request: Request) -> dict[str, Any]:
+    """网关运行时状态：在途 / 限流命中 / 账号池 / 适配器健康 / 失败预算余量。"""
+    settings = request.app.state.settings
+    limits = load_rate_limit_config()
+    counters = runtime_snapshot()
+    pools = await _collect_pools(request.app.state.registry)
+
+    health_service = getattr(request.app.state, "health_service", None)
+    probes = health_service.snapshot(limit=1)["providers"] if health_service else []
+
+    return {
+        "inflight": int(counters.get("inflight", 0)),
+        "rate_limit": {
+            "window_sec": int(limits.window_sec),
+            "requests_limit": int(limits.rpm),
+            "concurrency_limit": int(limits.max_concurrency),
+            "key_rejected": int(counters.get("key_rejected", 0)),
+            "concurrency_rejected": int(counters.get("concurrency_rejected", 0)),
+        },
+        "pools": pools,
+        "adapter_health": [
+            {
+                "provider": str(item.get("provider") or ""),
+                "status": str(item.get("status") or "unchecked"),
+                "checked_at": item.get("checked_at"),
+                "latency_ms": item.get("latency_ms"),
+            }
+            for item in probes
+        ],
+        "failure_budget": _failure_budget(conn, settings, now()),
+    }
+
+
+def _render_prometheus(conn, window: int, runtime: dict[str, Any]) -> str:
     at = now()
     since = at - window
     lines: list[str] = []
@@ -409,6 +516,60 @@ def _render_prometheus(conn, window: int) -> str:
         lines.append(_line("unified_alert_last_triggered_timestamp_seconds", labels,
                            int(row["last_at"] or 0)))
 
+    _header(lines, "unified_gateway_inflight_requests", "gauge",
+            "网关 /v1 在途请求数（本进程，含拒绝中的请求）")
+    lines.append(_line("unified_gateway_inflight_requests", {}, runtime["inflight"]))
+
+    limits = runtime["rate_limit"]
+    _header(lines, "unified_gateway_rate_limit_events_total", "counter",
+            "网关限流命中次数（key_rpm=密钥 RPM 超限，gateway_concurrency=并发上限）")
+    for kind, key in (("key_rpm", "key_rejected"), ("gateway_concurrency", "concurrency_rejected")):
+        lines.append(_line("unified_gateway_rate_limit_events_total", {"kind": kind}, limits[key]))
+
+    _header(lines, "unified_gateway_rate_limit_limit", "gauge",
+            "网关限流阈值（requests=每分钟请求数，concurrency=并发上限；0=关闭）")
+    for metric, value in (("requests", limits["requests_limit"]),
+                          ("concurrency", limits["concurrency_limit"])):
+        lines.append(_line("unified_gateway_rate_limit_limit", {"metric": metric}, value))
+
+    pools = runtime["pools"]
+    _header(lines, "unified_credential_pool_available", "gauge", "账号池可用数（provider 维度）")
+    _header(lines, "unified_credential_pool_cooling", "gauge", "账号池冷却中数量")
+    _header(lines, "unified_credential_pool_state", "gauge",
+            "账号池按状态计数（ready / degraded / cooling / breaker）")
+    _header(lines, "unified_credential_cooldown_remaining_seconds", "gauge",
+            "账号冷却剩余秒数（cred 为凭据 sha256 前 12 位指纹）")
+    _header(lines, "unified_credential_consecutive_failures", "gauge", "账号连续失败次数")
+    for row in pools:
+        provider = row["provider"]
+        lines.append(_line("unified_credential_pool_available", {"provider": provider}, row["available"]))
+        lines.append(_line("unified_credential_pool_cooling", {"provider": provider}, row["cooling"]))
+        for state, count in sorted(row["states"].items()):
+            lines.append(_line("unified_credential_pool_state",
+                               {"provider": provider, "state": state}, count))
+        for entry in row["credentials"]:
+            labels = {"provider": provider, "cred": str(entry.get("id") or "")}
+            lines.append(_line("unified_credential_cooldown_remaining_seconds", labels,
+                               float(entry.get("cooldown_remaining") or 0.0)))
+            lines.append(_line("unified_credential_consecutive_failures", labels,
+                               int(entry.get("consecutive_failures") or 0)))
+
+    _header(lines, "unified_adapter_health", "gauge",
+            "适配器最近一次健康探测（1=当前状态；status=ok/failed/unsupported/unchecked）")
+    for item in runtime["adapter_health"]:
+        lines.append(_line("unified_adapter_health",
+                           {"provider": item["provider"], "status": item["status"]}, 1))
+
+    budget = runtime["failure_budget"]
+    _header(lines, "unified_failure_budget_used", "gauge", "失败预算：窗口内已用失败次数")
+    _header(lines, "unified_failure_budget_limit", "gauge", "失败预算上限")
+    _header(lines, "unified_failure_budget_remaining", "gauge", "失败预算剩余次数")
+    for row in budget:
+        labels = {"key_id": row["key_id"], "provider": row["provider"]}
+        lines.append(_line("unified_failure_budget_used", labels, row["used"]))
+        lines.append(_line("unified_failure_budget_limit", labels, row["limit"]))
+        lines.append(_line("unified_failure_budget_remaining", labels, row["remaining"]))
+
     return "\n".join(lines) + "\n"
 
 
@@ -417,7 +578,7 @@ def _clamp_window(window_seconds: int) -> int:
 
 
 @router.get("/metrics")
-def metrics(
+async def metrics(
     request: Request,
     window_seconds: int = 3600,
     user: dict = Depends(metrics_access),
@@ -430,19 +591,20 @@ def metrics(
             evaluate_alerts(conn, request.app.state.settings)
         except Exception:  # noqa: BLE001 - 告警评估失败不能带走指标抓取
             logger.exception("抓取时评估告警失败")
-        body = _render_prometheus(conn, window)
+        runtime = await _runtime_state(conn, request)
+        body = _render_prometheus(conn, window, runtime)
     finally:
         conn.close()
     return Response(content=body, media_type=PROMETHEUS_MEDIA_TYPE)
 
 
 @router.get("/metrics/json")
-def metrics_json(
+async def metrics_json(
     request: Request,
     window_seconds: int = 3600,
     user: dict = Depends(admin_user),
 ):
-    """旧版自定义 JSON：字段与路径迁移前一致，避免破坏既有消费方。"""
+    """旧版自定义 JSON：旧字段与路径迁移前一致，另加 runtime 运行时快照。"""
     window = _clamp_window(window_seconds)
     conn = request.app.state.db.connect()
     try:
@@ -451,6 +613,7 @@ def metrics_json(
         except Exception:  # noqa: BLE001 - 告警评估失败不能带走指标读取
             logger.exception("读取 JSON 指标时评估告警失败")
         body = _json_metrics(conn, window)
+        body["runtime"] = await _runtime_state(conn, request)
     finally:
         conn.close()
     return body
