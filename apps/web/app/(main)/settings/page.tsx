@@ -26,7 +26,8 @@ import {getExpiryDailyGroup, setExpiryDailyGroup} from '@/lib/display-prefs';
 import {useI18n} from '@/lib/i18n/provider';
 import {t as tGlobal, tp as tpGlobal} from '@/lib/i18n';
 import {RichText} from '@/lib/i18n/rich-text';
-import {settingsApi, upstreamApi, errText} from '@/lib/api';
+import {settingsApi, upstreamApi, errText, onboardingApi} from '@/lib/api';
+import {notifyOnboardingUpdated, openOnboarding} from '@/lib/onboarding';
 import {BASE_PATH} from '@/lib/base-path';
 import type {ModelInfo, ModelSource, UpstreamConfig, UserItem} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
@@ -35,6 +36,7 @@ import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
 import {BackupPanel} from '@/components/common/settings/BackupPanel';
+import {ConfigTransferPanel} from '@/components/common/settings/ConfigTransferPanel';
 import {TokensPanel} from '@/components/common/settings/TokensPanel';
 import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
 import {ProvidersSection} from '@/components/common/settings/ProvidersSection';
@@ -1407,7 +1409,7 @@ export default function SettingsPage() {
                             placeholder={f.placeholder ? tp(f.placeholder) : undefined}
                             onChange={(e) => setField(g.id, f.key, e.target.value)}
                             className={
-                              'h-8 shrink-0 bg-background text-xs ' +
+                              'h-8 shrink-0 bg-background text-xs max-w-full ' +
                               (caution ? 'w-56' : 'w-40') +
                               (err ? ' border-destructive' : '')
                             }
@@ -2016,6 +2018,8 @@ export default function SettingsPage() {
           <UpdatePanel />
           {/* 备份与恢复：端点与设置页其余维护动作一样是 admin-only */}
           {isAdmin && <BackupPanel />}
+          {/* 配置与账号打包导入导出 */}
+          {isAdmin && <ConfigTransferPanel />}
         </TabsContent>
 
         {/* ═══ 更新日志 ═══ */}
@@ -2025,6 +2029,37 @@ export default function SettingsPage() {
 
         {/* ═══ 关于 ═══ */}
         <TabsContent value="about" className="mt-4">
+          {isAdmin && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-[20px] bg-muted p-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <RotateCcw className="h-4 w-4" />
+                  {t('settings.onboardingRerunTitle')}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('settings.onboardingRerunDesc')}</p>
+              </div>
+              <ConfirmDialog
+                trigger={
+                  <Button variant="outline" size="sm" className="rounded-full">
+                    {t('settings.onboardingRerun')}
+                  </Button>
+                }
+                title={t('settings.onboardingRerunConfirmTitle')}
+                description={t('settings.onboardingRerunConfirmDesc')}
+                confirmText={t('settings.onboardingRerun')}
+                onConfirm={async () => {
+                  try {
+                    await onboardingApi.reset();
+                    notifyOnboardingUpdated();
+                    openOnboarding();
+                    notify.ok(t('settings.onboardingRerunDone'));
+                  } catch (error) {
+                    notify.err(errText(error));
+                  }
+                }}
+              />
+            </div>
+          )}
           <div className="rounded-[20px] bg-muted p-5 text-xs leading-6 text-muted-foreground">
             <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
               <SettingsIcon className="h-4 w-4" />
