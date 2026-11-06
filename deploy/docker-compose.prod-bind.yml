@@ -1,0 +1,99 @@
+# 生产编排（数据目录绑挂版）：control + web（Next 静态导出 + /api、/v1 反代）。
+# 与 docker-compose.prod.yml 的区别只有两点，都是为了「进程内自动更新」这条运维前提：
+#   1) 数据目录必须是宿主机目录绑挂（bind mount），不能是命名卷——换容器后卷名不变但路径会漂；
+#   2) restart: unless-stopped，自更新替换容器后由 Docker 负责拉起。
+# TLS/证书仍由外层入口（deploy/nginx.conf 或云负载均衡）负责，本文件只监听回环，端口按 .env 指定。
+name: unified-2api-prodbind
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  control:
+    build:
+      context: ..
+      dockerfile: apps/control/Dockerfile
+    image: unified-2api-control:local
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      # 默认只绑回环，公网入口交给外层 nginx；演练需要直连时可把 BIND_ADDR 设为 0.0.0.0
+      - "${BIND_ADDR:-127.0.0.1}:${CONTROL_PORT:-8460}:8000"
+    volumes:
+      - "${UNIFIED_DATA_BIND:-../data}:/data"
+    environment:
+      # ---- 必须显式给出 ----------------------------------------------------------
+      UNIFIED_DATA_DIR: /data
+      UNIFIED_HOST: 0.0.0.0
+      UNIFIED_PORT: "8000"
+      # 演示模式只能在回环地址上跑（app.demo.ensure_loopback_bind），容器里必须关掉；
+      # 需要演练 demo provider 时单独起一次性容器，用 docker exec 走回环请求。
+      UNIFIED_DEMO_MODE: "0"
+      UNIFIED_ADMIN_USER: ${UNIFIED_ADMIN_USER:-admin}
+      # 留空会在首次启动时随机生成并写入 /data/admin-password.txt；生产建议显式设置
+      UNIFIED_ADMIN_PASSWORD: ${UNIFIED_ADMIN_PASSWORD:-}
+      # 同源部署（nginx 反代）时可留空；前端独立域名访问 API 时才需要列出来
+      UNIFIED_CORS_ORIGINS: ${UNIFIED_CORS_ORIGINS:-}
+      # sidecar 探测超时（秒）：宿主机 sidecar 不在线时，这个值决定设置页每张卡的等待时间
+      UNIFIED_SIDECAR_PROBE_TIMEOUT: ${UNIFIED_SIDECAR_PROBE_TIMEOUT:-1.5}
+      # ---- 其余按需覆盖 ----------------------------------------------------------
+      UNIFIED_SESSION_TTL_SEC: ${UNIFIED_SESSION_TTL_SEC:-86400}
+      UNIFIED_COOKIE_SECURE: ${UNIFIED_COOKIE_SECURE:-true}
+      UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
+      UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
+      UNIFIED_SSE_MAX_SECONDS: ${UNIFIED_SSE_MAX_SECONDS:-600}
+      UNIFIED_LOG_LEVEL: ${UNIFIED_LOG_LEVEL:-info}
+      UNIFIED_LOG_FORMAT: ${UNIFIED_LOG_FORMAT:-text}
+      UNIFIED_ENABLE_DOCS: ${UNIFIED_ENABLE_DOCS:-0}
+      UNIFIED_UPSTREAM_MAX_CONNECTIONS: ${UNIFIED_UPSTREAM_MAX_CONNECTIONS:-100}
+      UNIFIED_UPSTREAM_MAX_KEEPALIVE: ${UNIFIED_UPSTREAM_MAX_KEEPALIVE:-50}
+      UNIFIED_FAILURE_WINDOW_SEC: ${UNIFIED_FAILURE_WINDOW_SEC:-60}
+      UNIFIED_FAILURE_WINDOW_MAX: ${UNIFIED_FAILURE_WINDOW_MAX:-20}
+      UNIFIED_MODELS_CACHE_TTL_SEC: ${UNIFIED_MODELS_CACHE_TTL_SEC:-60}
+      UNIFIED_MODEL_FALLBACK_FIRST: ${UNIFIED_MODEL_FALLBACK_FIRST:-0}
+      CODEBUDDY_BASE: ${CODEBUDDY_BASE:-http://host.docker.internal:7864}
+      CODEBUDDY_API_KEY: ${CODEBUDDY_API_KEY:-}
+      OPENCODE_UPSTREAM_BASE: ${OPENCODE_UPSTREAM_BASE:-https://opencode.ai/zen}
+      TRAE_SIDECAR_BASE: ${TRAE_SIDECAR_BASE:-http://host.docker.internal:7871}
+      DEEPSEEK_SIDECAR_BASE: ${DEEPSEEK_SIDECAR_BASE:-http://host.docker.internal:5001}
+      QODER_SIDECAR_BASE: ${QODER_SIDECAR_BASE:-http://host.docker.internal:7873}
+      CODAR_SIDECAR_BASE: ${CODAR_SIDECAR_BASE:-http://host.docker.internal:8801}
+      # sidecar 在宿主机上跑，容器内要能解释 host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # 打真实端点而不是只探 TCP：/healthz 会在 DB 不可用时返回非 200
+      test: ["CMD", "python", "-c", "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 冷启动 + 大库首次建表/迁移可能超过 30s，给足启动窗口，避免被误判为 unhealthy
+      start_period: 120s
+    logging: *default-logging
+
+  web:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on:
+      control:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8461}:80"
+    volumes:
+      # 与根 docker-compose.yml 同一做法：out/ 是构建产物，由宿主机构建后绑挂进来。
+      # 好处是不在镜像里固化前端构建结果，升级前端只需替换 out/ 再 reload；
+      # 代价是部署机必须能执行 npm run build:export（或由 CI 产出 out/ 后拷入）。
+      - ../apps/web/out:/usr/share/nginx/html:ro
+      - ../apps/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      # 两段都验：静态产物在（index.html 可读）+ 反代链路通（/healthz 经 nginx 到控制面）。
+      # 只验 /healthz 的话，out/ 挂空也会判健康。
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1/index.html && wget -q -T 3 -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
