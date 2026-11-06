@@ -19,6 +19,7 @@ import httpx
 
 from ..api_utils import exc_summary, safe_url
 from ..config import Settings
+from ..services.muse_session import SessionPool, ensure_keepalive_loop, fingerprint
 from ..services.rotation import CredentialPool, sticky_key_from_payload
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
@@ -119,6 +120,9 @@ class MuseAdapter(ProviderAdapter):
         self._settings = settings
         # 账号池：健康度、分档冷却、粘性与权重都在 services/rotation.py 的统一口径里
         self._pool = CredentialPool()
+        # 网页会话池按 options 内容复用：configure 每次请求都会更新 options，不能每请求重建
+        self._session: SessionPool | None = None
+        self._session_sig = ""
         super().__init__(base_url)
 
     def credential_problem(self, credential_type: str, text: str) -> str:
@@ -178,13 +182,27 @@ class MuseAdapter(ProviderAdapter):
             "accept": "text/event-stream" if stream else "application/json",
             "user-agent": self.client_user_agent() or CLIENT_UA,
         }
-        cookie = str(self.options.get("cookie") or "").strip()
+        cookie = self._cookie()
         if cookie:
             headers["cookie"] = cookie
         extra = self.options.get("extra_headers")
         if isinstance(extra, dict):
             headers.update({str(k): str(v) for k, v in extra.items()})
         return headers
+
+    def _cookie(self) -> str:
+        # 未配置 cookie_pool 时走旧的单 cookie，行为与改动前逐字节一致
+        if self.options.get("cookie_pool") is not None:
+            return self._session_pool().pick()
+        return str(self.options.get("cookie") or "").strip()
+
+    def _session_pool(self) -> SessionPool:
+        sig = repr(self.options.get("cookie_pool")) + "\x00" + str(self.options.get("cookie") or "")
+        if self._session is not None and sig == self._session_sig:
+            return self._session
+        self._session = SessionPool.from_options(self.options, self._settings)
+        self._session_sig = sig
+        return self._session
 
     def _client(self, token: str, *, stream: bool, timeout: float | None = None) -> UnifiedApiClient:
         return UnifiedApiClient(
@@ -197,6 +215,48 @@ class MuseAdapter(ProviderAdapter):
     def _path(self, key: str, default: str) -> str:
         value = str(self.options.get(key) or "").strip()
         return value or default
+
+    # ---------- 会话续期 ----------
+
+    async def cookie_refresh(self, cookie: str) -> int:
+        """向上游续期单个网页会话；只回传上游给的 cookies_exp，拿不到就是 0。"""
+        path = str(self.options.get("cookie_refresh_path") or "").strip()
+        if not path:
+            return 0
+        method = str(self.options.get("cookie_refresh_method") or "POST").strip().upper()
+        headers = {"user-agent": self.client_user_agent() or CLIENT_UA}
+        if cookie:
+            headers["cookie"] = cookie
+        # 续期走网页网关：只带 Cookie 与 UA，不夹带 Bearer
+        client = UnifiedApiClient(
+            self.base_url,
+            timeout=float(self.options.get("cookie_refresh_timeout") or 15.0),
+            proxy=str(self.options.get("proxy") or ""),
+            extra_headers=headers,
+        )
+        try:
+            reply = await client.forward(path, {}, stream=False, method=method)
+        except (ProviderError, httpx.HTTPError) as exc:
+            logger.info("Muse 会话续期请求失败 fp=%s error=%s", fingerprint(cookie), exc_summary(exc))
+            return 0
+        if reply.status_code >= 300:
+            logger.info("Muse 会话续期返回 %s fp=%s", reply.status_code, fingerprint(cookie))
+            return 0
+        try:
+            data = json.loads(reply.body or b"{}")
+        except json.JSONDecodeError:
+            logger.info("Muse 会话续期返回非 JSON fp=%s", fingerprint(cookie))
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        raw_exp = data.get("cookies_exp")
+        if raw_exp is None and isinstance(data.get("data"), dict):
+            raw_exp = data["data"].get("cookies_exp")
+        if isinstance(raw_exp, bool) or not isinstance(raw_exp, (int, float)):
+            logger.info("Muse 会话续期未回报 cookies_exp fp=%s", fingerprint(cookie))
+            return 0
+        exp = int(raw_exp)
+        return exp if exp > 0 else 0
 
     # ---------- 错误分类 ----------
 
@@ -404,12 +464,19 @@ class MuseAdapter(ProviderAdapter):
     async def health(self) -> dict[str, Any]:
         keys = self._keys()
         rotation = await self._pool.snapshot(keys)
+        session: dict[str, Any] = {}
+        pool = self._session_pool()
+        if self.options.get("cookie_pool") is not None:
+            session = {"cookie_pool": pool.describe()}
+        # 保活是旁路：这里只负责按配置惰性起一次，重复调用无副作用
+        ensure_keepalive_loop(pool, self, self.options)
         if not keys:
             return {
                 "connected": False,
                 "error": "未配置 Muse 凭证：请在 api.meta.ai 创建 api_key 后导入",
                 "rotation": rotation,
                 "cooling": rotation.get("cooling", 0),
+                **session,
             }
         try:
             reply = await self._send(self._path("health_path", MODELS_PATH), None, stream=False)
@@ -419,6 +486,7 @@ class MuseAdapter(ProviderAdapter):
                 "error": exc.message,
                 "rotation": rotation,
                 "cooling": rotation.get("cooling", 0),
+                **session,
             }
         try:
             data = json.loads(reply.body or b"{}")
@@ -428,6 +496,7 @@ class MuseAdapter(ProviderAdapter):
                 "note": "凭证可用，但模型接口返回非 JSON",
                 "rotation": rotation,
                 "cooling": rotation.get("cooling", 0),
+                **session,
             }
         items = data.get("data") if isinstance(data.get("data"), list) else None
         return {
@@ -435,6 +504,7 @@ class MuseAdapter(ProviderAdapter):
             "models": len(items) if items else len(DEFAULT_MODELS),
             "rotation": rotation,
             "cooling": rotation.get("cooling", 0),
+            **session,
         }
 
 

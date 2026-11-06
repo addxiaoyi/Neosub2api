@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..config import Settings
+from ..services.proxy_pool import ProxyPool
 from ..services.rotation import fingerprint
 from ..services.scheduling import Plan, Scheduler, session_key
 from .base import ProviderError, ProviderSpec, stub_capabilities
@@ -39,6 +40,8 @@ _TOKEN_SPLIT = re.compile(r"[\s,;]+")
 
 # 失败动作表：0=网络层换号，401=先续期，402=登记冷却后停止透传，408/429=冷却后换号，5xx=换号
 RETRY_ACTIONS = {NETWORK_STATUS: "rotate", 401: "refresh", 402: "stop", 408: "cool", 429: "cool"}
+# 只认上游显式报出的风控码；靠文案猜会把正常账号打进冷却，宁可漏判也不扩大拦截面
+RESTRICTED_CODES = {"restricted_request", "restricted_request_block", "forbidden_fingerprint", "risk_control_block"}
 
 
 def _retryable(status: int) -> str:
@@ -46,6 +49,42 @@ def _retryable(status: int) -> str:
     if 500 <= status <= 599:
         return "rotate"
     return RETRY_ACTIONS.get(status, "")
+
+
+def _restricted_signal(status: int, body: bytes, headers, extra_codes) -> str:
+    """命中则返回上游码，否则空串；只读显式 code 字段，不猜 message 文案。
+
+    headers 留给后续按响应头判定，当前上游只会把风控码放在 JSON 体里。状态码先卡
+    400 以上：成功响应里出现同名字段不该触发短路。
+    """
+    if status < 400:
+        return ""
+    if isinstance(extra_codes, str):
+        extras = {extra_codes.strip()}
+    elif isinstance(extra_codes, (list, tuple, set)):
+        extras = {str(item).strip() for item in extra_codes}
+    else:
+        extras = set()
+    extras.discard("")
+    codes = RESTRICTED_CODES | extras
+    try:
+        data = json.loads(body or b"")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    candidates: list[Any] = []
+    inner = data.get("error")
+    if isinstance(inner, dict):
+        candidates.append(inner.get("code"))
+    elif isinstance(inner, str):
+        candidates.append(inner)
+    candidates.append(data.get("code"))
+    for value in candidates:
+        code = str(value).strip() if value is not None else ""
+        if code in codes:
+            return code
+    return ""
 
 
 def _enabled(value: Any) -> bool:
@@ -258,6 +297,7 @@ class CodarAdapter(OpenAICompatAdapter):
         base_url: str = "",
         timeout: float | None = None,
         extra_headers: dict[str, str] | None = None,
+        proxy: str | None = None,
     ) -> UnifiedApiClient:
         headers = {"user-agent": str(self.options.get("user_agent") or MODEL_USER_AGENT)}
         configured = self.options.get("extra_headers")
@@ -265,11 +305,14 @@ class CodarAdapter(OpenAICompatAdapter):
             headers.update({str(key): str(value) for key, value in configured.items()})
         if extra_headers:
             headers.update(extra_headers)
+        if proxy is None:
+            # options 保存后就地热更新，池对象不能缓存，每次按当前配置重新取出口
+            proxy = ProxyPool.from_options(self.options).next() or str(self.options.get("proxy") or "")
         return UnifiedApiClient(
             base_url or self.base_url,
             api_key=token,
             timeout=timeout or float(self.options.get("timeout") or 120.0),
-            proxy=str(self.options.get("proxy") or ""),
+            proxy=str(proxy or ""),
             extra_headers=headers,
         )
 
@@ -357,6 +400,21 @@ class CodarAdapter(OpenAICompatAdapter):
                 last_error = exc
                 logger.warning("Codar 网络层失败（%s），按状态 0 换号重试", exc.message)
                 continue
+            # 流式响应的头已发出，读体判定会破坏已建立的 SSE 透传，因此只做非流式判定
+            restricted = (
+                ""
+                if stream
+                else _restricted_signal(
+                    reply.status_code, reply.body or b"", reply.headers, self.options.get("restricted_codes")
+                )
+            )
+            if restricted:
+                logger.warning(
+                    "Codar 上游受限指纹 %s（status=%s），停止换号/续期并原样透传，避免继续轮换扩大风控面",
+                    restricted,
+                    reply.status_code,
+                )
+                return reply
             action = _retryable(reply.status_code)
             if not action:
                 await self._scheduler.note_success(token)
@@ -469,17 +527,22 @@ class CodarAdapter(OpenAICompatAdapter):
         ]
 
     async def health(self) -> dict[str, Any]:
+        pool = ProxyPool.from_options(self.options).describe()
         tokens = self._configured_tokens()
         if not tokens:
-            return {"connected": False, "error": "未配置 Codar 账号 token（服务商页 api_key 或 options.tokens）"}
+            return {
+                "connected": False,
+                "error": "未配置 Codar 账号 token（服务商页 api_key 或 options.tokens）",
+                "proxy_pool": pool,
+            }
         try:
             data = await self._json_with_tokens(CATALOG_PATH)
         except ProviderError as exc:
-            return {"connected": False, "error": exc.message}
+            return {"connected": False, "error": exc.message, "proxy_pool": pool}
         items = data.get("data") if isinstance(data, dict) else None
         count = len(items) if isinstance(items, list) else 0
         rotation = await self._scheduler.snapshot(tokens)
-        base = {"rotation": rotation, "cooling": rotation.get("cooling", 0)}
+        base = {"rotation": rotation, "cooling": rotation.get("cooling", 0), "proxy_pool": pool}
         if count:
             return {"connected": True, "models": count, **base}
         return {"connected": True, "models": 0, "note": "上游在线但模型目录为空", **base}

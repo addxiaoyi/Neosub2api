@@ -25,6 +25,7 @@ from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilitie
 from .client import UnifiedApiClient
 from .key_pool import DEFAULT_COOLDOWN_SEC
 from ..services.rotation import CredentialPool, sticky_key_from_payload
+from ..services.zcode_claim import ZcodeClaimService
 from .stream_util import (
     DONE, Reply, content_text, iter_sse, openai_chunk, openai_completion, sse_frame,
 )
@@ -98,6 +99,8 @@ class ZCodeAdapter(ProviderAdapter):
         # 轮换状态属于本实例：游标、冷却表、粘性绑定都不跨实例共享
         self._keys_pool = CredentialPool()
         super().__init__(base_url)
+        # 周末额度领取只读 options 与账号池，由既有健康巡检顺带触发；未开启时零副作用
+        self._claim = ZcodeClaimService(settings, adapter=self)
 
     # ---------- 凭证 ----------
 
@@ -625,7 +628,16 @@ class ZCodeAdapter(ProviderAdapter):
                 ids.append(value)
         return [{"id": model, "object": "model", "owned_by": "zcode"} for model in ids]
 
+    async def weekend_claim(self) -> dict[str, Any]:
+        return await self._claim.run(self)
+
     async def health(self) -> dict[str, Any]:
+        body = await self._health_probe()
+        # 领取搭车既有健康巡检，不新增调度器；未配置 weekend_claim 时 maybe_start 直接返回
+        await self._claim.maybe_start(self)
+        return body
+
+    async def _health_probe(self) -> dict[str, Any]:
         keys = self._keys()
         if not keys:
             return {"connected": False, "error": "未配置 ZCode 账号凭证"}

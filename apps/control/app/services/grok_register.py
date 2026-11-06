@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
 
+# register = 新号注册；relogin = 用已有 SSO/cookie 重新登录换新凭据
+JOB_TYPES = ("register", "relogin")
+
 PROTOCOL = "grok-register-executor/v1"
 
 # 执行器阶段 → 本端任务状态：pending/running 都在 running，done 才落 succeeded
@@ -189,16 +192,21 @@ class GrokRegisterService:
         proxy: str = "",
         max_attempts: int = 3,
         payload: dict[str, Any] | None = None,
+        job_type: str = "register",
     ) -> dict[str, Any]:
+        job_type = str(job_type or "").strip().lower()
+        if job_type not in JOB_TYPES:
+            raise ValueError(f"未知的任务类型：{job_type or '(空)'}（可选 register / relogin）")
         count = max(1, min(int(count), 1000))
         workers = max(1, min(int(workers), self._max_workers))
         max_attempts = max(1, min(int(max_attempts), 5))
         conn = self._db.connect()
         try:
             cursor = conn.execute(
-                "INSERT INTO grok_tasks(status, count, workers, email_provider, proxy, payload_json, "
-                "attempts, max_attempts, created_at, next_run_at) VALUES('queued',?,?,?,?,?,0,?,?,?)",
+                "INSERT INTO grok_tasks(status, job_type, count, workers, email_provider, proxy, payload_json, "
+                "attempts, max_attempts, created_at, next_run_at) VALUES('queued',?,?,?,?,?,?,0,?,?,?)",
                 (
+                    job_type,
                     count,
                     workers,
                     email_provider.strip(),
@@ -501,6 +509,7 @@ class GrokRegisterService:
             "workers": task["workers"],
             "email_provider": task["email_provider"],
             "proxy": task["proxy"],
+            "job_type": task.get("job_type") or "register",
             "payload": json.loads(task["payload_json"] or "{}"),
         }
         try:

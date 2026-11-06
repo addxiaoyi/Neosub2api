@@ -472,6 +472,8 @@ class Database:
             # 不能回溯标成失效
             _ensure_column(conn, "provider_health_checks", "upstream_status", "INTEGER")
             _ensure_column(conn, "provider_health_checks", "auth_failed", "INTEGER NOT NULL DEFAULT 0")
+            # 执行器新增 relogin 任务类型：老库补列，存量任务一律按 register 计
+            _ensure_column(conn, "grok_tasks", "job_type", "TEXT NOT NULL DEFAULT 'register'")
             # 热路径索引：建表/补列之后统一接线；定义升级靠 ensure_indexes 比对重建
             from .perf_indexes import ensure_indexes
 
