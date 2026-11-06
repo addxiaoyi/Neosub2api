@@ -29,7 +29,7 @@ python -c "import sys,inspect; sys.path.insert(0,'apps/control'); import app.ada
 | `qoder` | ✓ | ✓ | ✓ | — | 内置直连（COSY） | needs_config |
 | `trae` | ✓ | — | — | — | 内置直连（Solo/Work） | needs_config |
 
-> 2026-11-06 已更正（原单元格值逐字留档）：`opencode` / `qoder` / `trae` 的 readiness 列原均为「ready」。三家的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），当前 14 家全部 `needs_config`（其余见 `codebuddy.py:129` 等同字段）。`ready` 只表示「填好 key / base_url 就能调用」，**`ready` ≠ 真机跑通**；没有真实外呼证据的 provider 不按 `ready` 展示（同 `docs/PROVIDERS.md` §「就绪状态」）。
+> 2026-11-06 已更正（原单元格值逐字留档）：`opencode` / `qoder` / `trae` 的 readiness 列原均为「ready」。三家的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:532`、`trae.py:157`），当前 14 家全部 `needs_config`（其余见 `codebuddy.py:129` 等同字段）。`ready` 只表示「填好 key / base_url 就能调用」，**`ready` ≠ 真机跑通**；没有真实外呼证据的 provider 不按 `ready` 展示（同 `docs/PROVIDERS.md` §「就绪状态」）。
 > 误判后果：照旧表会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障；排期也会跳过它们的真实链路验证。`PROVIDERS.md`、`README.md`、`API-REFERENCE.md` 中的旧「3 家 ready」口径同批作废。
 
 `responses` 有 `codar`、`qoder`、`qoder_sidecar`、`codar_sidecar`、`muse`、`sub2api`、`gptgrok` 七家声明（2026-11-05 更正，原句与误判后果见下方更正块）。

@@ -11,14 +11,26 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from ..config import Settings
+from ..services.rotation import (
+    CredentialPool,
+    RotationStore,
+    fingerprint,
+    pick_in_group,
+    sticky_key_from_payload,
+)
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
+
+logger = logging.getLogger("unified.qoder")
 
 # ---------- 区域矩阵 ----------
 
@@ -72,6 +84,20 @@ SESSION_DEAD_WORDS = ("SessionDead", "AuthRejected", "HardCredit")
 # 允许换 host 的错误类别
 FALLBACK_STATUS = {429, 500, 502, 503, 504}
 FALLBACK_WORDS = ("model_gate", "model_rate", "model_blocked", "server", "timeout", "not_found")
+
+# 多身份：每条 provider_credentials 可用 JSON 凭据携带自己的身份字段
+IDENTITY_FIELDS = (
+    "uid",
+    "nickname",
+    "user_type",
+    "organization_id",
+    "organization_name",
+    "refresh_token",
+)
+ACCESS_TOKEN_FIELDS = ("access_token", "token", "api_key")
+
+# 可换账号的错误：鉴权失效、余额受限、限流、超时；业务 4xx 换号也没用
+ROTATE_STATUSES = {401, 402, 403, 408, 429}
 
 
 # ---------- 自定义 base64 ----------
@@ -440,6 +466,53 @@ def _tool_call_to_function_item(call: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class _Account:
+    """一条上游账号：凭据本体 + 该账号自己的身份字段。"""
+
+    key: str
+    token: str
+    identity: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def uid(self) -> str:
+        configured = str(self.identity.get("uid") or "").strip()
+        if configured:
+            return configured
+        return hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else ""
+
+
+def parse_account(raw: Any) -> _Account | None:
+    """解析凭据链里的一项：纯 token，或带身份的 JSON 凭据。
+
+    JSON 形状对用户只要求 `access_token`（也认 token/api_key），其余身份字段可选；
+    解析失败按整串 token 处理，避免把历史纯 token 凭据误判成坏号。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            token = ""
+            for name in ACCESS_TOKEN_FIELDS:
+                value = str(obj.get(name) or "").strip()
+                if value:
+                    token = value
+                    break
+            if token.lower().startswith("bearer "):
+                token = token[7:].strip()
+            if token:
+                identity = {name: obj[name] for name in IDENTITY_FIELDS if obj.get(name) not in (None, "")}
+                return _Account(text, token, identity)
+            return None
+    token = text[7:].strip() if text.lower().startswith("bearer ") else text
+    return _Account(text, token) if token else None
+
+
 class QoderAdapter(ProviderAdapter):
     spec = ProviderSpec(
         id="qoder",
@@ -448,7 +521,7 @@ class QoderAdapter(ProviderAdapter):
         license="本仓自研（MIT）",
         runtime="主仓内置（直连 COSY 网关）",
         status="implemented",
-        description="COSY 签名网关：OpenAI / Anthropic / Responses 三套协议转换，多产品线 × 多地域路由与 fallback。",
+        description="COSY 签名网关：OpenAI / Anthropic / Responses 三套协议转换，多产品线 × 多地域路由，账号池轮转与多身份凭据。",
         default_base_url=REGIONS["cn"]["gateway"],
         capabilities=stub_capabilities(chat=True, messages=True, models=True, responses=True),
         protocols=("openai.chat.completions", "anthropic.messages", "openai.responses"),
@@ -458,7 +531,7 @@ class QoderAdapter(ProviderAdapter):
         "PolyForm Noncommercial 1.0.0 的非商用限制针对的是 qoder_sidecar，而非本直连路径。",
         readiness="needs_config",
         requires=(
-            "Qoder access token（服务商页 api_key；uid 缺省时按 token 派生）",
+            "Qoder access token（每条 provider_credentials 一个账号；纯 token，或带 uid/组织等身份字段的 JSON 凭据）",
             "登录/刷新接口未验证：token 过期只能重新粘贴（refresh_token 仅写入身份字段，可不填）",
         ),
     )
@@ -466,8 +539,156 @@ class QoderAdapter(ProviderAdapter):
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
         self._sessions: dict[str, dict[str, Any]] = {}
-        self._cooldown: dict[str, float] = {}
+        # 多账号：选号、分档冷却、粘性与轮转组都复用统一账号池，不再自建冷却表
+        self._pool = CredentialPool()
+        self._store = RotationStore(getattr(settings, "db_path", None))
+        self._active: ContextVar[_Account | None] = ContextVar("qoder_active_account", default=None)
         super().__init__(base_url)
+
+    # ---------- 账号 ----------
+
+    def _group(self) -> str:
+        raw = self.options.get("group") or self.options.get("rotation_group") or "default"
+        return str(raw).strip()[:64] or "default"
+
+    def _accounts(self) -> list[_Account]:
+        extra = self.options.get("extra_keys") or []
+        if isinstance(extra, str):
+            extra = [extra]
+        raw = [*(self.api_keys or []), self.api_key, *extra]
+        accounts: list[_Account] = []
+        seen: set[str] = set()
+        for item in raw:
+            account = parse_account(item)
+            if account is not None and account.key not in seen:
+                seen.add(account.key)
+                accounts.append(account)
+        return accounts
+
+    def _keys(self) -> list[str]:
+        return [account.key for account in self._accounts()]
+
+    def _account(self, key: str = "") -> _Account | None:
+        if key:
+            for account in self._accounts():
+                if account.key == key:
+                    return account
+            return parse_account(key)
+        active = self._active.get()
+        if active is not None:
+            return active
+        accounts = self._accounts()
+        return accounts[0] if accounts else None
+
+    def _attempts(self, key_count: int) -> int:
+        configured = int(self.options.get("max_attempts") or 3)
+        return max(1, min(configured, 10, max(key_count, 1) * 2))
+
+    @staticmethod
+    def _rotatable(status: int) -> bool:
+        return status in ROTATE_STATUSES or 500 <= status <= 599
+
+    async def _note_failure(self, key: str, status: int, keys: list[str], retry_after: int = 0) -> bool:
+        """登记分档冷却；没有别的可用账号时不冷却，避免把唯一账号关进冷却后请求全 429。"""
+        others = [item for item in keys if item != key]
+        if others and await self._pool.available(others):
+            await self._pool.report_failure(key, status, cooldown_sec=float(retry_after) if retry_after else None)
+            return True
+        return False
+
+    async def _rotate_away(self, key: str) -> None:
+        """网络层/换号失败：解绑粘性并清掉轮转组当前成员，下一次尝试换号。"""
+        await self._pool.report_network_error(key)
+        self._store.clear("qoder", self._group())
+
+    def _all_keys_error(self, keys: list[str], last: ProviderError | None) -> ProviderError:
+        if last is not None:
+            return ProviderError(429, f"Qoder {len(keys)} 个账号全部不可用：{last.message}")
+        return ProviderError(429, f"Qoder {len(keys)} 个账号全部处于冷却中，请稍后重试")
+
+    def _tracked_stream(
+        self, source: AsyncIterator[bytes], key: str, keys: list[str], sticky: str
+    ) -> AsyncIterator[bytes]:
+        """流式响应只有读到正常收尾才算成功；中途报错按非流式同一口径登记账号池。"""
+
+        async def body():
+            completed = False
+            try:
+                async for chunk in source:
+                    yield chunk
+                completed = True
+            except ProviderError as exc:
+                if self._rotatable(exc.status_code):
+                    await self._note_failure(
+                        key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0)
+                    )
+                raise
+            except Exception:  # noqa: BLE001 - 断流/连接错误按出口问题处理，不判死账号
+                await self._rotate_away(key)
+                raise
+            finally:
+                if completed:
+                    await self._pool.report_success(key)
+                    if sticky:
+                        await self._pool.bind_sticky(sticky, key)
+
+        return body()
+
+    async def _run_with_account(
+        self,
+        payload: dict[str, Any],
+        opener: Callable[[_Account], Awaitable[_Reply]],
+        *,
+        streamed: bool,
+    ) -> tuple[_Reply, Any]:
+        """账号级重试：选号 → 打开上游 → 失败按分档冷却换下一个账号。"""
+        keys = self._keys()
+        if not keys:
+            raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
+        self._pool.set_weights(keys, self.options.get("key_weights"))
+        sticky = sticky_key_from_payload(payload)
+        last: ProviderError | None = None
+
+        for _ in range(self._attempts(len(keys))):
+            pick = await pick_in_group(
+                self._pool, self._store, provider="qoder", group=self._group(), keys=keys, sticky_key=sticky
+            )
+            if pick is None:
+                raise self._all_keys_error(keys, last)
+            account = self._account(pick.key)
+            if account is None:
+                raise ProviderError(401, "Qoder 凭据无法解析（应为 token 或含 access_token 的 JSON）")
+            if len(keys) > 1:
+                logger.info("Qoder 选号 cred=%s 规则=%s %s", pick.cred_id, pick.rule, pick.note or "-")
+            handle = self._active.set(account)
+            try:
+                reply = await opener(account)
+            except ProviderError as exc:
+                last = exc
+                if getattr(exc, "session_dead", False):
+                    self._invalidate_session(account)
+                if not self._rotatable(exc.status_code):
+                    raise
+                await self._rotate_away(pick.key)
+                if not await self._note_failure(
+                    pick.key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0)
+                ):
+                    raise
+                continue
+            finally:
+                self._active.reset(handle)
+
+            if streamed:
+                stream = getattr(reply, "_stream", None)
+                if stream is not None:
+                    reply._stream = self._tracked_stream(stream, pick.key, keys, sticky)
+                    return reply, pick
+            await self._pool.report_success(pick.key)
+            if sticky:
+                await self._pool.bind_sticky(sticky, pick.key)
+            return reply, pick
+
+        raise self._all_keys_error(keys, last)
 
     # ---------- 路由 ----------
 
@@ -509,15 +730,12 @@ class QoderAdapter(ProviderAdapter):
     # ---------- 身份 ----------
 
     def _token(self) -> str:
-        raw = self.api_key.strip()
-        return raw[7:].strip() if raw.lower().startswith("bearer ") else raw
+        account = self._account()
+        return account.token if account else ""
 
     def _uid(self) -> str:
-        configured = str(self.options.get("uid") or "").strip()
-        if configured:
-            return configured
-        token = self._token()
-        return hashlib.sha256(token.encode()).hexdigest()[:16] if token else ""
+        account = self._account()
+        return account.uid if account else ""
 
     def readiness_now(
         self,
@@ -530,42 +748,79 @@ class QoderAdapter(ProviderAdapter):
     ) -> tuple[str, tuple[str, ...]]:
         if credential_problem:
             return "needs_config", (credential_problem,)
-        token = credential.strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
-        if not token:
+        if not credential.strip():
             return "needs_config", self.spec.requires
+        if parse_account(credential) is None:
+            return "needs_config", ("Qoder 凭据无法解析：应为 access token，或含 access_token 的 JSON 身份凭据",)
         # uid 缺省可从 token 派生、refresh_token 只参与身份字段，两者都不是直连请求的必要条件
         return "ready", ()
 
-    def _session(self) -> dict[str, Any]:
-        token = self._token()
-        if not token:
+    def _identity(self, account: _Account) -> dict[str, Any]:
+        """身份字段：provider 级 options 做默认值，每条凭据自己的字段覆盖。"""
+        identity = {
+            "uid": account.uid,
+            "nickname": str(self.options.get("nickname") or ""),
+            "user_type": str(self.options.get("user_type") or DEFAULT_USER_TYPE),
+            "organization_id": str(self.options.get("organization_id") or ""),
+            "organization_name": str(self.options.get("organization_name") or ""),
+            "refresh_token": str(self.options.get("refresh_token") or ""),
+        }
+        for name, value in account.identity.items():
+            if name != "uid" and value not in (None, ""):
+                identity[name] = str(value)
+        return identity
+
+    def _session_key(self, account: _Account) -> str:
+        return f"{account.uid}:{fingerprint(account.token)}"
+
+    def _session(self, account: _Account | None = None, *, refresh: bool = False) -> dict[str, Any]:
+        account = account or self._account()
+        if account is None or not account.token:
             raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key）")
-        uid = self._uid()
-        cached = self._sessions.get(uid)
-        if cached and cached["access"] == token:
+        key = self._session_key(account)
+        cached = self._sessions.get(key)
+        if cached is not None and not refresh:
             return cached
         temp_key = uuid.uuid4().hex[:16].encode()
         cosy_key = base64.b64encode(rsa_pkcs1v15_encrypt(temp_key, SERVER_PUB_PEM)).decode()
-        identity = {
-            "name": str(self.options.get("nickname") or ""),
-            "aid": uid,
-            "uid": uid,
+        identity = self._identity(account)
+        payload = {
+            "name": identity["nickname"],
+            "aid": account.uid,
+            "uid": account.uid,
             "yx_uid": "",
-            "organization_id": str(self.options.get("organization_id") or ""),
-            "organization_name": str(self.options.get("organization_name") or ""),
-            "user_type": str(self.options.get("user_type") or DEFAULT_USER_TYPE),
-            "security_oauth_token": token,
-            "refresh_token": str(self.options.get("refresh_token") or ""),
+            "organization_id": identity["organization_id"],
+            "organization_name": identity["organization_name"],
+            "user_type": identity["user_type"],
+            "security_oauth_token": account.token,
+            "refresh_token": identity["refresh_token"],
         }
-        info = base64.b64encode(aes_cbc_encrypt(sorted_compact(identity), temp_key)).decode()
-        session = {"access": token, "uid": uid, "cosy_key": cosy_key, "info": info, **machine_identity(uid)}
-        self._sessions[uid] = session
+        info = base64.b64encode(aes_cbc_encrypt(sorted_compact(payload), temp_key)).decode()
+        session = {
+            "access": account.token,
+            "uid": account.uid,
+            "cosy_key": cosy_key,
+            "info": info,
+            **machine_identity(account.uid),
+        }
+        self._sessions[key] = session
         return session
 
-    def _headers(self, region: str, body: str, path: str, *, model_key: str = "", sse: bool = True) -> dict[str, str]:
-        session = self._session()
+    def _invalidate_session(self, account: _Account) -> None:
+        """登录态刷新：鉴权失败后作废该账号的会话材料，下次请求重新握手。"""
+        self._sessions.pop(self._session_key(account), None)
+
+    def _headers(
+        self,
+        region: str,
+        body: str,
+        path: str,
+        *,
+        model_key: str = "",
+        sse: bool = True,
+        account: _Account | None = None,
+    ) -> dict[str, str]:
+        session = self._session(account)
         payload = base64.b64encode(
             sorted_compact(
                 {
@@ -652,14 +907,9 @@ class QoderAdapter(ProviderAdapter):
                 return int(value)
         return 0
 
-    def _cooling(self, key: str) -> int:
-        until = self._cooldown.get(key, 0.0)
-        remain = int(until - time.time())
-        return max(0, remain)
-
     # ---------- 上游 ----------
 
-    def _chat_body(self, payload: dict[str, Any], model: str) -> dict[str, Any]:
+    def _chat_body(self, payload: dict[str, Any], model: str, account: _Account) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         for item in payload.get("messages") or []:
             if not isinstance(item, dict):
@@ -704,7 +954,7 @@ class QoderAdapter(ProviderAdapter):
             "chat_record_id": request_id,
             "request_set_id": str(uuid.uuid4()),
             "stream": True,
-            "aliyun_user_type": str(self.options.get("user_type") or DEFAULT_USER_TYPE),
+            "aliyun_user_type": self._identity(account)["user_type"],
             "model_config": {
                 "key": model,
                 "display_name": model,
@@ -735,14 +985,14 @@ class QoderAdapter(ProviderAdapter):
             },
         }
 
-    async def _workbuddy(self, payload: dict[str, Any], region: str, model: str):
+    async def _workbuddy(self, account: _Account, payload: dict[str, Any], region: str, model: str):
         host = str(self.options.get("workbuddy_base") or REGIONS[region]["workbuddy"])
         stream = bool(payload.get("stream"))
         body = dict(payload)
         body["model"] = model
         client = UnifiedApiClient(
             host,
-            api_key=self._token(),
+            api_key=account.token,
             timeout=float(self.options.get("timeout") or 300.0),
             proxy=self._proxy(region),
         )
@@ -758,13 +1008,13 @@ class QoderAdapter(ProviderAdapter):
             raise err
         return _Reply(reply.status_code, body=reply.body, stream=reply.iter_bytes(), content_type=reply.headers.get("content-type", "application/json"))
 
-    async def _open_upstream(self, model: str, region: str, payload: dict[str, Any]):
-        """返回 (内层 SSE 生成器, host) 或抛 ProviderError；按 fallback 链换 host。"""
-        body = self._chat_body(payload, model)
+    async def _open_upstream(self, account: _Account, model: str, region: str, payload: dict[str, Any]):
+        """返回上游 SSE 响应或抛 ProviderError；同一账号内按 fallback 链换 host。"""
+        body = self._chat_body(payload, model, account)
         encoded = qoder_encode(json.dumps(body, ensure_ascii=False).encode())
         last: ProviderError | None = None
         for host in self._hosts(region):
-            headers = self._headers(region, encoded, EP_CHAT, model_key=model, sse=True)
+            headers = self._headers(region, encoded, EP_CHAT, model_key=model, sse=True, account=account)
             client = UnifiedApiClient(
                 host,
                 timeout=float(self.options.get("timeout") or 300.0),
@@ -792,11 +1042,8 @@ class QoderAdapter(ProviderAdapter):
                         continue
                     continue
                 raise err
-            return reply, host
-        if last is not None and last.status_code == 429:
-            # 429 冷却：按 Retry-After（缺省 30s）记冷却窗口，避免继续锤上游
-            wait = int(getattr(last, "retry_after", 0) or 30)
-            self._cooldown[f"{region}:{self._uid()}"] = time.time() + wait
+            return reply
+        # 冷却交给账号池分档处理（429/401/5xx 各自的档位见 services/rotation.py）
         raise last or ProviderError(502, "Qoder 上游全部 host 不可用")
 
     async def _chunks(self, reply) -> AsyncIterator[dict[str, Any]]:
@@ -868,15 +1115,15 @@ class QoderAdapter(ProviderAdapter):
             raise ProviderError(400, "Qoder 请求缺少 model")
         if product == "trae":
             raise ProviderError(501, "Qoder 的 trae 产品线不走 COSY，请改用 provider `trae`（Solo/Work 通道）")
-        cool = self._cooling(f"{region}:{self._uid()}")
-        if cool:
-            err = ProviderError(429, f"Qoder 限流冷却中，{cool}s 后重试")
-            err.retry_after = cool
-            raise err
         if product == "workbuddy":
-            return await self._workbuddy(payload, region, model)
+            reply, _ = await self._run_with_account(
+                payload, lambda account: self._workbuddy(account, payload, region, model), streamed=stream
+            )
+            return reply
 
-        reply, host = await self._open_upstream(model, region, payload)
+        reply, _ = await self._run_with_account(
+            payload, lambda account: self._open_upstream(account, model, region, payload), streamed=stream
+        )
         if stream:
             return _Reply(200, stream=self._render_chat(reply, model), content_type="text/event-stream")
         data = await self._collect(reply, model)
@@ -998,9 +1245,16 @@ class QoderAdapter(ProviderAdapter):
             raise ProviderError(501, f"Qoder 的 {product} 产品线不支持 Anthropic 协议")
         if product == "workbuddy":
             # workbuddy 是 OpenAI 直通：统一向上游要 SSE，聚合与渲染仍在本侧完成
-            reply = await self._workbuddy({**openai_payload, "stream": True}, region, model)
+            wb_payload = {**openai_payload, "stream": True}
+            reply, _ = await self._run_with_account(
+                wb_payload, lambda account: self._workbuddy(account, wb_payload, region, model), streamed=stream
+            )
         else:
-            reply, _ = await self._open_upstream(model, region, openai_payload)
+            reply, _ = await self._run_with_account(
+                openai_payload,
+                lambda account: self._open_upstream(account, model, region, openai_payload),
+                streamed=stream,
+            )
         if stream:
             return _Reply(200, stream=self._render_anthropic(reply, model), content_type="text/event-stream")
         data = await self._collect(reply, model)
@@ -1236,7 +1490,11 @@ class QoderAdapter(ProviderAdapter):
         product, model = self._product(model)
         if product != "qoder":
             raise ProviderError(501, f"Qoder 的 {product} 产品线不支持 Responses 协议")
-        reply, _ = await self._open_upstream(model, region, openai_payload)
+        reply, _ = await self._run_with_account(
+            openai_payload,
+            lambda account: self._open_upstream(account, model, region, openai_payload),
+            streamed=stream,
+        )
         if stream:
             return _Reply(200, stream=self._render_responses(reply, model), content_type="text/event-stream")
         data = await self._collect(reply, model)
@@ -1375,17 +1633,11 @@ class QoderAdapter(ProviderAdapter):
 
     # ---------- 清单与健康 ----------
 
-    async def fetch_models(self) -> list[dict[str, Any]]:
-        token = self._token()
-        if not token:
-            raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
-        region = str(self.options.get("region") or "cn")
-        models: list[dict[str, Any]] = []
+    async def _fetch_models_account(self, account: _Account, region: str) -> list[dict[str, Any]]:
         last_error: ProviderError | None = None
-        reached = False
         for host in self._hosts(region):
             encoded = qoder_encode(b"{}")
-            headers = self._headers(region, encoded, EP_MODELS, sse=False)
+            headers = self._headers(region, encoded, EP_MODELS, sse=False, account=account)
             client = UnifiedApiClient(
                 host, timeout=30.0, proxy=self._proxy(region), extra_headers=headers,
             )
@@ -1395,9 +1647,12 @@ class QoderAdapter(ProviderAdapter):
                 last_error = exc
                 continue
             if reply.status_code >= 400:
-                last_error = ProviderError(reply.status_code, f"Qoder 模型目录返回 {reply.status_code}")
+                text = (reply.body or b"").decode("utf-8", "ignore")
+                err = self._classify(reply.status_code, text)
+                if getattr(err, "session_dead", False) or reply.status_code not in FALLBACK_STATUS:
+                    raise err
+                last_error = err
                 continue
-            reached = True
             try:
                 outer = json.loads(reply.body or b"{}")
             except json.JSONDecodeError as exc:
@@ -1411,7 +1666,9 @@ class QoderAdapter(ProviderAdapter):
                     entries = None
             rows = entries if isinstance(entries, list) else (outer.get("data") if isinstance(outer, dict) else None)
             if not isinstance(rows, list):
+                last_error = ProviderError(502, "Qoder 模型目录结构异常")
                 continue
+            models: list[dict[str, Any]] = []
             for row in rows:
                 if isinstance(row, str):
                     models.append({"id": row})
@@ -1419,26 +1676,78 @@ class QoderAdapter(ProviderAdapter):
                     key = row.get("key") or row.get("model") or row.get("name")
                     if key:
                         models.append({"id": str(key)})
+            return models
+        raise last_error or ProviderError(502, "Qoder 上游全部 host 不可用")
+
+    async def fetch_models(self) -> list[dict[str, Any]]:
+        keys = self._keys()
+        if not keys:
+            raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
+        self._pool.set_weights(keys, self.options.get("key_weights"))
+        region = str(self.options.get("region") or "cn")
+        last_error: ProviderError | None = None
+        for _ in range(self._attempts(len(keys))):
+            pick = await pick_in_group(
+                self._pool, self._store, provider="qoder", group=self._group(), keys=keys
+            )
+            if pick is None:
+                raise self._all_keys_error(keys, last_error)
+            account = self._account(pick.key)
+            if account is None:
+                raise ProviderError(401, "Qoder 凭据无法解析（应为 token 或含 access_token 的 JSON）")
+            handle = self._active.set(account)
+            try:
+                models = await self._fetch_models_account(account, region)
+            except ProviderError as exc:
+                last_error = exc
+                if getattr(exc, "session_dead", False):
+                    self._invalidate_session(account)
+                if not self._rotatable(exc.status_code):
+                    raise
+                await self._rotate_away(pick.key)
+                if not await self._note_failure(
+                    pick.key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0)
+                ):
+                    raise
+                continue
+            finally:
+                self._active.reset(handle)
+            await self._pool.report_success(pick.key)
             if models:
-                break
-        return models
+                return models
+        raise last_error or ProviderError(502, "Qoder 模型目录为空")
 
     async def health(self) -> dict[str, Any]:
-        if not self._token():
+        keys = self._keys()
+        if not keys:
             return {"connected": False, "error": "未配置 access token"}
         region = str(self.options.get("region") or "cn")
         proxy = self._proxy(region)
+        rotation = await self._pool.snapshot(keys, group=self._group())
         try:
             models = await self.list_models()
         except ProviderError as exc:
-            return {"connected": False, "error": exc.message, "region": region}
+            return {
+                "connected": False,
+                "error": exc.message,
+                "region": region,
+                "accounts": len(keys),
+                "rotation": rotation,
+            }
+        cooling = int(rotation.get("cooling") or 0)
         return {
             "connected": bool(models),
             "region": region,
             "product": str(self.options.get("product") or "qoder"),
             "proxy": proxy or "direct",
             "models": len(models),
-            "note": "" if proxy else f"{region} 未配置地域代理，直连",
+            "accounts": len(keys),
+            "rotation": rotation,
+            "note": (
+                f"{cooling} 个账号冷却中"
+                if cooling
+                else ("" if proxy else f"{region} 未配置地域代理，直连")
+            ),
         }
 
 

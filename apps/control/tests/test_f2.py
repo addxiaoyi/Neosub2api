@@ -1,5 +1,6 @@
 """F2 适配器回归：qoder 加密/协议转换/路由，trae Solo/Work 桥，网关 responses 路由。"""
 
+import asyncio
 import json
 import unittest
 from typing import Any
@@ -121,10 +122,21 @@ class QoderRoutingTests(unittest.TestCase):
         server = self.adapter._classify(503, "gateway down")
         self.assertEqual(server.status_code, 502)
 
-    def test_cooldown_blocks_second_call(self):
-        self.adapter._cooldown["cn:q1"] = 1e18
-        self.assertGreater(self.adapter._cooling("cn:q1"), 0)
-        self.assertEqual(self.adapter._cooling("global:q1"), 0)
+    def test_cooldown_is_scoped_to_failing_account(self):
+        async def scenario():
+            adapter = qoder.build(load_settings())
+            adapter.configure(api_key="token-a", api_keys=["token-a", "token-b"])
+            keys = adapter._keys()
+            await adapter._pool.report_failure(keys[0], 401)
+            snap = await adapter._pool.snapshot(keys)
+            states = {item["state"] for item in snap["credentials"]}
+            self.assertIn("cooling", states)
+            self.assertIn("ready", states)
+            await adapter._pool.report_success(keys[0])
+            snap = await adapter._pool.snapshot(keys)
+            self.assertEqual({item["state"] for item in snap["credentials"]}, {"ready"})
+
+        asyncio.run(scenario())
 
 
 class QoderProtocolTests(unittest.IsolatedAsyncioTestCase):

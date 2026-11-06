@@ -460,7 +460,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 | `credential_count` / `credentials` | 凭据条数 / 掩码列表（`id`、`label`、`base_url`、`secret_masked`、`sort_order`） |
 | `options` | 已保存的高级配置 dict |
 
-> 2026-11-06 已更正（原句逐字留档）：上一段原写「其中 3 家 `ready`、11 家 `needs_config`」。`opencode` / `qoder` / `trae` 的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），静态口径下 14 家全部 `needs_config`。注意接口的 `readiness` 字段是动态推导（`apps/control/app/registry.py:358-370`），配置好凭据并探活成功后可显示 `ready`；`ready` 语义统一为「配置齐备、填 key 能调用」，**不等于真机跑通**，字段说明 `:455` 的取值仍为 `ready` / `needs_config`。
+> 2026-11-06 已更正（原句逐字留档）：上一段原写「其中 3 家 `ready`、11 家 `needs_config`」。`opencode` / `qoder` / `trae` 的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:532`、`trae.py:157`），静态口径下 14 家全部 `needs_config`。注意接口的 `readiness` 字段是动态推导（`apps/control/app/registry.py:358-370`），配置好凭据并探活成功后可显示 `ready`；`ready` 语义统一为「配置齐备、填 key 能调用」，**不等于真机跑通**，字段说明 `:455` 的取值仍为 `ready` / `needs_config`。
 > 误判后果：按旧句会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障；也会让前端「服务商」页的 readiness 展示与接口实际值对不上。
 
 ### `PATCH /api/providers/{provider_id}`（管理员）

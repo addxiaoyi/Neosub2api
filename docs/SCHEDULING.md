@@ -10,6 +10,7 @@
 | `opencode` | `CredentialPool` + `RotationStore`（轮转组） | `pick_in_group()` | `health()` 返回 `rotation` + `cooling` | `apps/control/app/adapters/opencode.py:59-60,148-154,238-240` |
 | `codar` | `Scheduler`（四档策略） | `_rotation()` → `plan()` | `health()` 返回 `rotation` + `cooling` | `apps/control/app/adapters/codar.py:170-171,242-248,477-478` |
 | `trae` | `CredentialPool`（无策略层，2026-11-06 接入） | `chat_completion` 内 `acquire()` | `health()` 返回 `rotation` + `cooling` | `apps/control/app/adapters/trae.py:171,177-207,924-958,980-1019` |
+| `qoder` | `CredentialPool` + `RotationStore`（轮转组，2026-11-06 接入，含凭据级身份） | `_run_with_account()` 内 `pick_in_group()` | `health()` 返回 `rotation`，另带 `accounts` | `apps/control/app/adapters/qoder.py:554-693,1720-1751` |
 
 > **（2026-11-06 接线后更正，原句逐字留档）** 原句：「`trae` 这一行是“指不到接线行号”的实情，按待复核保留：`_jwt()` 只读一个 `api_key`（`trae.py:170-174`），`health()` 只回 `connected/channel/work_mode/models/uid`（`:913-927`），仓内没有任何 `CredentialPool` / `Scheduler` 调用点。若后续要接，接线位置应落在 `_request`，目前不存在这段代码，本文不替它补。」
 > 现 `trae` 已接 `CredentialPool`：`_keys()` 合并 `api_keys` / `api_key` / `options.extra_keys`（`trae.py:177-186`），`chat_completion` 每次 `acquire()` 选号并在成功/失败后登记（`:924-958`），`health()` 返回 `rotation` + `cooling`（`:980-1019`）。未引入 `Scheduler`，选号规则仍是池的 `sticky → weighted → round_robin`。
@@ -54,7 +55,7 @@
 
 全冷却有两种行为，由 `allow_degraded` 决定（`rotation.py:217-228`）：
 
-- **strict（默认）**：返回 `None`。调用方自己转成错误：`zcode` 抛“N 把密钥全部不可用”（`zcode.py:287-288,106-113`），`opencode` 抛 429（`opencode.py:152-153`），轮转组在全冷却时也返回 `None`（`rotation.py:443-444`，测试 `tests/test_rotation_pool.py:171-177`）。
+- **strict（默认）**：返回 `None`。调用方自己转成错误：`zcode` 抛“N 把密钥全部不可用”（`zcode.py:287-288,106-113`），`opencode` 抛 429（`opencode.py:152-153`），`qoder` 同样转 429（`qoder.py:657,1694`），轮转组在全冷却时也返回 `None`（`rotation.py:443-444`，测试 `tests/test_rotation_pool.py:171-177`）。
 - **`allow_degraded=True`**：取 `min(冷却截止时间)` 的那个账号试一次，`rule="degraded"`、`note="全部账号冷却中，按最早恢复降级"`，并打 WARNING（`rotation.py:220-228`）。测试同时锁了 strict 与 degraded（`tests/test_rotation_pool.py:103-112`）。
 
 注意 `Scheduler.plan()` 永远传 `allow_degraded=True`（`scheduling.py:132`），所以经 `codar` 走全冷却时不会拿到 `None`，而是 `Plan.degraded=True` 加一条降级说明（`scheduling.py:97-101`）。
@@ -98,7 +99,7 @@
 
 ## 4. 轮转组：`group_init` / `group_rotate` / 组粘滞
 
-轮转组目前只接在 `opencode`（`opencode.py:59-60,148-154`）。组名来自 `options.group` 或 `options.rotation_group`，缺省 `default`，硬截 64 字符（`opencode.py:63-65`、`rotation.py:48,410-411`）。
+轮转组目前接在 `opencode`（`opencode.py:59-60,148-154`）与 `qoder`（`qoder.py:554-560,637-649`）。组名来自 `options.group` 或 `options.rotation_group`，缺省 `default`，硬截 64 字符（`opencode.py:63-65`、`qoder.py:550-552`、`rotation.py:48,410-411`）。
 
 `pick_in_group()`（`rotation.py:414-451`）的顺序：
 
@@ -135,7 +136,7 @@
 三处容易混：
 
 1. **`ProviderSpec.readiness` 是静态配置契约**：`ready` 只表示“填好 `api_key` / `base_url` 就能调用”，`needs_config` 表示“还要补额外配置或外部进程”；标了 `needs_config` 必须写 `requires`，否则构造时直接抛错（`apps/control/app/adapters/base.py:139-153`）。它不随请求成功/失败变化。
-2. **运行时就绪在 `health()` 的 `rotation` / `cooling`**：`zcode` 在探活成功后返回 `rotation` 快照与 `cooling` 计数（`zcode.py:640-647`），`opencode` 同（`opencode.py:238-240`），`codar` 也同（`codar.py:477-478`），`trae` 现在也同（`trae.py:980-1019`）。
+2. **运行时就绪在 `health()` 的 `rotation` / `cooling`**：`zcode` 在探活成功后返回 `rotation` 快照与 `cooling` 计数（`zcode.py:640-647`），`opencode` 同（`opencode.py:238-240`），`codar` 也同（`codar.py:477-478`），`trae` 现在也同（`trae.py:980-1019`），`qoder` 同并额外返回 `accounts`（`qoder.py:1720-1751`）。
 3. **`/api/status` 只合并 `cooling`，不转发 `rotation` 明细**：合并白名单是 `total/healthy/cooling/disabled/in_flight_full/realm_totals`（`apps/control/app/routers/models.py:43-45`），循环里后一个连通的 provider 会覆盖前一个的值（`:39-47`）；`rotation` 明细留在 `health()` 的原始返回里，当前没有独立 HTTP 面。排查时要看适配器 `health()`，不能只看 `/api/status`。
 
 另一个同名不同源：`codebuddy` 的 `health()` 里的 `cooling` 来自上游管理端 `/api/status`（`apps/control/app/adapters/codebuddy.py:220,229-233`），不是本地 `CredentialPool` 的冷却；`apps/web/lib/account-status.ts:103-106` 还记录了上游把“降权”并进 `cooling`。不要拿它和本文的分档冷却互相验证。
@@ -158,6 +159,7 @@
 | 均权轮转可复现、权重、粘性命中、失败解绑、分档升级与熔断、全冷却 strict/degraded、快照字段与不泄密、轮转组持久化与换号 | `apps/control/tests/test_rotation_pool.py:38-186` |
 | 四档策略、sticky 无会话降级、未知策略回落、全冷却降级、截断、会话键来源、codar 失败动作表、codar 粘性接线；**`weighted` 无权重降级未覆盖** | `apps/control/tests/test_schedule_policy.py:52-188` |
 | `trae` 多账号选号、401 换号与冷却、402 / 502 进入池分档、`health()` 的 `rotation` / `cooling` | `apps/control/tests/test_f2.py:301-349` |
+| `qoder` 多账号轮转、JSON 身份切换与覆盖默认身份、401 换号与 600s 冷却/恢复、429 档位不被小 `Retry-After` 缩短、唯一账号不伪装 429、粘性保持同一账号 | `apps/control/tests/test_qoder_multi_account.py::test_multi_account_round_robin_switches_identity` 等 8 条 |
 | 上游 402 / 408 / 5xx 登记：`codar` 的 `note_failure`、`zcode` 的 5xx 冷却与单号保护 | `apps/control/tests/test_codar.py:174-184`、`apps/control/tests/test_vendor_adapters.py:227-233` |
 
 测试只锁选号规则与健康登记，不覆盖网络路径；网络层的换号由 provider / smoke 用例另行覆盖（`test_rotation_pool.py:1-5`）。

@@ -211,7 +211,8 @@
 
 - **形态**：内置直连。clean-room 重写 COSY 签名客户端（自定义 base64 / AES-128-CBC / RSA 全标准库自写），不经任何 sidecar。
 - **协议**：OpenAI Chat + Anthropic Messages + OpenAI Responses 三套全接；`workbuddy` 产品线仅 chat，`trae` 产品线 501（改用 provider `trae`）。
-- **必填配置**：`api_key` 填 Qoder access token；区域/产品线/代理/身份字段全走 `options`（见实现文档），无专用环境变量。
+- **必填配置**：每条 `provider_credentials` 一个账号，填纯 access token 或带身份字段的 JSON 凭据（`access_token` + 可选 `uid`/`user_type`/组织等）；区域/产品线/代理/身份默认值全走 `options`（见实现文档），无专用环境变量。
+- **多账号与多身份**：已接 `CredentialPool`（`qoder.py:554,637-693,758-811`）。多凭据按 sticky → weighted → 轮转选号；身份字段随凭据走，`uid`/组织切换即时生效；401/402/403/408/429/5xx 换号并按池分档冷却（唯一账号不冷却，`qoder.py:591-606`）；会话按 `uid+token 指纹` 缓存、鉴权失败作废重握手（`:809`）；`health()` 返回 `accounts` / `rotation`（`:1714`）。
 - **实现细节、路由规则、错误语义与已知限制**：见 [providers/qoder-adapter.md](providers/qoder-adapter.md)；协议契约见 [providers/qoder.md](providers/qoder.md)。
 
 ## 14. trae — Trae（Solo / Work，内置直连）
@@ -233,6 +234,7 @@
 > **（2026-11-06 接线 trae 后补充）** `trae` 现在也接池（`CredentialPool`），可产生的 401/402/429/5xx 会登记冷却（402 档 900s、5xx 档 60s，`trae.py:202-207,924-958`）；`opencode` 仍只登记 401/403/429（`opencode.py:198`），其 402/408/5xx 未接线（5xx 仅解绑粘性，`opencode.py:125-132`）；`trae` 不产生 408。
 > **（2026-11-06 接线 opencode / muse 后补充）** 上一块的「`opencode` 仍只登记 401/403/429，其 402/408/5xx 未接线」与首块的「`muse` 仍未接池」均已过时：`muse` 已用 `CredentialPool`（`muse.py:121`），选号与失败登记见 `:249-311`，流式读完才回写健康度见 `:48-78`，`health()` 见 `:404-438`；`opencode` 的池分档已扩到 401/402/403/408/429/5xx（档位表 `opencode.py:24`），登记见 `:169-175`，选号见 `:188-274`，流式跟踪见 `:34-64,177-186`，`health()` 见 `:307-327`。两家都按「唯一或无替代账号不冷却」，档位与 `services/rotation.py:32-42` 对齐（401/403 600s、402 900s、429 120s、408/5xx 60s）；`gptgrok` 仍是 `key_pool.py` 的租约模型（`reserve/release/feedback`），与这两家的轮转池不是一套状态。
 > 误判后果：照旧句会以为 `muse` 没有冷却表、`opencode` 的 402/408/5xx 只换号不冷却，排障时会去 `key_pool.py` 找状态（实际在 `services/rotation.py`），也会漏掉「流式拿到 200 头不算成功、要读完才回写」这一条。
+> **（2026-11-06 接线 qoder 后补充）** `qoder` 也接池（`CredentialPool`）：多账号选号、401/402/403/408/429/5xx 分档冷却、唯一账号不冷却、流式读完才回写成功，均在 `qoder.py:591-693`；`fetch_models` / `health` 同样走池（`:1682,1720`），不再使用适配器私有的 `_cooldown` 表。
 
 - **状态按实例隔离**：每个适配器实例各有一份游标与冷却表，模块级不存可变状态，同进程多实例互不打乱顺序。
 - **轮换**：`pick()` 在可用密钥上按游标轮询并推进；`peek()` 只读不推进，供热身/健康探测用。
