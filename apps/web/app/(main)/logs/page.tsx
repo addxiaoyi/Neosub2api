@@ -293,18 +293,17 @@ export default function LogsPage() {
         description={t('logs.description')}
         actions={
           <>
-            {isAdmin && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="rounded-full"
-                disabled={exporting}
-                onClick={exportCsv}
-              >
-                {exporting ? <Loader2 className="animate-spin" /> : <Download />}
-                {t(exporting ? 'logs.exporting' : 'logs.export')}
-              </Button>
-            )}
+            {/* 导出对普通用户开放：后端按 key 归属收窄到本人可见范围 */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              disabled={exporting}
+              onClick={exportCsv}
+            >
+              {exporting ? <Loader2 className="animate-spin" /> : <Download />}
+              {t(exporting ? 'logs.exporting' : 'logs.export')}
+            </Button>
             {isAdmin && (
               <ConfirmDialog
                 title={t('logs.clearTitle')}

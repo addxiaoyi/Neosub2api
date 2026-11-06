@@ -33,6 +33,7 @@ const AUDIT_LABEL_KEYS: Record<string, string> = {
   delete_user: 'security.auditDeleteUser',
   add_user: 'security.auditAddUser',
   'logs.clear': 'security.auditLogsClear',
+  'logs.export': 'security.auditLogsExport',
 };
 
 /**

@@ -19,10 +19,15 @@ not_billed=失败/断流（本就不写流水）、unlinked=成功但无关联�
 （列为 NULL）回退 join api_keys，两边都拿不到给 null 而不是空串。
 
 导出 `GET /api/logs/export`：与列表同一套筛选参数（key_id/provider/model/status/
-days/start/end），admin-only。一次最多 MAX_EXPORT_ROWS 行，命中更多时显式 400 报出
-真实行数，不静默截断。每个单元格都过 `mask_text`（u2a_ 先跑，再 Bearer/JWT/URL
-查询参数/sk-/厂商前缀），Excel 公式注入的四个起始字符一律加前导单引号；正文带
-UTF-8 BOM，Excel 直接双击不乱码。
+days/start/end），所有登录用户可用，但范围在服务端收窄——非 admin 只导出自己名下
+key 的日志，显式传他人 key_id 直接 403（与列表同一套 `_owner` / `_assert_key_owned`
+判断，不靠前端传参）。一次最多 MAX_EXPORT_ROWS 行，命中更多时显式 400 报出真实行数，
+不静默截断。每次导出（成功/被拒/超限/异常）写一条 `logs.export` 审计：who、筛选条件、
+命中与导出条数、结果、耗时；审计只记元数据，不抄日志正文或上游报错原文。
+内存口径：导出是一次性 COUNT + LIMIT 全量查询，最多 5000 行 × 19 列在内存里拼 CSV，
+不做流式；需要更大的范围请用列表分页（MAX_PAGE_SIZE=200）或收窄时间/筛选。
+每个单元格都过 `mask_text`（u2a_ 先跑，再 Bearer/JWT/URL 查询参数/sk-/厂商前缀），
+Excel 公式注入的四个起始字符一律加前导单引号；正文带 UTF-8 BOM，Excel 直接双击不乱码。
 """
 
 import csv
@@ -311,6 +316,63 @@ def list_logs(
     }
 
 
+def _cond_text(raw: str | None, limit: int = 64) -> str:
+    """筛选值压成单行短文本进审计：去掉换行并截断，避免用户输入撑爆或破坏审计行。"""
+    return " ".join((raw or "").split())[:limit]
+
+
+def _export_conds(
+    *,
+    scope: str,
+    key_id: int | None,
+    provider: str | None,
+    model: str | None,
+    status: str | None,
+    days: int | None,
+    start: int | None,
+    end: int | None,
+) -> str:
+    """导出条件的一行摘要：时间范围 + 各项筛选 + 归属范围。"""
+    parts = [f"scope={scope}"]
+    if days is not None:
+        parts.append(f"days={days}")
+    if start is not None:
+        parts.append(f"start={start}")
+    if end is not None:
+        parts.append(f"end={end}")
+    if key_id is not None:
+        parts.append(f"key_id={key_id}")
+    if provider:
+        parts.append(f"provider={_cond_text(provider)}")
+    if model:
+        parts.append(f"model={_cond_text(model)}")
+    if status:
+        parts.append(f"status={_cond_text(status, 32).lower()}")
+    return " ".join(parts)
+
+
+def _audit_export(
+    conn, request: Request, user: dict, result: str, conds: str, started: float, **stats
+) -> None:
+    """一条导出审计：who / 条件 / 条数 / 结果 / 耗时。
+
+    只记元数据；日志正文（error 原文、密钥、模型输出）一律不进 audit_logs。
+    """
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    detail = " ".join(
+        [f"result={result}", conds, *(f"{name}={value}" for name, value in stats.items()),
+         f"duration_ms={elapsed_ms}"]
+    )
+    audit_event(
+        conn,
+        user.get("username", ""),
+        "logs.export",
+        "request_logs",
+        detail,
+        request.client.host if request.client else "",
+    )
+
+
 @router.get("/export")
 def export_logs(
     request: Request,
@@ -321,48 +383,80 @@ def export_logs(
     days: int | None = None,
     start: int | None = None,
     end: int | None = None,
-    user: dict = Depends(admin_user),
+    user: dict = Depends(current_user),
 ):
-    """导出一份 CSV：筛选语义与列表完全一致，超上限显式 400 而不是截断。"""
+    """导出一份 CSV：筛选语义与列表完全一致，超上限显式 400 而不是截断。
+
+    非 admin 的 owner 由服务端 `_owner` 收窄到本人 key，显式传他人 key_id 走
+    `_assert_key_owned` 返回 403；admin 不过滤，视图与之前一致。
+    """
+    started = time.perf_counter()
     owner = _owner(user)
+    conds = _export_conds(
+        scope="all" if owner is None else "own",
+        key_id=key_id, provider=provider, model=model, status=status,
+        days=days, start=start, end=end,
+    )
     conn = request.app.state.db.connect()
+    audited = False
     try:
-        if key_id is not None:
-            _assert_key_owned(conn, key_id, user)
-        where, params = _where(
-            key_id=key_id, provider=provider, model=model, status=status,
-            days=days, start=start, end=end, owner=owner,
-        )
-        matched = int(
-            conn.execute(f"SELECT COUNT(*) AS n FROM request_logs{where}", params).fetchone()["n"]
-        )
-        if matched > MAX_EXPORT_ROWS:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"当前筛选命中 {matched} 行，超过导出上限 {MAX_EXPORT_ROWS} 行；"
-                    "请缩小时间范围或增加筛选条件"
-                ),
+        try:
+            if key_id is not None:
+                _assert_key_owned(conn, key_id, user)
+            where, params = _where(
+                key_id=key_id, provider=provider, model=model, status=status,
+                days=days, start=start, end=end, owner=owner,
             )
-        rows = conn.execute(
-            f"SELECT * FROM request_logs{where} ORDER BY ts DESC, id DESC LIMIT ?",
-            [*params, MAX_EXPORT_ROWS],
-        ).fetchall()
-        prefixes = _prefixes(conn, rows)
-        credits = _ledger_credits(conn, rows)
+            matched = int(
+                conn.execute(f"SELECT COUNT(*) AS n FROM request_logs{where}", params).fetchone()["n"]
+            )
+            if matched > MAX_EXPORT_ROWS:
+                _audit_export(
+                    conn, request, user, "too_many", conds, started,
+                    matched=matched, limit=MAX_EXPORT_ROWS,
+                )
+                audited = True
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"当前筛选命中 {matched} 行，超过导出上限 {MAX_EXPORT_ROWS} 行；"
+                        "请缩小时间范围或增加筛选条件"
+                    ),
+                )
+            rows = conn.execute(
+                f"SELECT * FROM request_logs{where} ORDER BY ts DESC, id DESC LIMIT ?",
+                [*params, MAX_EXPORT_ROWS],
+            ).fetchall()
+            prefixes = _prefixes(conn, rows)
+            credits = _ledger_credits(conn, rows)
+        except PermissionDenied:
+            _audit_export(conn, request, user, "denied", conds, started, status=403)
+            audited = True
+            raise
+        except Exception:
+            # 超限已经写过审计；其余异常（如查询失败）补一条失败记录再抛
+            if not audited:
+                _audit_export(conn, request, user, "error", conds, started)
+                audited = True
+            raise
+
+        items = [
+            _row_to_public(row, _key_prefix(row, prefixes), _credit_of(row, credits))
+            for row in rows
+        ]
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\r\n")
+        writer.writerow(EXPORT_COLUMNS)
+        writer.writerows(_export_record(item) for item in items)
+        # 带 BOM：Excel 双击打开时按 UTF-8 解码，中文列不会乱码
+        body = ("\ufeff" + buf.getvalue()).encode("utf-8")
+        _audit_export(
+            conn, request, user, "ok", conds, started, matched=matched, rows=len(items),
+        )
+        audited = True
     finally:
         conn.close()
 
-    items = [
-        _row_to_public(row, _key_prefix(row, prefixes), _credit_of(row, credits))
-        for row in rows
-    ]
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\r\n")
-    writer.writerow(EXPORT_COLUMNS)
-    writer.writerows(_export_record(item) for item in items)
-    # 带 BOM：Excel 双击打开时按 UTF-8 解码，中文列不会乱码
-    body = ("\ufeff" + buf.getvalue()).encode("utf-8")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return Response(
         content=body,

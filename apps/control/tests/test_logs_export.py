@@ -31,7 +31,7 @@ SECRETS = (
 )
 
 
-def _login_viewer(admin: httpx.Client) -> httpx.Client:
+def _login_viewer(admin: httpx.Client) -> tuple[httpx.Client, str]:
     name = f"export-viewer-{uuid.uuid4().hex[:8]}"
     created = admin.post(
         "/api/users", json={"username": name, "password": "viewer-pass", "role": "viewer"}
@@ -40,7 +40,16 @@ def _login_viewer(admin: httpx.Client) -> httpx.Client:
     client = httpx.Client(base_url=str(admin.base_url), trust_env=False, timeout=10.0)
     login = client.post("/api/login", json={"username": name, "password": "viewer-pass"})
     assert login.status_code == 200, login.text
-    return client
+    return client, name
+
+
+def _new_key(admin: httpx.Client, name: str, owner: str | None = None) -> dict:
+    body: dict = {"name": name}
+    if owner is not None:
+        body["owner_user_id"] = owner
+    created = admin.post("/api/keys", json=body)
+    assert created.status_code == 200, created.text
+    return created.json()
 
 
 @pytest.fixture()
@@ -101,15 +110,17 @@ def _records(resp: httpx.Response) -> list[dict[str, str]]:
     return [dict(zip(header, row)) for row in data]
 
 
-def test_export_is_admin_only_and_keeps_json_list(admin: httpx.Client, probe) -> None:
+def test_export_open_to_viewer_and_keeps_json_list(admin: httpx.Client, probe) -> None:
     provider, _, seed = probe
+    # 匿名日志（key_id 为空）无法归属，普通用户导出应为空表头
     seed([{"status": 200}, {"status": 502, "error": "upstream"}])
 
-    viewer = _login_viewer(admin)
+    viewer, _ = _login_viewer(admin)
     try:
-        denied = viewer.get("/api/logs/export", params={"provider": provider})
-        assert denied.status_code == 403, denied.text
-        assert denied.json()["error"]["code"] == "insufficient_role"
+        opened = viewer.get("/api/logs/export", params={"provider": provider})
+        assert opened.status_code == 200, opened.text
+        assert opened.headers["content-type"].startswith("text/csv")
+        assert _records(opened) == []
     finally:
         viewer.close()
 
@@ -123,6 +134,64 @@ def test_export_is_admin_only_and_keeps_json_list(admin: httpx.Client, probe) ->
     # 列表契约不变：仍是 JSON 的 {total, items}，没有被导出改动带偏
     listed = admin.get("/api/logs", params={"provider": provider}).json()
     assert listed["total"] == 2 and all("id" in item for item in listed["items"])
+
+
+def test_viewer_export_scoped_and_foreign_key_denied(admin: httpx.Client, probe) -> None:
+    provider, _, seed = probe
+    viewer, name = _login_viewer(admin)
+    tag = uuid.uuid4().hex[:8]
+    own = _new_key(admin, f"own-{tag}", owner=name)
+    other = _new_key(admin, f"admin-{tag}")
+    leaked = "u2a_exportsecret123456"
+    seed([
+        {"status": 200, "key_id": own["id"], "key_name": own["name"]},
+        {"status": 500, "key_id": own["id"], "key_name": own["name"], "error": "upstream 401: " + leaked},
+        {"status": 200, "key_id": other["id"], "key_name": other["name"]},
+        {"status": 200, "key_id": other["id"], "key_name": other["name"]},
+    ])
+    try:
+        got = viewer.get("/api/logs/export", params={"provider": provider})
+        assert got.status_code == 200, got.text
+        rows = _records(got)
+        assert len(rows) == 2, rows
+        assert {row["key_id"] for row in rows} == {str(own["id"])}
+        assert {row["key_name"] for row in rows} == {own["name"]}
+        assert other["name"] not in got.text
+        # 列表与导出同一套归属口径
+        assert viewer.get("/api/logs", params={"provider": provider}).json()["total"] == 2
+
+        # 管理员视图不变：四条都能导出
+        assert len(_records(admin.get("/api/logs/export", params={"provider": provider}))) == 4
+
+        # 显式传他人 key_id：403，不退化成空集
+        denied = viewer.get(
+            "/api/logs/export", params={"provider": provider, "key_id": other["id"]}
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["error"]["code"] == "insufficient_role"
+
+        # 审计：普通用户在自己的审计页能看到成功与拒绝两条；只含元数据，不含正文
+        own_audit = viewer.get("/api/audit-logs", params={"action": "logs.export"}).json()
+        assert own_audit["total"] >= 2, own_audit
+        assert {item["actor"] for item in own_audit["items"]} == {name}
+        details = [item["detail"] for item in own_audit["items"]]
+        ok_detail = next(detail for detail in details if "result=ok" in detail)
+        denied_detail = next(detail for detail in details if "result=denied" in detail)
+        assert "rows=2" in ok_detail and "matched=2" in ok_detail
+        assert "duration_ms=" in ok_detail
+        assert "status=403" in denied_detail and f"key_id={other['id']}" in denied_detail
+        assert leaked not in ok_detail and leaked not in denied_detail
+
+        # admin 审计页可按动作 + 执行者查到同一批记录
+        admin_audit = admin.get(
+            "/api/audit-logs", params={"action": "logs.export", "actor": name}
+        ).json()
+        assert admin_audit["total"] >= 2
+        assert {item["action"] for item in admin_audit["items"]} == {"logs.export"}
+    finally:
+        viewer.close()
+        admin.delete(f"/api/keys/{own['id']}")
+        admin.delete(f"/api/keys/{other['id']}")
 
 
 def test_export_applies_the_same_filters(admin: httpx.Client, probe) -> None:
@@ -196,20 +265,37 @@ def test_export_neutralizes_csv_formula_injection(admin: httpx.Client, probe) ->
 
 def test_export_over_limit_reports_instead_of_truncating(admin: httpx.Client, probe) -> None:
     provider, base, seed = probe
-    seed([{"status": 200} for _ in range(MAX_EXPORT_ROWS + 1)])
+    viewer, name = _login_viewer(admin)
+    tag = uuid.uuid4().hex[:8]
+    own = _new_key(admin, f"limit-{tag}", owner=name)
+    try:
+        seed([
+            {"status": 200, "key_id": own["id"], "key_name": own["name"]}
+            for _ in range(MAX_EXPORT_ROWS + 1)
+        ])
 
-    got = admin.get("/api/logs/export", params={"provider": provider})
-    assert got.status_code == 400, got.text
-    detail = got.json()["detail"]
-    assert str(MAX_EXPORT_ROWS) in detail
-    assert str(MAX_EXPORT_ROWS + 1) in detail
-    assert "上限" in detail
-    assert got.headers["content-type"].startswith("application/json")
+        got = viewer.get("/api/logs/export", params={"provider": provider})
+        assert got.status_code == 400, got.text
+        detail = got.json()["detail"]
+        assert str(MAX_EXPORT_ROWS) in detail
+        assert str(MAX_EXPORT_ROWS + 1) in detail
+        assert "上限" in detail
+        assert got.headers["content-type"].startswith("application/json")
 
-    # 用时间窗收窄到上限以内就正常给 CSV，证明拒绝的是「超量」而不是导出本身坏了
-    ok = admin.get(
-        "/api/logs/export",
-        params={"provider": provider, "end": base - 100},
-    )
-    assert ok.status_code == 200, ok.text
-    assert len(_records(ok)) == MAX_EXPORT_ROWS - 99
+        # 超限也落审计：命中数与上限都记下，普通用户自己能查到
+        audit = viewer.get("/api/audit-logs", params={"action": "logs.export"}).json()
+        rejected = audit["items"][0]["detail"]
+        assert "result=too_many" in rejected
+        assert f"matched={MAX_EXPORT_ROWS + 1}" in rejected
+        assert f"limit={MAX_EXPORT_ROWS}" in rejected
+
+        # 用时间窗收窄到上限以内就正常给 CSV，证明拒绝的是「超量」而不是导出本身坏了
+        ok = viewer.get(
+            "/api/logs/export",
+            params={"provider": provider, "end": base - 100},
+        )
+        assert ok.status_code == 200, ok.text
+        assert len(_records(ok)) == MAX_EXPORT_ROWS - 99
+    finally:
+        viewer.close()
+        admin.delete(f"/api/keys/{own['id']}")
