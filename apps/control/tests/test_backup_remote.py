@@ -59,6 +59,7 @@ def remote(tmp_path, fake_s3, monkeypatch):
         backup_remote_interval_sec=3600,
         backup_remote_auto_upload=False,
         backup_remote_keep=14,
+        allow_private_upstreams=True,  # 本地假 S3 监听 loopback，走守卫的全局放开
     )
     db = Database(Path(settings.db_path))
     service = BackupRemoteService(settings, db)
@@ -335,6 +336,7 @@ def panel(tmp_path, fake_s3, monkeypatch):
         backup_remote_interval_sec=3600,
         backup_remote_auto_upload=False,
         backup_remote_keep=14,
+        allow_private_upstreams=True,  # 本地假 S3 监听 loopback，走守卫的全局放开
     )
     service = BackupRemoteService(settings, db)
     service.save_config(

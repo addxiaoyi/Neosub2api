@@ -45,6 +45,7 @@ services:
       UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
       UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
       UNIFIED_SSE_MAX_SECONDS: ${UNIFIED_SSE_MAX_SECONDS:-600}
+      UNIFIED_GATEWAY_MAX_BODY_BYTES: ${UNIFIED_GATEWAY_MAX_BODY_BYTES:-8388608}
       UNIFIED_LOG_LEVEL: ${UNIFIED_LOG_LEVEL:-info}
       UNIFIED_LOG_FORMAT: ${UNIFIED_LOG_FORMAT:-text}
       UNIFIED_ENABLE_DOCS: ${UNIFIED_ENABLE_DOCS:-0}
@@ -70,8 +71,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      # 冷启动 + 大库首次建表/迁移可能超过 30s，给足启动窗口，避免被误判为 unhealthy
-      start_period: 120s
+      # 冷启动 + 大库首次建表/迁移（ensure_indexes 会重建索引）可能到分钟级；
+      # 120s 会在迁移途中判 unhealthy，而 unhealthy 不会触发自动重启。
+      start_period: 300s
     logging: *default-logging
 
   web:
@@ -79,7 +81,9 @@ services:
     restart: unless-stopped
     depends_on:
       control:
-        condition: service_healthy
+        # 只等启动不等健康：compose 一旦判定依赖 unhealthy 就放弃创建 web，
+        # 而控制面之后即使恢复健康也没有代码再把 web 拉起来。
+        condition: service_started
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8461}:80"
     volumes:

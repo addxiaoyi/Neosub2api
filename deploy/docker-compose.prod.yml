@@ -38,7 +38,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # 与根编排、prod-bind 对齐：首次建库/迁移到分钟级时不能让健康检查先判死
+      start_period: 300s
     deploy:
       resources:
         limits:
@@ -55,7 +56,8 @@ services:
       context: ../apps/web
     depends_on:
       control:
-        condition: service_healthy
+        # 只等启动不等健康，否则控制面慢启动被判 unhealthy 时 web 永远不会被创建
+        condition: service_started
     ports:
       - "127.0.0.1:3000:80"      # 容器是 nginx:alpine 监听 80（apps/web/Dockerfile），3000 只是宿主机端口
     restart: unless-stopped
@@ -80,7 +82,7 @@ services:
     image: nginx:stable-alpine   # 沿用 stable 通道，避免 :latest 漂移
     depends_on:
       control:
-        condition: service_healthy
+        condition: service_started
       web:
         condition: service_healthy
     ports:

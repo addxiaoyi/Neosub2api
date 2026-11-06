@@ -25,6 +25,8 @@ services:
       UNIFIED_CORS_ORIGINS: ${UNIFIED_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       UNIFIED_ALLOW_PRIVATE_UPSTREAMS: ${UNIFIED_ALLOW_PRIVATE_UPSTREAMS:-0}
       UNIFIED_SSE_MAX_SECONDS: ${UNIFIED_SSE_MAX_SECONDS:-600}
+      # /v1 JSON 请求体上限（字节）；超限 413，不读进内存
+      UNIFIED_GATEWAY_MAX_BODY_BYTES: ${UNIFIED_GATEWAY_MAX_BODY_BYTES:-8388608}
       UNIFIED_ALLOW_ANONYMOUS_GATEWAY: ${UNIFIED_ALLOW_ANONYMOUS_GATEWAY:-false}
       UNIFIED_FAILURE_WINDOW_SEC: ${UNIFIED_FAILURE_WINDOW_SEC:-60}
       UNIFIED_FAILURE_WINDOW_MAX: ${UNIFIED_FAILURE_WINDOW_MAX:-20}
@@ -85,7 +87,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # 首次建库/迁移可能远超 20s；窗口太短会让控制面被判 unhealthy，而 Docker 不会
+      # 因此重启它，依赖它的 web 反而永远等不到 healthy（见 web.depends_on 的注释）。
+      start_period: 300s
     logging:
       driver: json-file
       options:
@@ -97,7 +101,9 @@ services:
       context: ./apps/web
     depends_on:
       control:
-        condition: service_healthy
+        # 只等「已启动」不等「已健康」：控制面慢启动时 nginx 先起来，反代端口短暂 502，
+        # 但不会出现控制面在跑、web 却因为拿不到 healthy 而永远不被创建的死局。
+        condition: service_started
     ports:
       # 只绑本机：这个入口会同时反代 /api、/v1，别在未加 TLS 时暴露到局域网
       - "${UNIFIED_BIND_HOST:-127.0.0.1}:8080:80"

@@ -41,6 +41,7 @@ def stack(tmp_path, monkeypatch):
         backup_remote_interval_sec=3600,
         backup_remote_auto_upload=False,
         backup_remote_keep=14,
+        allow_private_upstreams=True,  # 本地假 S3 监听 loopback，走守卫的全局放开
     )
     db = Database(Path(settings.db_path))
     remote = BackupRemoteService(settings, db)

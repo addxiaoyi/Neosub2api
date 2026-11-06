@@ -171,4 +171,5 @@
 - **绝对红线**：`169.254.169.254` 与 `fd00:ec2::254` 云元数据地址无条件拒绝，包括 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 时。
 - **全局开关**：`UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 语义未变（跳过 IP 段检查并优先于 per-provider 判断），唯一收紧是元数据地址仍拒绝。
 - **对外契约**：`GET /api/providers` 新增 `allows_local_base_url`；`PATCH /api/providers/{id}` 与 `/api/provider-credentials` 写 `base_url` 复用同一守卫，400 文案说明「这家是否允许本地地址」及正确做法。
+- **远端备份 endpoint**：`/api/system/backup-remote` 保存 `endpoint` 时与 provider `base_url` 共用 `guard_upstream_url`（`apps/control/app/services/backup_remote.py:229-244`）：默认拒绝环回/私网/链路本地，云元数据地址即使 `UNIFIED_ALLOW_PRIVATE_UPSTREAMS=1` 也拒绝；本机或内网 MinIO 场景需显式打开全局开关。
 - **残余风险**：守卫在保存时解析 DNS，保存到实际请求之间仍有 DNS 重绑定窗口（与修复前同性质，本次未引入连接期二次校验）；白名单信任 spec 里的静态默认地址，若默认值写错会让该 provider 获得 loopback 权限。

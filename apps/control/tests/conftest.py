@@ -187,6 +187,8 @@ def _bring_up_services(tmp_path_factory) -> Iterator[dict]:
             "UNIFIED_ALLOW_ANONYMOUS_GATEWAY": "false",
             # 测试把上游指向本机假服务，必须显式放开地址守卫
             "UNIFIED_ALLOW_PRIVATE_UPSTREAMS": "1",
+            # /v1 请求体上限压到 2 MiB：超限用例不必构造 8 MiB 体，现有最大用例约 1 MiB
+            "UNIFIED_GATEWAY_MAX_BODY_BYTES": "2097152",
             # 禁用 grok 注册器（会真跑浏览器）
             "GROK_REGISTER_EXECUTOR_URL": "",
         }

@@ -21,6 +21,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..db import get_json_setting, set_json_setting
+from ..net_guard import UpstreamAddressError, guard_upstream_url
 from . import backup_crypto
 from .ops_lock import OpsBusy, busy_guard
 from .s3_client import S3Client, S3Config, S3Error
@@ -232,6 +233,15 @@ class BackupRemoteService:
                 raise ConfigError("endpoint 必须是 http(s)://host[:port] 形式")
             if parts.username or parts.password:
                 raise ConfigError("endpoint 里不能带用户名/口令，凭据请改用环境变量")
+            # 与 provider base_url 同一套守卫：默认拒绝环回/私网/链路本地，云元数据永远拒绝
+            try:
+                endpoint = guard_upstream_url(
+                    endpoint,
+                    allow_private=bool(getattr(self._settings, "allow_private_upstreams", False)),
+                    field="远端备份 endpoint",
+                )
+            except UpstreamAddressError as exc:
+                raise ConfigError(str(exc)) from exc
         updated["endpoint"] = endpoint
         if updated["region"] and not _REGION_RE.match(updated["region"]):
             raise ConfigError("region 只能是小写字母、数字和连字符")
