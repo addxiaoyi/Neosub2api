@@ -162,7 +162,14 @@ export default function AccountsPage() {
     () =>
       Object.values(opsMeta)
         .filter((p) => p.enabled && canImportManaged(p.managed))
-        .map((p) => ({id: p.id, name: p.label, readiness: p.readiness, requires: p.requires})),
+        .map((p) => ({
+          id: p.id,
+          name: p.label,
+          readiness: p.readiness,
+          requires: p.requires,
+          credential_state: p.credential_state,
+          credential_state_reason: p.credential_state_reason,
+        })),
     [opsMeta],
   );
   /**
@@ -1296,7 +1303,7 @@ export default function AccountsPage() {
                 size="sm"
                 variant={providerFilter === item.id ? 'default' : 'outline'}
                 className={
-                  'rounded-full px-3 text-[11px] ' +
+                  'max-w-full rounded-full px-3 text-[11px] ' +
                   (needs ? 'h-auto min-h-7 flex-col items-start gap-0.5 py-1' : 'h-7')
                 }
                 onClick={() => setProviderFilter(item.id)}
@@ -1311,7 +1318,7 @@ export default function AccountsPage() {
                     : undefined
                 }
               >
-                <span className="flex items-center gap-1.5">
+                <span className="flex flex-wrap items-center gap-1.5 whitespace-normal">
                   <span>{item.label}</span>
                   {meta && (
                     <>
@@ -1328,9 +1335,9 @@ export default function AccountsPage() {
                     </>
                   )}
                 </span>
-                {/* 缺项摘要直接写在 chip 上，不能只藏在 hover title */}
+                {/* 缺项摘要直接写在 chip 上，不能只藏在 hover title；窄屏空间不够，改由下方来源清单展示全文 */}
                 {needs && requires && (
-                  <span className="max-w-[16rem] truncate font-normal text-amber-700 dark:text-amber-400">
+                  <span className="hidden max-w-[16rem] truncate font-normal text-amber-700 dark:text-amber-400 sm:block">
                     {t('accounts.sourceRequiresLabel', {requires})}
                   </span>
                 )}
@@ -1495,7 +1502,7 @@ export default function AccountsPage() {
                     <div className="truncate font-mono text-[10px] text-muted-foreground">{a.uid}</div>
                     {renderUsage(a)}
                     {a.note ? (
-                      <div className="truncate text-[10px] text-muted-foreground" title={a.note}>
+                      <div className="line-clamp-2 break-words text-[10px] text-muted-foreground" title={a.note}>
                         {t('accounts.noteLabel')}{a.note}
                       </div>
                     ) : null}

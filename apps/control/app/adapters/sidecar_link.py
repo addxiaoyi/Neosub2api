@@ -20,6 +20,8 @@ class SidecarLink(OpenAICompatAdapter):
 
     # sidecar 若自行开了鉴权，才需要服务商页的 api_key；由探测的 401 才能确认，这里只做提示
     requires_api_key = False
+    # 探活的 state=auth 就是 sidecar 明确拒了这把 key，能直接判「已失效」
+    auth_probe_supported = True
 
     def _port(self) -> int:
         return sidecar_status.port_of(self.spec.id, self.base_url)

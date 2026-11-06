@@ -9,6 +9,16 @@ from .api_utils import mask_secret, now
 from .config import LEGACY_PROVIDER_BASES, Settings
 from .db import Database, get_json_setting, set_json_setting
 from .net_guard import UpstreamAddressError, guard_upstream_url, is_loopback_url
+from .services.credential_state import (
+    INVALIDATED,
+    SUPPORT_EXPIRY,
+    SUPPORT_NONE,
+    SUPPORT_PROBE,
+    SUPPORT_REQUEST,
+    CredentialState,
+    classify,
+    is_jwt,
+)
 
 logger = logging.getLogger("unified.registry")
 
@@ -273,17 +283,45 @@ class ProviderRegistry:
         conn = self.db.connect()
         try:
             rows = conn.execute(
-                "SELECT h.provider, h.status, h.error FROM provider_health_checks h JOIN ("
+                "SELECT h.provider, h.status, h.error, h.upstream_status, h.auth_failed, h.finished_at "
+                "FROM provider_health_checks h JOIN ("
                 "  SELECT provider, MAX(id) AS id FROM provider_health_checks GROUP BY provider"
                 ") m ON h.id = m.id"
             ).fetchall()
         finally:
             conn.close()
-        return {row["provider"]: {"status": row["status"], "error": row["error"]} for row in rows}
+        return {
+            row["provider"]: {
+                "status": row["status"],
+                "error": row["error"],
+                "upstream_status": row["upstream_status"],
+                "auth_failed": bool(row["auth_failed"]),
+                "checked_at": int(row["finished_at"]),
+            }
+            for row in rows
+        }
+
+    def _auth_failure_at(self) -> dict[str, int]:
+        """真实请求留下的鉴权失败留痕：provider → 最近一次 401/403 的时间。
+
+        401/403 可能是这把 provider 凭据被上游拒，也可能是账号级问题；只取时间戳做上限，
+        具体归属交给凭据状态判定，不据此推断别的结论。
+        """
+        conn = self.db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT provider, MAX(ts) AS ts FROM request_logs "
+                "WHERE status IN (401, 403) AND provider IS NOT NULL AND provider != '' "
+                "GROUP BY provider"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {str(row["provider"]): int(row["ts"]) for row in rows if row["ts"]}
 
     def list_public(self) -> list[dict[str, Any]]:
         rows, configs, grouped = self._snapshot()
         probes = self._last_probes()
+        auth_failures = self._auth_failure_at()
         out: list[dict[str, Any]] = []
         for pid, adapter in self._adapters.items():
             row = rows.get(pid, {})
@@ -331,12 +369,75 @@ class ProviderRegistry:
             )
             item["readiness"] = state
             item["requires"] = list(missing)
+            # 凭据状态：只按「已存的探活/真实请求证据 + 本地确定性结论」分类，不猜也不外呼
+            stored_key = usable_key or (view.api_keys[0] if view.api_keys else "")
+            credential_state = self._credential_state(
+                adapter,
+                has_credential=bool(view.api_keys),
+                format_problem="" if usable_key else first_problem,
+                credential=stored_key,
+                options=options,
+                probe=probes.get(pid),
+                auth_failure_at=auth_failures.get(pid),
+                credential_updated_at=max(
+                    [int(cred.get("updated_at") or 0) for cred in view.credentials]
+                    + [int(cfg.get("api_key_updated_at") or 0)]
+                ),
+            )
+            support = self._credential_state_support(adapter, stored_key)
+            item.update(credential_state.to_public(support))
+            # 失效是 readiness 的强信号：文案要说清「重新粘贴」，不能退回笼统的「待配置」
+            if credential_state.state == INVALIDATED:
+                item["readiness"] = "needs_config"
+                # 适配器自己也算出了「过期/重新粘贴」时不重复展示，只保留真正还没解决的缺项
+                rest = [
+                    text
+                    for text in item["requires"]
+                    if text not in credential_state.reason
+                    and not any(hint in text for hint in ("重新粘贴", "已过期", "已失效"))
+                ]
+                item["requires"] = [credential_state.reason, *rest]
             # 侧车存活探测结果来自 services 的短 TTL 缓存，这里只贴结果、不发请求
             from .services.sidecar_status import decorate_public
 
             decorate_public(item)
             out.append(item)
         return out
+
+    @staticmethod
+    def _credential_state(
+        adapter: ProviderAdapter,
+        *,
+        has_credential: bool,
+        format_problem: str,
+        credential: str,
+        options: dict[str, Any],
+        probe: dict[str, Any] | None,
+        auth_failure_at: int | None,
+        credential_updated_at: int,
+    ) -> CredentialState:
+        expiry_problem = (
+            adapter.credential_expiry_hint(credential, options) if has_credential else ""
+        )
+        return classify(
+            has_credential=has_credential,
+            format_problem=format_problem,
+            expiry_problem=expiry_problem,
+            probe=probe,
+            auth_failure_at=auth_failure_at,
+            credential_updated_at=credential_updated_at,
+        )
+
+    @staticmethod
+    def _credential_state_support(adapter: ProviderAdapter, credential: str) -> str:
+        """这家能判到什么程度：探活自报 401/403 > 本地 JWT 过期 > 只能靠真实请求留痕 > 判不了。"""
+        if getattr(adapter, "auth_probe_supported", False):
+            return SUPPORT_PROBE
+        if is_jwt(credential):
+            return SUPPORT_EXPIRY
+        if adapter.spec.capabilities.get("chat"):
+            return SUPPORT_REQUEST
+        return SUPPORT_NONE
 
     def update(
         self,
@@ -387,6 +488,8 @@ class ProviderRegistry:
                     # 前端掩码回显约定："***" = 不变，空串 = 清除
                     if api_key != "***":
                         cfg["api_key"] = api_key.strip()
+                        # 重新粘贴后旧探活/请求证据不再代表这把 key，记下时间让判定失效
+                        cfg["api_key_updated_at"] = int(time.time())
                 if options is not None:
                     merged = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
                     merged = {**merged, **options}

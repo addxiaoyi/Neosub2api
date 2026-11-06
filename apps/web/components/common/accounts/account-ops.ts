@@ -32,6 +32,10 @@ export interface ProviderAccountOps {
   status: 'implemented' | 'stub' | 'sidecar';
   readiness: 'ready' | 'needs_config';
   requires: string[];
+  /** 凭据状态与 /api/providers 同口径：invalidated 时先修凭据再导入账号 */
+  credential_state?: 'valid' | 'missing' | 'invalidated' | 'unknown';
+  credential_state_reason?: string;
+  credential_state_note?: string;
   managed: AccountManaged;
   ops: AccountOps;
 }

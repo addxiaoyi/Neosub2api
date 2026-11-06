@@ -305,7 +305,9 @@ CREATE TABLE IF NOT EXISTS provider_health_checks(
   finished_at INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'unsupported')),
   latency_ms INTEGER NOT NULL DEFAULT 0,
-  error TEXT NOT NULL DEFAULT ''          -- 已脱敏的错误摘要，绝不落上游原始 key
+  error TEXT NOT NULL DEFAULT '',         -- 已脱敏的错误摘要，绝不落上游原始 key
+  upstream_status INTEGER,                -- 上游原始状态码；探活自报鉴权失败时用于判定凭据失效
+  auth_failed INTEGER NOT NULL DEFAULT 0  -- 1 = 这次探活明确拿到 401/403，不是按文案猜
 );
 CREATE INDEX IF NOT EXISTS idx_provider_health_provider ON provider_health_checks(provider, id);
 
@@ -404,6 +406,10 @@ class Database:
             conn.execute(
                 "UPDATE providers SET base_url = '' WHERE id = 'grok-register' AND base_url = 'http://127.0.0.1:7866'"
             )
+            # 凭据状态留痕：老库补两列，历史行按「没有鉴权证据」处理（默认 0/NULL），
+            # 不能回溯标成失效
+            _ensure_column(conn, "provider_health_checks", "upstream_status", "INTEGER")
+            _ensure_column(conn, "provider_health_checks", "auth_failed", "INTEGER NOT NULL DEFAULT 0")
             # 热路径索引：建表/补列之后统一接线；定义升级靠 ensure_indexes 比对重建
             from .perf_indexes import ensure_indexes
 

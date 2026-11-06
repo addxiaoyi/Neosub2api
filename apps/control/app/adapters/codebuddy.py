@@ -95,6 +95,9 @@ class CodeBuddyAdapter(ProviderAdapter):
     此时如实透传管理端的错误。
     """
 
+    # 探活把管理端的 401/403 直接落成 auth=missing，能判「已失效」
+    auth_probe_supported = True
+
     spec = ProviderSpec(
         id="codebuddy",
         name="CodeBuddy",

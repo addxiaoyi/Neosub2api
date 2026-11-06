@@ -1,6 +1,6 @@
 'use client';
 
-import {Fragment, useCallback, useEffect, useState} from 'react';
+import {Fragment, useCallback, useEffect, useRef, useState} from 'react';
 import Link from 'next/link';
 import {
   AlertCircle,
@@ -110,6 +110,8 @@ export function ProvidersSection() {
   const [editing, setEditing] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<CredDraft | null>(null);
   const [tokenChecks, setTokenChecks] = useState<Record<string, ProviderTokenCheck>>({});
+  // hash 直达只消费一次，避免凭据列表刷新后焦点被反复抢走
+  const hashFocused = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -415,7 +417,13 @@ export function ProvidersSection() {
     );
   }
 
-  function credFields(p: ProviderInfo, draft: CredDraft, onChange: (next: CredDraft) => void, masked: string) {
+  function credFields(
+    p: ProviderInfo,
+    draft: CredDraft,
+    onChange: (next: CredDraft) => void,
+    masked: string,
+    secretId: string,
+  ) {
     return (
       <>
         <div className="flex items-center gap-2">
@@ -441,6 +449,7 @@ export function ProvidersSection() {
         <div className="flex items-center gap-2">
           <span className="w-28 text-[11px] text-muted-foreground">{t('providers.credSecret')}</span>
           <Input
+            id={secretId}
             type="password"
             autoComplete="off"
             value={draft.secret}
@@ -483,6 +492,44 @@ export function ProvidersSection() {
       </>
     );
   }
+
+  /**
+   * 「重新粘贴凭据」的直达动作：展开该行、打开第一条凭据的编辑位（没有凭据就打开新增），
+   * 再把焦点落到密文输入框。只做界面导航，不代替用户写库。
+   */
+  function focusRepaste(p: ProviderInfo) {
+    setExpanded((prev) => ({...prev, [p.id]: true}));
+    const target = credsOf(p).find((c) => c.has_secret) ?? credsOf(p)[0];
+    if (target) {
+      startEdit(target);
+      setAdding((prev) => ({...prev, [p.id]: false}));
+      focusSecret(`provider-secret-${target.id}`);
+    } else if (!p.capabilities.sidecar) {
+      setAdding((prev) => ({...prev, [p.id]: true}));
+      focusSecret(`provider-api-key-${p.id}`);
+    }
+    document.getElementById('provider-' + p.id)?.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+
+  function focusSecret(id: string) {
+    window.setTimeout(() => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      el?.focus();
+    }, 0);
+  }
+
+  // 账号页带 #provider-<id> 过来时落到同一个动作，跨页也不用用户自己找输入框
+  useEffect(() => {
+    if (hashFocused.current || credLoading || items.length === 0) return;
+    const hash = window.location.hash;
+    if (!hash.startsWith('#provider-')) return;
+    const target = items.find((item) => item.id === hash.slice('#provider-'.length));
+    if (!target) return;
+    hashFocused.current = true;
+    focusRepaste(target);
+    // 只在首次加载后消费一次 hash，之后由用户自己操作
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, credLoading]);
 
   return (
     <div className="space-y-3">
@@ -528,6 +575,28 @@ export function ProvidersSection() {
                         {t(p.readiness === 'needs_config' ? 'providers.needsConfig' : 'providers.ready')}
                       </Badge>
                     </div>
+                    {/* 凭据已被上游明确拒掉：不是「还没配」，给出直达重新粘贴的入口 */}
+                    {p.credential_state === 'invalidated' && (
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        <Badge
+                          variant="destructive"
+                          className="rounded-full text-[10px]"
+                          title={p.credential_state_reason}
+                        >
+                          {t('providers.credentialInvalidated')}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 rounded-full px-2 text-[10px]"
+                          disabled={!isAdmin}
+                          title={p.credential_state_reason}
+                          onClick={() => focusRepaste(p)}
+                        >
+                          {t('providers.repasteCredential')}
+                        </Button>
+                      </div>
+                    )}
                     {/* sidecar 存活是独立事实：在线时单独标一句，异常时由 requires 行给出原因 */}
                     {p.sidecar_status?.state === 'alive' && (
                       <div className="mt-1">
@@ -659,6 +728,7 @@ export function ProvidersSection() {
                           <div className="flex items-center gap-2">
                             <span className="w-28 text-[11px] text-muted-foreground">{t('providers.colApiKey')}</span>
                             <Input
+                              id={`provider-api-key-${p.id}`}
                               type="password"
                               value={keyDrafts[p.id] ?? ''}
                               onChange={(e) => setKeyDrafts((prev) => ({...prev, [p.id]: e.target.value}))}
@@ -813,7 +883,13 @@ export function ProvidersSection() {
                               <div key={c.id} className="rounded-xl bg-background/60 px-2 py-1.5">
                                 {editing === c.id && editDraft ? (
                                   <div className="flex flex-col gap-2">
-                                    {credFields(p, editDraft, setEditDraft, c.has_secret ? c.secret_masked : '')}
+                                    {credFields(
+                                      p,
+                                      editDraft,
+                                      setEditDraft,
+                                      c.has_secret ? c.secret_masked : '',
+                                      `provider-secret-${c.id}`,
+                                    )}
                                     <div className="flex items-center gap-2 pl-[120px]">
                                       <Button
                                         size="sm"
@@ -925,8 +1001,13 @@ export function ProvidersSection() {
 
                           {adding[p.id] && (
                             <div className="flex flex-col gap-2 rounded-xl bg-background/60 p-2">
-                              {credFields(p, addDrafts[p.id] ?? EMPTY_CRED, (next) =>
-                                setAddDrafts((prev) => ({...prev, [p.id]: next})), '')}
+                              {credFields(
+                                p,
+                                addDrafts[p.id] ?? EMPTY_CRED,
+                                (next) => setAddDrafts((prev) => ({...prev, [p.id]: next})),
+                                '',
+                                `provider-secret-new-${p.id}`,
+                              )}
                               <div className="flex items-center gap-2 pl-[120px]">
                                 <Button
                                   size="sm"

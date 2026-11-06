@@ -1,6 +1,9 @@
+import base64
 import json
+import time
 from abc import ABC
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -49,6 +52,32 @@ class ProviderError(Exception):
         self.upstream_code = self.upstream_code or code
         self.upstream_message = self.upstream_message or message
         return self
+
+
+def jwt_expired_reason(token: str) -> str:
+    """只读 JWT 的 exp 判断是否过期：不验签、不外呼，判不出来就返回空串。
+
+    凭据本身带过期时间时，本地就能给出确定性结论，不必等探活或真实请求。
+    """
+    raw = (token or "").strip()
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    parts = raw.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return ""
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    exp = payload.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return ""
+    if float(exp) <= time.time():
+        when = datetime.fromtimestamp(float(exp), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return f"凭据已失效，需要重新粘贴：JWT 已过期（exp {when}）"
+    return ""
 
 
 def parse_vendor_error(text: str) -> tuple[str | None, str | None]:
@@ -157,6 +186,8 @@ class ProviderAdapter(ABC):
     # 模型目录来源：upstream = 调上游；upstream_fallback = 先调上游，失败回落声明；
     # declared = 仅仓库内静态声明；none = 不提供模型目录
     catalog_mode: str = "none"
+    # 探活/模型目录会不会把上游的 401/403 原样带到 registry；决定了这家能否自己判「已失效」
+    auth_probe_supported: bool = False
 
     def __init__(self, base_url: str = "") -> None:
         self.base_url = base_url or self.spec.default_base_url
@@ -185,6 +216,27 @@ class ProviderAdapter(ABC):
 
     def credential_problem(self, credential_type: str, text: str) -> str:
         """导入前服务商特有凭证校验；空串=通过，否则返回给人看的缺项说明。"""
+        return ""
+
+    def credential_expiry_hint(
+        self, credential: str, options: dict[str, Any] | None = None
+    ) -> str:
+        """本地可判的失效原因（当前只读 JWT exp）；空串=判不出来，交给探活/真实请求证据。
+
+        有些服务商把登录态放在 options.tokens 而不是 api_key，一并看一眼；只认 JWT 形状，
+        普通字符串不会被误判。
+        """
+        candidates = [credential]
+        for key in ("token", "tokens", "access_token", "jwt"):
+            value = (options or {}).get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+            elif isinstance(value, list):
+                candidates.extend(item for item in value if isinstance(item, str))
+        for candidate in candidates:
+            hint = jwt_expired_reason(candidate)
+            if hint:
+                return hint
         return ""
 
     def readiness_now(

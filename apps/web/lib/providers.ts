@@ -97,6 +97,16 @@ export interface ProviderHealth {
   history: ProviderHealthCheck[];
 }
 
+/** 凭据状态：valid = 探活通过；missing = 没配；invalidated = 上游明确拒了/本地确认过期；unknown = 还没有证据。 */
+export type ProviderCredentialState = 'valid' | 'missing' | 'invalidated' | 'unknown';
+
+/** 这家能判到什么程度；note 非空说明为什么只能给「未知」。 */
+export type ProviderCredentialStateSupport =
+  | 'auth_probe'
+  | 'token_expiry'
+  | 'request_log'
+  | 'unavailable';
+
 export interface ProviderInfo {
   id: string;
   name: string;
@@ -120,6 +130,14 @@ export interface ProviderInfo {
   readiness: ProviderReadiness;
   /** needs_config 时仍缺的项，给人看的短句 */
   requires: string[];
+  /** 凭据状态由后端按库内探活/真实请求证据判定，前端只读展示，不自行推断 */
+  credential_state: ProviderCredentialState;
+  credential_state_reason: string;
+  credential_state_checked_at: number | null;
+  credential_state_evidence: 'probe' | 'request' | 'expiry' | 'format' | 'none';
+  credential_state_support: ProviderCredentialStateSupport;
+  /** support 为 request_log / unavailable 时说明为什么判不出，空串表示可判 */
+  credential_state_note: string;
   /** sidecar 存活探测结果；非 sidecar 家没有这个字段 */
   sidecar_status?: {
     state: 'alive' | 'auth' | 'timeout' | 'refused' | 'http_error';

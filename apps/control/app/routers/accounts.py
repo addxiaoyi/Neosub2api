@@ -286,6 +286,10 @@ async def account_capabilities(request: Request, user: dict = Depends(current_us
                 "status": adapter.spec.status,
                 "readiness": info.get("readiness") or adapter.spec.readiness,
                 "requires": list(info.get("requires") or adapter.spec.requires),
+                # 凭据状态与 /api/providers 同口径，账号页据此提示「先去重新粘贴」
+                "credential_state": info.get("credential_state") or "unknown",
+                "credential_state_reason": info.get("credential_state_reason") or "",
+                "credential_state_note": info.get("credential_state_note") or "",
                 "managed": _managed_by(adapter, ops),
                 "ops": ops,
             }

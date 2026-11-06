@@ -40,6 +40,8 @@ def _row(row: sqlite3.Row) -> dict[str, Any]:
         "finished_at": int(row["finished_at"]),
         "latency_ms": int(row["latency_ms"]),
         "error": row["error"],
+        "upstream_status": row["upstream_status"],
+        "auth_failed": bool(row["auth_failed"]),
     }
 
 
@@ -122,9 +124,19 @@ class ProviderHealthService:
         conn = self._db.connect()
         try:
             conn.execute(
-                "INSERT INTO provider_health_checks(provider, started_at, finished_at, status, latency_ms, error) "
-                "VALUES(?,?,?,?,?,?)",
-                (provider, started, finished, outcome.status, outcome.latency_ms, outcome.message),
+                "INSERT INTO provider_health_checks("
+                "provider, started_at, finished_at, status, latency_ms, error, upstream_status, auth_failed"
+                ") VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    started,
+                    finished,
+                    outcome.status,
+                    outcome.latency_ms,
+                    outcome.message,
+                    outcome.upstream_status,
+                    1 if outcome.auth_failed else 0,
+                ),
             )
             conn.commit()
         finally:

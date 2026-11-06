@@ -5,6 +5,7 @@
  * 探测结果只提示不拦截——很多上游要额外配置，一次探测失败不该拒绝入库。
  */
 import {useEffect, useMemo, useState} from 'react';
+import Link from 'next/link';
 import {Loader2, TriangleAlert} from 'lucide-react';
 import {Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle} from '@/components/animate-ui/radix/dialog';
 import {Button} from '@/components/ui/button';
@@ -14,6 +15,7 @@ import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@/c
 import {Textarea} from '@/components/ui/textarea';
 import {errText} from '@/lib/api';
 import {useT} from '@/lib/i18n/provider';
+import type {ProviderCredentialState} from '@/lib/providers';
 import {notify} from '@/lib/toast';
 import {
   accountOpsApi,
@@ -55,8 +57,15 @@ export function ImportAccountDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 可导入的服务商候选（由页面按 managed 过滤后传入；readiness 用于顶部警示） */
-  providers: {id: string; name: string; readiness: 'ready' | 'needs_config'; requires: string[]}[];
+  /** 可导入的服务商候选（由页面按 managed 过滤后传入；readiness / 凭据状态用于顶部警示） */
+  providers: {
+    id: string;
+    name: string;
+    readiness: 'ready' | 'needs_config';
+    requires: string[];
+    credential_state?: ProviderCredentialState;
+    credential_state_reason?: string;
+  }[];
   defaultProvider?: string;
   onSaved?: () => void;
 }) {
@@ -133,6 +142,21 @@ export function ImportAccountDialog({
           <DialogDescription>{t('accounts.importDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          {/* 上游已把服务商凭据判为失效：先修凭据，导入账号不会生效 */}
+          {providerMeta?.credential_state === 'invalidated' && (
+            <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-600 dark:text-red-400">
+              <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="flex-1">
+                {t('accounts.importCredentialInvalidated', {
+                  provider: providerName,
+                  reason: providerMeta.credential_state_reason || '',
+                })}
+              </span>
+              <Button asChild size="sm" variant="outline" className="h-7 shrink-0 rounded-full text-[11px]">
+                <Link href={`/settings#provider-${provider}`}>{t('accounts.repasteProvider')}</Link>
+              </Button>
+            </div>
+          )}
           {/* 未就绪不封死入口（前置可能只是运行时未起），但必须说清保存后也不会生效 */}
           {providerMeta?.readiness === 'needs_config' && (
             <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
