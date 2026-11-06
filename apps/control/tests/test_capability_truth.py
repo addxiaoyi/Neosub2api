@@ -734,9 +734,11 @@ def test_grok_register_capability_backed_by_real_executor_call() -> None:
     import app.services.grok_register as register_service
 
     source = Path(register_service.__file__).read_text(encoding="utf-8")
-    # 未配置执行器时明确失败，不假装成功；配置后 POST 外呼执行器
-    assert "client.post(url, json=body)" in source
+    # 未配置执行器时明确失败，不假装成功；配置后按协议 v1 提交 job 并轮询结果
+    assert 'await client.post(f"{url}/jobs", json=body)' in source
+    assert "await client.get(job_url)" in source
     assert "未配置注册执行器" in source
+    assert register_service.PROTOCOL == "grok-register-executor/v1"
 
 
 # ---------- 12. 跨家不变式：账号能力声明位 = 覆写真实结果（14 家通跑） ----------

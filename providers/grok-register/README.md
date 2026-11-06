@@ -22,6 +22,8 @@
 
 ## 执行器边界
 
-主仓不做真实浏览器注册。任务执行器通过 `GROK_REGISTER_EXECUTOR_URL` 指向外部运行时
-（HTTP POST，返回 JSON）。未配置时任务以明确原因失败，不会伪造成功。
+主仓不做真实浏览器注册。任务执行器通过 `GROK_REGISTER_EXECUTOR_URL` 指向外部运行时，
+协议为 `grok-register-executor/v1`（提交 / 查询 / 取消 / 结果回传，字段见
+`docs/providers/grok-register.md` §5.4）。未配置时任务以明确原因失败，不会伪造成功。
+无真执行器时可用 `apps/control/scripts/grok_executor_stub.py` 验证整条链路。
 上游注册机可作为该执行器的参考实现，需自行 clone、独立部署，不进入本仓。

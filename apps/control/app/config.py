@@ -184,6 +184,9 @@ class Settings:
     backup_remote_interval_sec: int = BACKUP_REMOTE_INTERVAL_DEFAULT
     backup_remote_auto_upload: bool = False
     backup_remote_keep: int = BACKUP_REMOTE_KEEP_DEFAULT
+    # 注册执行器：单任务总超时与轮询间隔（协议见 docs/providers/grok-register.md）
+    grok_register_executor_timeout_sec: float = 900.0
+    grok_register_poll_interval_sec: float = 2.0
 
 
 def load_settings() -> Settings:
@@ -214,6 +217,12 @@ def load_settings() -> Settings:
         grok_register_executor_url=os.getenv("GROK_REGISTER_EXECUTOR_URL", "").rstrip("/"),
         grok_register_max_concurrency=int(os.getenv("GROK_REGISTER_MAX_CONCURRENCY", "2")),
         grok_register_max_workers=int(os.getenv("GROK_REGISTER_MAX_WORKERS", "4")),
+        grok_register_executor_timeout_sec=max(
+            0.05, float(os.getenv("GROK_REGISTER_EXECUTOR_TIMEOUT_SEC", "900"))
+        ),
+        grok_register_poll_interval_sec=max(
+            0.05, float(os.getenv("GROK_REGISTER_POLL_INTERVAL_SEC", "2"))
+        ),
         allow_anonymous_gateway=_bool("UNIFIED_ALLOW_ANONYMOUS_GATEWAY", False),
         cors_origins=tuple(o.strip() for o in origins.split(",") if o.strip()),
         host=os.getenv("UNIFIED_HOST", "127.0.0.1").strip() or "127.0.0.1",
