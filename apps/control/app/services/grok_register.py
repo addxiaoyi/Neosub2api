@@ -6,6 +6,8 @@ docs/providers/grok-register.md）。未配置执行器时任务以明确原因�
 """
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import time
@@ -31,13 +33,52 @@ EXECUTOR_ACTIVE = {"pending", "running"}
 # 单次 HTTP 请求的超时上限；整任务总超时由 settings 控制
 _REQUEST_TIMEOUT_CAP = 30.0
 
+# 失败重试退避：第 1/2/3/4 次失败后分别等 0/2/4/8 秒；再往后沿用最后一档
+_BACKOFF_SEQUENCE = (0, 2, 4, 8)
+
+EXPORT_FORMATS = ("json", "csv")
+
+# 导出件的全部字段：只从 accounts + provider_credentials 取，任务行里的
+# payload / proxy / result_json 一概不带（可能含邮箱口令与执行器原始日志）
+_EXPORT_COLUMNS = (
+    "task_id",
+    "uid",
+    "nickname",
+    "realm",
+    "expires_at",
+    "credits",
+    "credential_type",
+    "credential",
+    "file",
+    "created_at",
+)
+
+_FORMULA_LEADS = ("=", "+", "-", "@")
+
 
 def _row(row) -> dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
+def _json_dict(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _csv_cell(value: Any) -> str:
+    """CSV 单元格：None 出空串，公式起始字符加前导单引号（与日志导出同一口径）。"""
+    if value is None:
+        return ""
+    text = str(value)
+    return f"'{text}" if text[:1] in _FORMULA_LEADS else text
+
+
 def _backoff_seconds(attempts: int) -> int:
-    return min(5 * (2 ** max(attempts - 1, 0)), 60)
+    index = min(max(int(attempts) - 1, 0), len(_BACKOFF_SEQUENCE) - 1)
+    return _BACKOFF_SEQUENCE[index]
 
 
 class ExecutorError(RuntimeError):
@@ -612,6 +653,78 @@ class GrokRegisterService:
         finally:
             conn.close()
         return saved
+
+    # ---- 凭据导出 ----
+
+    def export_credentials(self, task_id: int, fmt: str = "json") -> tuple[bytes, str, str]:
+        """导出一次注册任务落库的账号与登录凭据，返回 (内容, media_type, 文件名)。
+
+        字段白名单见 `_EXPORT_COLUMNS`：任务行里的 payload / proxy / result_json
+        不进导出件（可能含邮箱口令与执行器原始日志），cookie/token 原样输出——
+        脱敏会让导出件无法直接登录，所以只在数据范围上收窄，不遮值。
+        """
+        normalized = (fmt or "").strip().lower()
+        if normalized not in EXPORT_FORMATS:
+            raise ValueError(f"不支持的导出格式：{fmt or '(空)'}（可选 json / csv）")
+        task = self.get(task_id)  # 未知任务抛 KeyError，路由层转 404
+        rows = self._export_rows(task_id)
+        if normalized == "json":
+            payload = {
+                "task_id": task_id,
+                "task_status": task["status"],
+                "exported_at": int(time.time()),
+                "accounts": rows,
+            }
+            body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            media_type = "application/json; charset=utf-8"
+        else:
+            buf = io.StringIO()
+            writer = csv.writer(buf, lineterminator="\r\n")
+            writer.writerow(_EXPORT_COLUMNS)
+            writer.writerows([_csv_cell(row[name]) for name in _EXPORT_COLUMNS] for row in rows)
+            # 与日志导出一致：BOM 让 Excel 双击打开时按 UTF-8 解码
+            body = ("\ufeff" + buf.getvalue()).encode("utf-8")
+            media_type = "text/csv; charset=utf-8"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"grok-credentials-task-{task_id}-{stamp}.{normalized}"
+        return body, media_type, filename
+
+    def _export_rows(self, task_id: int) -> list[dict[str, Any]]:
+        """按 meta_json 里的 grok_task_id 收窄到本任务；凭据按 credential_id 反查镜像行。"""
+        conn = self._db.connect()
+        try:
+            accounts = conn.execute(
+                "SELECT file, uid, nickname, realm, expires_at, credits, created_at, meta_json "
+                "FROM accounts WHERE provider='grok-register' ORDER BY file"
+            ).fetchall()
+            secrets = {
+                int(row["id"]): str(row["secret"] or "")
+                for row in conn.execute(
+                    "SELECT id, secret FROM provider_credentials WHERE provider='grok-register'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        rows: list[dict[str, Any]] = []
+        for row in accounts:
+            meta = _json_dict(row["meta_json"])
+            if meta.get("grok_task_id") != task_id:
+                continue
+            rows.append(
+                {
+                    "task_id": task_id,
+                    "uid": row["uid"],
+                    "nickname": row["nickname"],
+                    "realm": row["realm"],
+                    "expires_at": int(row["expires_at"] or 0),
+                    "credits": row["credits"],
+                    "credential_type": str(meta.get("credential_type") or ""),
+                    "credential": secrets.get(int(meta.get("credential_id") or 0), ""),
+                    "file": row["file"],
+                    "created_at": int(row["created_at"] or 0),
+                }
+            )
+        return rows
 
 
 def queue_stats(db_path) -> dict[str, Any]:

@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..security import admin_user
@@ -56,6 +56,31 @@ def task_detail(task_id: int, request: Request, user: dict = Depends(admin_user)
         return _service(request).detail(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/tasks/{task_id}/credentials")
+def export_task_credentials(
+    task_id: int, request: Request, fmt: str = "json", user: dict = Depends(admin_user)
+):
+    """导出该任务落库的账号与登录凭据（json / csv）。
+
+    文件里 cookie/token 是明文，只为「拿到产物直接登录」这一条用途；与任务读侧
+    同口径，仅 admin 可用，且禁止中间层缓存。
+    """
+    try:
+        body, media_type, filename = _service(request).export_credentials(task_id, fmt)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/tasks/{task_id}/cancel")

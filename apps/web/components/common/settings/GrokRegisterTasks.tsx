@@ -1,8 +1,8 @@
 'use client';
 
 import {useCallback, useEffect, useRef, useState} from 'react';
-import {AlertCircle, ChevronDown, ChevronRight, Plus, RefreshCw, RotateCcw, Square, TriangleAlert} from 'lucide-react';
-import {errText, grokRegisterApi} from '@/lib/api';
+import {AlertCircle, ChevronDown, ChevronRight, Download, Plus, RefreshCw, RotateCcw, Square, TriangleAlert} from 'lucide-react';
+import {downloadErrText, errText, grokRegisterApi} from '@/lib/api';
 import {fmtDateTime} from '@/lib/format';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
@@ -160,6 +160,25 @@ export function GrokRegisterTasks() {
       await load();
     } catch (e) {
       notify.err(errText(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function exportTask(task: GrokRegisterTask) {
+    setBusy(task.id);
+    try {
+      const {blob, filename} = await grokRegisterApi.exportCredentials(task.id, 'json');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      notify.ok(t('configTransfer.downloaded'), `#${task.id}`);
+    } catch (e) {
+      // 失败时 axios 拿到的是 Blob，要先解回 JSON 才能给出后端原因
+      notify.err(await downloadErrText(e));
     } finally {
       setBusy(null);
     }
@@ -434,6 +453,8 @@ export function GrokRegisterTasks() {
           {tasks.map((task) => {
             const canCancel = task.status === 'queued' || task.status === 'running';
             const canRetry = task.status === 'failed' || task.status === 'cancelled';
+            // 只有已完成的任务才有落库产物可导；其它状态没有账号可导
+            const canExport = task.status === 'succeeded';
             const isBusy = busy === task.id;
             return (
               <div key={task.id} className="rounded-xl bg-background/60 px-2 py-1.5">
@@ -471,6 +492,19 @@ export function GrokRegisterTasks() {
                     <span className="truncate text-[10px] text-muted-foreground">{task.email_provider}</span>
                   )}
                   <div className="ml-auto flex items-center gap-1">
+                    {canExport && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 rounded-md"
+                        title={t('configTransfer.download')}
+                        aria-label={t('configTransfer.download')}
+                        disabled={isBusy}
+                        onClick={() => exportTask(task)}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                     {canCancel ? (
                       <ConfirmDialog
                         trigger={
