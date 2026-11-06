@@ -150,7 +150,16 @@ def _prepare_import(request: Request, body: AccountImportIn) -> dict[str, Any]:
             status_code=400,
             detail=f"credential_type 必须是 {'、'.join(IMPORT_CREDENTIAL_TYPES)} 之一",
         )
-    text = _prepare_credential(ctype, body.credential)
+    # 缺凭证时先问服务商：这里的文案要具体到「缺什么、从哪拿」，不能落到通用的「凭证不能为空」
+    raw = body.credential
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        hint = adapter.credential_problem(ctype, "")
+        if hint:
+            raise HTTPException(status_code=400, detail=hint)
+    text = _prepare_credential(ctype, raw)
+    hint = adapter.credential_problem(ctype, text)
+    if hint:
+        raise HTTPException(status_code=400, detail=hint)
     base_url = (body.base_url or "").strip()
     if base_url:
         try:
@@ -254,13 +263,16 @@ async def _sync_targets(request: Request, provider: str | None) -> dict[str, Any
 
 
 @router.get("/capabilities")
-def account_capabilities(request: Request, user: dict = Depends(current_user)):
+async def account_capabilities(request: Request, user: dict = Depends(current_user)):
     """每家 provider 的账号管理能力（以适配器实际覆写为准，不看声明位）。
 
     前端据此决定画哪些按钮、哪些家只给出「账号在哪里管理」的说明，
-    避免出现点下去必然 501 的假按钮。
+    避免出现点下去必然 501 的假按钮。侧车家先刷一轮存活探测，requires 才是当下原因。
     """
+    from ..services import sidecar_status
+
     registry = request.app.state.registry
+    await sidecar_status.refresh(registry)
     rows = {item["id"]: item for item in registry.list_public()}
     out: list[dict[str, Any]] = []
     for adapter in registry._adapters.values():
@@ -272,8 +284,8 @@ def account_capabilities(request: Request, user: dict = Depends(current_user)):
                 "label": info.get("label") or adapter.spec.name,
                 "enabled": bool(info.get("enabled")),
                 "status": adapter.spec.status,
-                "readiness": adapter.spec.readiness,
-                "requires": list(adapter.spec.requires),
+                "readiness": info.get("readiness") or adapter.spec.readiness,
+                "requires": list(info.get("requires") or adapter.spec.requires),
                 "managed": _managed_by(adapter, ops),
                 "ops": ops,
             }

@@ -179,7 +179,7 @@ def test_probe_failure_is_reported_not_leaked(admin: httpx.Client) -> None:
         json={
             "provider": "codebuddy",
             "credential_type": "api_key",
-            "credential": SECRET,
+            "credential": f"wbt_{SECRET}",
             "base_url": "http://127.0.0.1:9",
         },
     )

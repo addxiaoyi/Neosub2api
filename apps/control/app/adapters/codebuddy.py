@@ -1,9 +1,11 @@
 import json
 from typing import Any
 
+import httpx
+
 from ..config import Settings
 from .base import AccountsPage, ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
-from .client import UnifiedApiClient
+from .client import UnifiedApiClient, UpstreamReply
 
 # 管理端设置下发时只透传这些组（与 workbuddy2api config.json 的分组一致）
 PUSH_GROUPS = (
@@ -29,6 +31,59 @@ META_KEYS = (
     "in_flight",
     "pool",
 )
+
+ADMIN_TOKEN_PREFIX = "wbt_"
+ADMIN_TOKEN_HINT = (
+    "CodeBuddy 需要 7864 管理端的 wbt_ API Token：先启动管理端（默认本机 7864 端口），"
+    "再在管理端「设置 → API Token」生成后导入"
+)
+ADMIN_CREDENTIAL_TYPES = ("api_key", "bearer")
+
+
+class _AdminClient(UnifiedApiClient):
+    """管理端客户端：连接失败翻译成可执行的进程提示，其余错误原样透传。"""
+
+    def _translate(self, exc: ProviderError) -> ProviderError:
+        if exc.status_code != 502 or "上游不可达" not in exc.message:
+            return exc
+        base = self.base_url.rstrip("/")
+        cause = exc.__cause__
+        if isinstance(cause, httpx.ConnectError):
+            return ProviderError(502, f"CodeBuddy 管理端进程未运行（{base} 连接被拒绝）；请先启动 7864 管理端")
+        if isinstance(cause, httpx.TimeoutException):
+            return ProviderError(504, f"CodeBuddy 管理端响应超时（{base}）")
+        return ProviderError(502, f"CodeBuddy 管理端不可达（{base}）：{cause}")
+
+    async def _guard(self, call: Any) -> Any:
+        try:
+            return await call
+        except ProviderError as exc:
+            translated = self._translate(exc)
+            if translated is exc:
+                raise
+            raise translated from exc
+
+    async def request_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self._guard(super().request_json(method, path, payload))
+
+    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._guard(super().get_json(path, params))
+
+    async def forward(
+        self,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        stream: bool,
+        method: str = "POST",
+        raw: bytes | None = None,
+        accept: str | None = None,
+    ) -> UpstreamReply:
+        return await self._guard(
+            super().forward(path, payload, stream=stream, method=method, raw=raw, accept=accept)
+        )
 
 
 class CodeBuddyAdapter(ProviderAdapter):
@@ -60,7 +115,9 @@ class CodeBuddyAdapter(ProviderAdapter):
         protocols=("openai.chat.completions", "anthropic.messages"),
         readiness="needs_config",
         requires=(
-            "7864 管理端进程 + wbt_ token（缺了账号同步、签到与设置下发全部失败）",
+            "7864 管理端进程 + wbt_ token：先启动 codebuddy2api 管理端（默认本机 7864 端口），"
+            "再在管理端「设置 → API Token」生成 wbt_ 开头的 token 后导入；缺任一项则账号同步、"
+            "签到与设置下发全部失败",
         ),
     )
 
@@ -69,7 +126,37 @@ class CodeBuddyAdapter(ProviderAdapter):
         super().__init__(base_url)
 
     def _client(self, timeout: float = 120.0) -> UnifiedApiClient:
-        return UnifiedApiClient(self.base_url, api_key=self.api_key, timeout=timeout)
+        return _AdminClient(self.base_url, api_key=self.api_key, timeout=timeout)
+
+    def credential_problem(self, credential_type: str, text: str) -> str:
+        if credential_type not in ADMIN_CREDENTIAL_TYPES:
+            return f"CodeBuddy 管理端只接受 wbt_ API Token；{credential_type} 类型不能用于管理端鉴权"
+        key = text.strip()
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+        if not key:
+            return ADMIN_TOKEN_HINT
+        if not key.startswith(ADMIN_TOKEN_PREFIX):
+            return f"CodeBuddy 管理端 token 必须以 wbt_ 开头（当前值前缀不符）；{ADMIN_TOKEN_HINT}"
+        return ""
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        if has_credential and not credential_problem:
+            if (last_probe or {}).get("status") == "failed":
+                reason = str((last_probe or {}).get("error") or "管理端不可达")
+                return "needs_config", (f"上次探活失败：{reason}",)
+            return "ready", ()
+        if credential_problem:
+            return "needs_config", (credential_problem,)
+        return "needs_config", self.spec.requires
 
     @staticmethod
     def _map_account(raw: dict[str, Any]) -> dict[str, Any]:
@@ -111,7 +198,8 @@ class CodeBuddyAdapter(ProviderAdapter):
         except ProviderError as exc:
             # 未配置 token 时管理端会 401——服务本身可能仍在线，如实区分
             if exc.status_code in (401, 403):
-                return {"connected": True, "auth": "missing", "error": f"管理端在线但需配置 API Token：{exc.message}"}
+                detail = f"管理端在线，但 wbt_ token 无效或权限不足：{exc.message}"
+                return {"connected": True, "auth": "missing", "error": detail}
             return {"connected": False, "error": str(exc)}
         if not isinstance(payload, dict):
             return {"connected": True}

@@ -183,6 +183,26 @@ class ProviderAdapter(ABC):
         if options:
             self.options.update(options)
 
+    def credential_problem(self, credential_type: str, text: str) -> str:
+        """导入前服务商特有凭证校验；空串=通过，否则返回给人看的缺项说明。"""
+        return ""
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        """按已存配置推导就绪状态：只读配置与上次探测结果，绝不外呼。
+
+        credential / options 是 registry 刚读到的库内配置：适配器实例可能还没
+        configure（列表渲染先于任何请求），所以不能依赖 self.api_key / self.options。
+        """
+        return self.spec.readiness, self.spec.requires
+
     def declared_models(self) -> list[dict[str, Any]]:
         """仓库内静态声明的模型。没有声明就返回空列表，不做任何推测。"""
         return []

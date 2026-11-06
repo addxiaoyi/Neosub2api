@@ -266,8 +266,17 @@ async def muse_chat(request: Request):
     err = _vendor_error(str(model))
     if err is not None:
         return err
+    if "slow" in str(model):
+        await asyncio.sleep(1.5)  # 给短超时客户端制造 ReadTimeout
     text = f"[fake] muse model={model} system={_first_system(payload)!r} {_echo(request, 'authorization', 'cookie')}"
     if payload.get("stream"):
+        if "stream-break" in str(model):
+            async def broken():
+                yield b'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n'
+                await asyncio.sleep(0)
+                raise RuntimeError("fake muse upstream aborted mid-stream")
+
+            return StreamingResponse(broken(), media_type="text/event-stream")
         return StreamingResponse(_sse(_openai_stream(text, str(model))), media_type="text/event-stream")
     return JSONResponse({
         "id": "chatcmpl-vendor", "object": "chat.completion", "model": model,

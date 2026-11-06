@@ -69,13 +69,47 @@ class MuseAdapter(ProviderAdapter):
         protocols=("openai.chat.completions", "openai.responses"),
         readiness="needs_config",
         requires=(
-            "官方 OpenAI 兼容入口的 api_key（网页 hatch_sess 账号没有 HTTP 对话端点）",
+            "官方 OpenAI 兼容入口的 api_key：在 api.meta.ai 创建 API key 后导入；"
+            "网页 hatch_sess 账号没有 HTTP 对话端点，不能用于本仓转发",
         ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
         super().__init__(base_url)
+
+    def credential_problem(self, credential_type: str, text: str) -> str:
+        if credential_type not in ("api_key", "bearer"):
+            return (
+                f"Muse2API 只接受官方入口的 api_key；{credential_type} 类型不能用于 HTTP 对话"
+                "（网页 hatch_sess Cookie 只能管网页会话）"
+            )
+        raw = text.strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        if not raw:
+            return "Muse2API 需要 api.meta.ai 的 api_key（网页 hatch_sess 会话没有 HTTP 对话端点）"
+        if "hatch_sess=" in raw:
+            return (
+                "这是网页会话 Cookie（hatch_sess），Muse 没有对应的 HTTP 对话端点；"
+                "请到 api.meta.ai 创建 api_key 后导入"
+            )
+        return ""
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        if credential_problem:
+            return "needs_config", (credential_problem,)
+        if has_credential:
+            return "ready", ()
+        return "needs_config", self.spec.requires
 
     # ---------- 凭证 ----------
 
@@ -286,7 +320,10 @@ class MuseAdapter(ProviderAdapter):
     async def health(self) -> dict[str, Any]:
         keys = self._keys()
         if not keys:
-            return {"connected": False, "error": "未配置 Muse 凭证"}
+            return {
+                "connected": False,
+                "error": "未配置 Muse 凭证：请在 api.meta.ai 创建 api_key 后导入",
+            }
         try:
             reply = await self._send(self._path("health_path", MODELS_PATH), None, stream=False)
         except ProviderError as exc:
