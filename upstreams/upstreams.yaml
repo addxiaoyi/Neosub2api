@@ -137,3 +137,9 @@ upstreams:
     our_files: ["apps/control/app/adapters/codar_sidecar.py", "apps/control/app/adapters/__init__.py", "apps/control/app/config.py", "apps/control/app/registry.py", "providers/codar2api/README.md", "docs/providers/codar2api.md", "docs/upstream-drift-2026-11-04.md"]
     protocols: ["openai.chat.completions", "anthropic.messages", "openai.responses"]
     notes: "Go 1.26.4 纯标准库单二进制，上游为 Codar（SpeedAI）私有 API，含微信/短信登录与新 IP 验证。双路径：codar.py 仓内直连（status implemented，chat/messages/models/responses 能力位，readiness needs_config，需账号 JWT；扫码/短信登录、签到仍要 sidecar）+ codar_sidecar.py 代理 127.0.0.1:8801（chat/messages/models/sidecar 能力位，needs_config），CODAR_SIDECAR_BASE 由 config/registry 读取；sidecar 未声明 responses 能力位。2026-11-04 读码 d7f5024→ba05367（1 commit，v0.1.4）：对外端点、Bearer 鉴权、/v1/chat 与 /v1/messages 的请求响应结构、SSE 及 retryable 错误语义均未变；新增行为全部为 opt-in 且 defaults.json 未含新键（proxy_connect_retry/proxy_connect_switch/restricted_request_block 默认关）——开启 restricted_request_block 后触发过 403 受限的请求指纹会被拉黑并直接回 403；compat.go 身份前缀改写只影响发往 Codar 的上游请求；Dockerfile 仅改 VERSION 注入方式，默认端口与入口未变。codar.py / codar_sidecar.py 不用改，基线不推进。许可证 MIT（可入主仓）。"
+    # （2026-11-06 已更正，原 notes 中「sidecar 未声明 responses 能力位」一句逐字留档）
+    # 该句与代码不符：codar_sidecar 的 responses 能力位自本批起为 True，并按
+    # apps/control/app/adapters/codar_sidecar.py:35,55-57 透传 /v1/responses；
+    # docs/PROVIDERS.md 也按「responses 由 sidecar 转发」描述。
+    # 误判后果：照旧句会把已接通的 responses 当成缺项，去 codar.py 加兜底或另做转发；
+    # 也会让 /api/providers 的能力位与这份清单对不上，排查时误怀疑 registry 漏填。
