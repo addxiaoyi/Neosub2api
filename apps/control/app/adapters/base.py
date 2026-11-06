@@ -14,6 +14,7 @@ CAPABILITY_KEYS = (
     "messages",
     "models",
     "responses",
+    "search",
     "oauth",
     "checkin",
     "credits",
@@ -142,6 +143,8 @@ class ProviderSpec:
     requires: tuple[str, ...] = ()
     """能力限制：key 为受限能力（如 messages_stream），value 为限制说明；与 501 报错同一句话。"""
     limitations: dict[str, str] = field(default_factory=dict)
+    user_agent: str = ""
+    """外呼时伪装成真实客户端的 User-Agent；空串表示该家不走裸 HTTP（如 grok-register 执行器）。"""
 
     def __post_init__(self) -> None:
         if self.readiness not in READINESS_STATES:
@@ -213,6 +216,10 @@ class ProviderAdapter(ABC):
             self.api_keys = list(api_keys)
         if options:
             self.options.update(options)
+
+    def client_user_agent(self) -> str:
+        """provider 级 UA：options 可覆盖，缺省用 spec 里的客户端常量。"""
+        return str(self.options.get("user_agent") or self.spec.user_agent or "")
 
     def credential_problem(self, credential_type: str, text: str) -> str:
         """导入前服务商特有凭证校验；空串=通过，否则返回给人看的缺项说明。"""
@@ -295,6 +302,9 @@ class ProviderAdapter(ABC):
     async def responses(self, payload: dict[str, Any], *, stream: bool) -> Any:
         raise ProviderError(501, f"{self.spec.name} 适配器未实现 /v1/responses")
 
+    async def search(self, payload: dict[str, Any], *, stream: bool = False) -> Any:
+        raise ProviderError(501, f"{self.spec.name} 适配器未实现 /v1/search")
+
     async def start_login(self, realm: str = "cn") -> dict[str, Any]:
         raise ProviderError(501, f"{self.spec.name} 不支持扫码登录")
 
@@ -318,5 +328,5 @@ class ProviderAdapter(ABC):
 
 
 def stub_capabilities(**overrides: bool) -> dict[str, bool]:
-    """走本函数的 provider 输出 CAPABILITY_KEYS 全量 16 键；手写 dict 的 sidecar 只输出自己声明的子集，故 /api/providers 的 capabilities 不保证键集合一致，消费方须按真值读、不能按全集假设。"""
+    """走本函数的 provider 输出 CAPABILITY_KEYS 全量 17 键；手写 dict 的 sidecar 只输出自己声明的子集，故 /api/providers 的 capabilities 不保证键集合一致，消费方须按真值读、不能按全集假设。"""
     return _caps(**overrides)

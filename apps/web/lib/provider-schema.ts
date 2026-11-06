@@ -44,6 +44,7 @@ export const CAPABILITY_LABELS: [keyof ProviderCapabilities, string][] = [
   ['chat', 'providers.capChat'],
   ['messages', 'providers.capMessages'],
   ['models', 'providers.capModels'],
+  ['search', 'providers.capSearch'],
   ['oauth', 'providers.capOAuth'],
   ['checkin', 'providers.capCheckin'],
   ['credits', 'providers.capCredits'],

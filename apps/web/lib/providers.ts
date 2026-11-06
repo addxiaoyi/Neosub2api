@@ -10,6 +10,7 @@ export interface ProviderCapabilities {
   messages: boolean;
   models: boolean;
   responses: boolean;
+  search: boolean;
   oauth: boolean;
   checkin: boolean;
   credits: boolean;
@@ -178,6 +179,7 @@ export const CODEBUDDY_CAPS: ProviderCapabilities = {
   messages: true,
   models: true,
   responses: false,
+  search: false,
   oauth: true,
   checkin: true,
   credits: true,
@@ -190,6 +192,7 @@ const NO_CAPS: ProviderCapabilities = {
   messages: false,
   models: false,
   responses: false,
+  search: false,
   oauth: false,
   checkin: false,
   credits: false,
