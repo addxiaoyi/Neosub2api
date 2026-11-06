@@ -9,13 +9,18 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, AsyncIterator
 
 from ..config import Settings
+from ..services.rotation import CredentialPool, sticky_key_from_payload
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
+
+logger = logging.getLogger("unified.gateway")
 
 SOLO_HOST = "https://trae-api-cn.mchost.guru"
 WORK_HOST = "https://api5-normal.mchost.guru"
@@ -24,6 +29,8 @@ OAUTH_HOST = "https://api.trae.com.cn"
 CHAT_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
 WORK_APP_ID = "931506"
 SOLO_VERSION = "0.1.52"
+# 429 重试的等待上限：超过就放弃重试直接按 429 返回，别让巨大的 Retry-After 占死工作线程
+MAX_RETRY_WAIT_SEC = 5.0
 SOLO_VERSION_CODE = "20260811"
 WORK_VERSION = "0.1.63"
 WORK_VERSION_CODE = "20260901"
@@ -45,6 +52,9 @@ DEFAULT_WORK_MODEL = "DeepSeek-V4-Flash-Official"
 # 积分/套餐受限：Work 侧遇到这些码要降级到 Solo
 CREDIT_CODES = {1005, 4008, 4001, 4000105}
 SOFT_RATE_CODES = {4011}
+
+# 这些状态码值得换号重试，并交给账号池分档冷却；其余错误直接抛给客户端
+ROTATE_STATUSES = {401, 402, 403, 408, 429}
 
 
 class _Reply:
@@ -148,6 +158,7 @@ class TraeAdapter(ProviderAdapter):
         default_base_url=SOLO_HOST,
         capabilities=stub_capabilities(chat=True, models=True),
         protocols=("openai.chat.completions",),
+        user_agent=f"Trae/{SOLO_VERSION}",
         readiness="needs_config",
         requires=(
             "Trae 登录后的 Cloud-IDE JWT（Trae 客户端登录取 token，填 api_key）",
@@ -157,15 +168,47 @@ class TraeAdapter(ProviderAdapter):
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
+        self._pool = CredentialPool()
+        self._active_jwt: ContextVar[str] = ContextVar("trae_active_jwt", default="")
         super().__init__(base_url)
 
     # ---------- 身份与请求头 ----------
 
+    def _keys(self) -> list[str]:
+        raw: list[Any] = [*(self.api_keys or []), self.api_key, *(self.options.get("extra_keys") or [])]
+        keys: list[str] = []
+        for item in raw:
+            token = str(item or "").strip()
+            if token.lower().startswith("bearer "):
+                token = token[7:].strip()
+            if token and token not in keys:
+                keys.append(token)
+        return keys
+
+    def _attempts(self, key_count: int) -> int:
+        configured = int(self.options.get("max_attempts") or 3)
+        return max(1, min(configured, 10, max(key_count, 1)))
+
     def _jwt(self) -> str:
-        raw = self.api_key.strip()
+        raw = (self._active_jwt.get() or self.api_key).strip()
         if raw.lower().startswith("bearer "):
             raw = raw[7:].strip()
         return raw
+
+    @staticmethod
+    def _rotatable(status: int) -> bool:
+        return status in ROTATE_STATUSES or 500 <= status <= 599
+
+    async def _note_failure(self, key: str, status: int, keys: list[str]) -> None:
+        # 唯一可用账号不冷却，避免把真实的 401/402 伪装成全池 429
+        others = [item for item in keys if item != key]
+        if others and await self._pool.available(others):
+            await self._pool.report_failure(key, status)
+
+    def _all_keys_error(self, keys: list[str], last: ProviderError | None) -> ProviderError:
+        if last is not None:
+            return ProviderError(429, f"Trae {len(keys)} 个账号全部不可用：{last.message}")
+        return ProviderError(429, f"Trae {len(keys)} 个账号全部处于冷却中，请稍后重试")
 
     def _decode_claims(self) -> dict[str, Any]:
         parts = self._jwt().split(".")
@@ -279,14 +322,23 @@ class TraeAdapter(ProviderAdapter):
 
     # ---------- 错误 ----------
 
-    def _classify(self, status: int | None, code: int | None, message: str) -> ProviderError:
+    def _classify_error(self, status: int | None, code: int | None, message: str) -> ProviderError:
+        """三类错误各归各位：套餐/积分受限 → 402，软限流 → 429，会话失效 → 401。
+
+        - ErrPlanLimit：账号级配额用完，换 retry 没用，交给上层按 insufficient_quota 处理；
+        - ErrSoftRate：短时限流，可带 Retry-After 让客户端退避；
+        - ErrSessionDead：JWT 被拒，必须回到 401，不能伪装成 429 让客户端一直重试。
+        """
         text = message or ""
         if status == 401:
             err = ProviderError(401, "Trae 会话已失效：JWT 被拒，请重新登录并更新 api_key")
+            err.session_dead = True
         elif code in CREDIT_CODES or ("1005" in text and "plan" in text.lower()):
-            err = ProviderError(429, f"Trae 积分/套餐受限：code={code} {text}".strip())
+            err = ProviderError(402, f"Trae 积分/套餐受限：code={code} {text}".strip())
+            err.plan_limit = True
         elif status == 429 or code in SOFT_RATE_CODES:
             err = ProviderError(429, f"Trae 触发限流：code={code} {text}".strip())
+            err.soft_rate = True
         elif status == 404:
             err = ProviderError(404, f"Trae 上游端点不存在：{text}".strip())
         elif status is not None and status >= 500:
@@ -398,13 +450,17 @@ class TraeAdapter(ProviderAdapter):
             body.pop("tools", None)
 
     def _retry_wait(self, reply) -> float | None:
-        """只有上游明确给了 Retry-After 才重试；没给就立即返回，不猜测退避时长。"""
+        """只有上游明确给了 Retry-After 且不超过阈值才重试；超限直接按 429 返回。"""
         raw = (getattr(reply, "headers", None) or {}).get("retry-after")
         try:
             wait = float(raw)
         except (TypeError, ValueError):
             return None
-        return max(0.0, min(wait, 30.0))
+        limit = float(self.options.get("retry_after_max_sec") or MAX_RETRY_WAIT_SEC)
+        if wait > limit:
+            logger.warning("Trae 429 Retry-After=%.1fs 超过阈值 %.1fs，放弃重试", wait, limit)
+            return None
+        return max(0.0, wait)
 
     async def _solo_chat(self, payload: dict[str, Any], *, stream: bool):
         if not self._jwt():
@@ -425,7 +481,7 @@ class TraeAdapter(ProviderAdapter):
                 code = self._error_code(json.loads(text))
             except (json.JSONDecodeError, TypeError):
                 code = None
-            raise self._classify(reply.status_code, code, text)
+            raise self._classify_error(reply.status_code, code, text)
 
         if stream:
             return _Reply(200, stream=self._render_solo_stream(reply, model), content_type="text/event-stream")
@@ -464,7 +520,7 @@ class TraeAdapter(ProviderAdapter):
                     yield b"data: [DONE]\n\n"
                     return
                 elif event == "error":
-                    err = self._classify(None, self._error_code(obj), str(obj.get("message") or obj.get("error") or ""))
+                    err = self._classify_error(None, self._error_code(obj), str(obj.get("message") or obj.get("error") or ""))
                     yield f"event: error\ndata: {json.dumps({'error': {'message': err.message}}, ensure_ascii=False)}\n\n".encode()
                     raise err
             # 上游没有 done 就断了：补一个收尾，避免客户端一直挂
@@ -504,7 +560,7 @@ class TraeAdapter(ProviderAdapter):
                 elif event == "done":
                     finish = str(obj.get("finish_reason") or finish)
                 elif event == "error":
-                    raise self._classify(None, self._error_code(obj), str(obj.get("message") or obj.get("error") or ""))
+                    raise self._classify_error(None, self._error_code(obj), str(obj.get("message") or obj.get("error") or ""))
         finally:
             await reply.aclose()
 
@@ -584,7 +640,7 @@ class TraeAdapter(ProviderAdapter):
         reply = await client.forward(EP_CREATE_TASK, body, stream=True)
         if reply.status_code >= 400:
             text = await self._reply_text(reply)
-            raise self._classify(reply.status_code, None, text)
+            raise self._classify_error(reply.status_code, None, text)
 
         events = _sse_events(reply.iter_bytes())
         first: tuple[str, str] | None = None
@@ -685,7 +741,7 @@ class TraeAdapter(ProviderAdapter):
                     yield b"data: [DONE]\n\n"
                     return
                 elif name == "error":
-                    err = self._classify(None, self._error_code(obj), str(obj.get("message") or ""))
+                    err = self._classify_error(None, self._error_code(obj), str(obj.get("message") or ""))
                     yield f"event: error\ndata: {json.dumps({'error': {'message': err.message}}, ensure_ascii=False)}\n\n".encode()
                     raise err
             yield _chunk(model, cmpl_id, {}, "stop", pending_usage)
@@ -747,7 +803,7 @@ class TraeAdapter(ProviderAdapter):
                             if delta_text:
                                 parts.append(delta_text)
                 elif name == "error":
-                    raise self._classify(None, self._error_code(obj), str(obj.get("message") or ""))
+                    raise self._classify_error(None, self._error_code(obj), str(obj.get("message") or ""))
         finally:
             await reply.aclose()
 
@@ -866,10 +922,40 @@ class TraeAdapter(ProviderAdapter):
     # ---------- 对外 ----------
 
     async def chat_completion(self, payload: dict[str, Any], *, stream: bool):
+        keys = self._keys()
+        if not keys:
+            raise ProviderError(401, "Trae 未配置 JWT（服务商页 api_key 或 options.extra_keys）")
+        self._pool.set_weights(keys, self.options.get("key_weights"))
+        sticky = sticky_key_from_payload(payload)
         channel = str(self.options.get("channel") or "solo").strip().lower()
-        if channel == "work":
-            return await self._work_chat(payload, stream=stream)
-        return await self._solo_chat(payload, stream=stream)
+        last: ProviderError | None = None
+
+        for _ in range(self._attempts(len(keys))):
+            pick = await self._pool.acquire(keys, sticky_key=sticky)
+            if pick is None:
+                raise self._all_keys_error(keys, last)
+            if len(keys) > 1:
+                logger.info("Trae 选号 cred=%s 规则=%s %s", pick.cred_id, pick.rule, pick.note or "-")
+            handle = self._active_jwt.set(pick.key)
+            try:
+                if channel == "work":
+                    result = await self._work_chat(payload, stream=stream)
+                else:
+                    result = await self._solo_chat(payload, stream=stream)
+            except ProviderError as exc:
+                last = exc
+                if not self._rotatable(exc.status_code):
+                    raise
+                await self._note_failure(pick.key, exc.status_code, keys)
+                continue
+            else:
+                await self._pool.report_success(pick.key)
+                if sticky:
+                    await self._pool.bind_sticky(sticky, pick.key)
+                return result
+            finally:
+                self._active_jwt.reset(handle)
+        raise last or self._all_keys_error(keys, None)
 
     async def fetch_models(self) -> list[dict[str, Any]]:
         if not self._jwt():
@@ -892,19 +978,45 @@ class TraeAdapter(ProviderAdapter):
         return models
 
     async def health(self) -> dict[str, Any]:
-        if not self._jwt():
+        keys = self._keys()
+        if not keys:
             return {"connected": False, "error": "未配置 JWT"}
         channel = str(self.options.get("channel") or "solo")
+        rotation = await self._pool.snapshot(keys)
+        pick = await self._pool.acquire(keys)
+        if pick is None:
+            return {
+                "connected": False,
+                "error": "Trae 账号池全部冷却中",
+                "channel": channel,
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
+            }
+        handle = self._active_jwt.set(pick.key)
         try:
-            models = await self.list_models()
+            models = await self.fetch_models()
+            uid = self._uid()
         except ProviderError as exc:
-            return {"connected": False, "error": exc.message, "channel": channel}
+            if self._rotatable(exc.status_code):
+                await self._note_failure(pick.key, exc.status_code, keys)
+            return {
+                "connected": False,
+                "error": exc.message,
+                "channel": channel,
+                "rotation": rotation,
+                "cooling": rotation.get("cooling", 0),
+            }
+        finally:
+            self._active_jwt.reset(handle)
+        await self._pool.report_success(pick.key)
         return {
             "connected": True,
             "channel": channel,
             "work_mode": str(self.options.get("work_mode") or "stream"),
             "models": len(models),
-            "uid": self._uid(),
+            "uid": uid,
+            "rotation": rotation,
+            "cooling": rotation.get("cooling", 0),
         }
 
 

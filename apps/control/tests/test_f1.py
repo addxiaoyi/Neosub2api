@@ -121,13 +121,18 @@ class OpenCodeNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.settings = _settings(Path(self._tmp.name))
+        self._adapters: list[OpenCodeAdapter] = []
 
     async def asyncTearDown(self) -> None:
+        # 适配器缓存的 sqlite 连接必须先关，否则 Windows 删不掉临时目录（WinError 32）
+        for adapter in self._adapters:
+            adapter.close()
         self._tmp.cleanup()
 
     def _adapter(self, *, max_attempts: int = 2) -> OpenCodeAdapter:
         adapter = OpenCodeAdapter(self.settings, "http://127.0.0.1:7899")
         adapter.configure(api_key="bad", options={"extra_keys": ["good"], "max_attempts": max_attempts})
+        self._adapters.append(adapter)
         return adapter
 
     async def test_network_error_rotates_key_then_succeeds(self) -> None:
@@ -167,6 +172,7 @@ class OpenCodeNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
                 # 有次数上限，不会无限重试；失败必须显式抛出而不是给出空响应
                 self.assertEqual(ctx.exception.status_code, 502)
                 self.assertEqual(len(calls), 4)
+                self.assertEqual(len(set(calls)), 2, "4 次尝试必须轮换到两把 key，不能全打同一把坏 key")
                 self.assertIn("仍未连通", ctx.exception.message)
                 self.assertIn("连接失败", ctx.exception.message)
 

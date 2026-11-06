@@ -23,7 +23,8 @@ from ..api_utils import exc_summary, safe_url
 from ..config import Settings
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
-from .key_pool import COOLDOWN_STATUSES, DEFAULT_COOLDOWN_SEC, KeyPool
+from .key_pool import DEFAULT_COOLDOWN_SEC
+from ..services.rotation import CredentialPool, sticky_key_from_payload
 from .stream_util import (
     DONE, Reply, content_text, iter_sse, openai_chunk, openai_completion, sse_frame,
 )
@@ -37,7 +38,8 @@ DEFAULT_MAX_TOKENS = 8192
 MAX_TOKENS_LIMIT = 128_000
 CLIENT_VERSION = "3.16.3"
 
-RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
+RETRYABLE = {401, 402, 403, 408, 429, 500, 502, 503, 504}
+POOL_COOLDOWN_STATUSES = RETRYABLE
 REQUEST_ERRORS = {400, 422}
 FINISH_REASON = {
     "end_turn": "stop",
@@ -83,6 +85,7 @@ class ZCodeAdapter(ProviderAdapter):
         default_base_url="https://zcode.z.ai",
         capabilities=stub_capabilities(chat=True, messages=True, models=True),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        user_agent=f"ZCode/{CLIENT_VERSION}",
         readiness="needs_config",
         requires=(
             "official_system（须用户自备：官方 system 原文约 10701 字符，本仓不内置；"
@@ -92,8 +95,8 @@ class ZCodeAdapter(ProviderAdapter):
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
-        # 轮换状态属于本实例：游标、冷却表都不跨实例共享
-        self._keys_pool = KeyPool()
+        # 轮换状态属于本实例：游标、冷却表、粘性绑定都不跨实例共享
+        self._keys_pool = CredentialPool()
         super().__init__(base_url)
 
     # ---------- 凭证 ----------
@@ -186,7 +189,7 @@ class ZCodeAdapter(ProviderAdapter):
             "anthropic-beta": ANTHROPIC_BETA,
             "content-type": "application/json",
             "accept": "text/event-stream" if stream else "application/json",
-            "user-agent": str(self.options.get("user_agent") or f"ZCode/{CLIENT_VERSION}"),
+            "user-agent": self.client_user_agent() or f"ZCode/{CLIENT_VERSION}",
             "x-device-mid": self._device_id(uid),
             "x-session-id": self._session_id(uid),
             "x-query-id": uuid.uuid4().hex,
@@ -270,16 +273,23 @@ class ZCodeAdapter(ProviderAdapter):
 
     # ---------- 发送与换 key ----------
 
-    async def _send(self, path: str, payload: dict[str, Any] | None, *, stream: bool):
+    async def _send(
+        self, path: str, payload: dict[str, Any] | None, *, stream: bool, sticky_key: str = ""
+    ):
         keys = self._keys()
         if not keys:
             raise ProviderError(503, "ZCode 未配置账号凭证（服务商页 api_key 或 options.extra_keys）")
+        # 权重与策略在每次请求前同步：options 改动后无需重建适配器
+        self._keys_pool.set_weights(keys, self.options.get("key_weights"))
         attempts = self._attempts(len(keys))
         last: ProviderError | None = None
         for attempt in range(attempts):
-            token = await self._keys_pool.pick(keys)
-            if token is None:
+            pick = await self._keys_pool.acquire(keys, sticky_key=sticky_key)
+            if pick is None:
                 raise self._all_keys_error(keys, last)
+            token = pick.key
+            if len(keys) > 1:
+                logger.info("ZCode 选号 cred=%s 规则=%s %s", pick.cred_id, pick.rule, pick.note or "-")
             client = self._client(token, stream=stream)
             try:
                 raw = b"" if payload is None else None
@@ -297,6 +307,9 @@ class ZCodeAdapter(ProviderAdapter):
                 await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
                 continue
             if reply.status_code < 400:
+                await self._keys_pool.report_success(token)
+                if sticky_key:
+                    await self._keys_pool.bind_sticky(sticky_key, token)
                 return reply
             err = self._classify(reply.status_code, await self._read_error(reply))
             if err.status_code in (401, 403):
@@ -304,13 +317,15 @@ class ZCodeAdapter(ProviderAdapter):
             last = err
             if not getattr(err, "retryable", err.status_code in RETRYABLE):
                 raise err
-            # 只有「这把 key 本身不可用」才冷却；5xx 不占用 key
-            if err.status_code in COOLDOWN_STATUSES:
-                others = await self._keys_pool.available([key for key in keys if key != token])
-                if not others:
-                    # 已无其他可用 key，冷却只会让后续请求直接失败，这里直接给出明确错误
+            # 401/402/403/408/429/5xx 都交给池分档冷却；唯一可用账号仍不冷却
+            if err.status_code in POOL_COOLDOWN_STATUSES:
+                others = [key for key in keys if key != token]
+                if not await self._keys_pool.available(others):
+                    # 没有可替代账号时不做冷却：把唯一一把 key 关进冷却只会让后续请求直接 429
                     raise self._all_keys_error(keys, err)
-                await self._keys_pool.cool(token, self._cooldown_sec())
+                await self._keys_pool.report_failure(
+                    token, err.status_code, cooldown_sec=self._cooldown_sec()
+                )
             await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
         if last is None:
             raise ProviderError(502, "ZCode 上游不可用")
@@ -572,7 +587,9 @@ class ZCodeAdapter(ProviderAdapter):
     async def chat_completion(self, payload: dict[str, Any], *, stream: bool):
         model = str(payload.get("model") or DEFAULT_MODELS[0])
         body = self._chat_body(payload, model, stream=stream)
-        reply = await self._send(MESSAGES_PATH, body, stream=stream)
+        reply = await self._send(
+            MESSAGES_PATH, body, stream=stream, sticky_key=sticky_key_from_payload(payload)
+        )
         if stream:
             return Reply(200, stream=self._chat_stream(reply.iter_bytes(), model), content_type="text/event-stream")
         try:
@@ -583,7 +600,9 @@ class ZCodeAdapter(ProviderAdapter):
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         body = self._messages_body(payload, stream=stream)
-        reply = await self._send(MESSAGES_PATH, body, stream=stream)
+        reply = await self._send(
+            MESSAGES_PATH, body, stream=stream, sticky_key=sticky_key_from_payload(payload)
+        )
         if stream:
             # Anthropic 协议原样透传：上游帧名、[DONE]、错误帧都保持
             return Reply(
@@ -619,7 +638,15 @@ class ZCodeAdapter(ProviderAdapter):
         except json.JSONDecodeError:
             return {"connected": True, "note": "凭证可用，但额度接口返回非 JSON"}
         balance = data.get("data") if isinstance(data.get("data"), dict) else data
-        return {"connected": True, "models": len(DEFAULT_MODELS), "balance": balance}
+        rotation = await self._keys_pool.snapshot(keys)
+        return {
+            "connected": True,
+            "models": len(DEFAULT_MODELS),
+            "balance": balance,
+            # 选号规则与每把钥匙的冷却剩余进 health，排查时不用猜为什么用了某把号
+            "rotation": rotation,
+            "cooling": rotation.get("cooling", 0),
+        }
 
 
 def build(settings: Settings, base_url: str = "") -> ZCodeAdapter:

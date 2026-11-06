@@ -12,14 +12,17 @@ import httpx
 
 from ..api_utils import exc_summary, safe_url
 from ..config import Settings
+from ..services.rotation import CredentialPool, RotationStore, pick_in_group, sticky_key_from_payload
 from .base import ProviderAdapter, ProviderError, ProviderSpec, stub_capabilities
 from .client import UnifiedApiClient
+from .key_pool import COOLDOWN_STATUSES
 
 logger = logging.getLogger("unified.upstream")
 
 # 请求级错误不重试，换 key/出口也改变不了结果
 REQUEST_ERRORS = {400, 413, 422}
 RETRYABLE = {401, 403, 408, 429, 500, 502, 503, 504}
+CLIENT_UA = "opencode/0.6.2"
 # 只有鉴权类失败才值得改走匿名通道：网络/5xx 换不换凭证结果一样
 AUTH_ERRORS = {401, 403}
 NO_KEY_MESSAGE = "OpenCode 未配置上游密钥（服务商页填写 api_key 或 options.extra_keys）"
@@ -39,6 +42,7 @@ class OpenCodeAdapter(ProviderAdapter):
         default_base_url="https://opencode.ai/zen",
         capabilities=stub_capabilities(chat=True, messages=True, models=True),
         protocols=("openai.chat.completions", "anthropic.messages"),
+        user_agent=CLIENT_UA,
         risk_level="warn",
         risk_note="上游 opencode2api 为 GPL-3.0，只能进程隔离；"
         "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
@@ -51,7 +55,14 @@ class OpenCodeAdapter(ProviderAdapter):
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
         self._settings = settings
+        # 轮转组：组内粘滞成员落库，重启后同一组仍命中同一个号
+        self._pool = CredentialPool()
+        self._store = RotationStore(getattr(settings, "db_path", None))
         super().__init__(base_url)
+
+    def _group(self) -> str:
+        raw = self.options.get("group") or self.options.get("rotation_group") or "default"
+        return str(raw).strip()[:64] or "default"
 
     def _tier_prefix(self) -> str:
         tier = str(self.options.get("tier") or "zen").strip().lower()
@@ -98,6 +109,7 @@ class OpenCodeAdapter(ProviderAdapter):
 
     def _client(self, key: str, *, anthropic: bool, timeout: float | None = None) -> UnifiedApiClient:
         headers = dict(self.options.get("extra_headers") or {}) if isinstance(self.options.get("extra_headers"), dict) else {}
+        headers.setdefault("user-agent", self.client_user_agent() or CLIENT_UA)
         if anthropic:
             headers.setdefault("anthropic-version", "2023-06-01")
             if key:
@@ -110,8 +122,26 @@ class OpenCodeAdapter(ProviderAdapter):
             extra_headers=headers,
         )
 
+    async def _rotate_away(self, key: str) -> None:
+        """网络层失败：解绑粘性并清掉轮转组当前成员，下一次尝试换号。
+
+        不进冷却表：单次连接失败不代表账号坏，冷却反而会把可用号关在门外。
+        """
+        if not key:
+            return
+        await self._pool.report_network_error(key)
+        self._store.clear("opencode", self._group())
+
     async def _request(
-        self, method: str, path: str, payload: dict[str, Any] | None, *, stream: bool, anthropic: bool, anonymous: bool = False
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        stream: bool,
+        anthropic: bool,
+        anonymous: bool = False,
+        sticky_key: str = "",
     ):
         # 匿名通道只给模型发现用：上游 /v1/models 实测不带凭证也返回 200，换 key 对它没意义
         keys = [""] if anonymous else self._keys()
@@ -122,25 +152,51 @@ class OpenCodeAdapter(ProviderAdapter):
         # 记录最后一次连接错误的原文，重试耗尽后如实抛给调用方，不伪造空响应
         network_error: ProviderError | None = None
         for attempt in range(attempts):
-            key = keys[attempt % len(keys)]
+            if anonymous:
+                key, rule = "", "anonymous"
+            else:
+                pick = await pick_in_group(
+                    self._pool, self._store,
+                    provider="opencode", group=self._group(), keys=keys, sticky_key=sticky_key,
+                )
+                if pick is None:
+                    raise ProviderError(429, "OpenCode 轮转组内账号全部冷却，请稍后重试")
+                key, rule = pick.key, pick.rule
+                if len(keys) > 1:
+                    logger.info("OpenCode 选号 group=%s cred=%s 规则=%s", self._group(), pick.cred_id, rule)
             client = self._client(key, anthropic=anthropic)
             try:
                 if method == "GET":
-                    return await client.get_json(path)
+                    data = await client.get_json(path)
+                    if key:
+                        await self._pool.report_success(key)
+                    return data
                 reply = await client.forward(path, payload or {}, stream=stream)
             except ProviderError as exc:
                 last = exc
-                network_error = exc if exc.status_code >= 500 else network_error
+                if exc.status_code >= 500:
+                    network_error = exc
+                    await self._rotate_away(key)
                 if exc.status_code in REQUEST_ERRORS:
                     raise
             except NETWORK_ERRORS as exc:
                 last = network_error = ProviderError(502, f"上游连接失败（{safe_url(self.base_url)}）：{exc_summary(exc)}")
+                await self._rotate_away(key)
             else:
-                if reply.status_code < 400 or reply.status_code not in RETRYABLE:
+                if reply.status_code < 400:
+                    await self._pool.report_success(key)
+                    if sticky_key:
+                        await self._pool.bind_sticky(sticky_key, key)
                     return reply
                 last = reply
+                if reply.status_code not in RETRYABLE:
+                    return reply
                 if attempt == attempts - 1:
                     return reply
+                # 只有账号本身不可用才进冷却表；5xx 换号即可，不占用账号。
+                # 单账号池不做冷却：没有替代对象，关进冷却等于让后续请求直接 429
+                if reply.status_code in COOLDOWN_STATUSES and len(keys) > 1:
+                    await self._pool.report_failure(key, reply.status_code)
                 await reply.aclose()
             # 500ms / 1s / 2s 退避，避免把上游限流打成雪崩
             await asyncio.sleep(min(0.5 * (2 ** attempt), 2.0))
@@ -192,19 +248,28 @@ class OpenCodeAdapter(ProviderAdapter):
         items = data.get("data") if isinstance(data, dict) else []
         count = len(items) if isinstance(items, list) else 0
         result: dict[str, Any] = {"connected": True, "models": count, "tier": str(self.options.get("tier") or "zen")}
+        rotation = await self._pool.snapshot(self._keys(), group=self._group())
+        result["rotation"] = rotation
+        result["cooling"] = rotation.get("cooling", 0)
         if count == 0:
             result["note"] = "上游在线但模型列表为空（可能是密钥无可用模型）"
         return result
 
     async def chat_completion(self, payload: dict[str, Any], *, stream: bool):
         return await self._request(
-            "POST", f"{self._tier_prefix()}/v1/chat/completions", payload, stream=stream, anthropic=False
+            "POST", f"{self._tier_prefix()}/v1/chat/completions", payload, stream=stream, anthropic=False,
+            sticky_key=sticky_key_from_payload(payload),
         )
 
     async def messages(self, payload: dict[str, Any], *, stream: bool):
         return await self._request(
-            "POST", f"{self._tier_prefix()}/v1/messages", payload, stream=stream, anthropic=True
+            "POST", f"{self._tier_prefix()}/v1/messages", payload, stream=stream, anthropic=True,
+            sticky_key=sticky_key_from_payload(payload),
         )
+
+    def close(self) -> None:
+        """释放轮转组 sqlite 连接：Windows 上删除临时库要求文件句柄先归还。"""
+        self._store.close()
 
 
 def build(settings: Settings, base_url: str = "") -> OpenCodeAdapter:

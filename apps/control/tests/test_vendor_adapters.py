@@ -224,6 +224,15 @@ async def test_zcode_all_keys_failed_reports_provider(tmp_path, fake_base):
     assert "全部不可用" in caught.value.message
 
 
+async def test_zcode_5xx_cools_key(tmp_path, fake_base):
+    adapter = zcode.build(_settings(tmp_path), fake_base)
+    adapter.configure(api_key="tok-a", options={"extra_keys": ["tok-b"], "max_attempts": 2})
+
+    with pytest.raises(ProviderError):
+        await adapter.chat_completion({"model": "fake-chat-1-err-500", "messages": USERS}, stream=False)
+    assert await adapter._keys_pool.available(adapter._keys()) == ["tok-b"]
+
+
 async def test_gptgrok_rotates_across_requests(tmp_path, fake_base):
     adapter = gptgrok.build(_settings(tmp_path), fake_base)
     adapter.configure(api_key="tok-a", options={"extra_keys": ["tok-b"], "max_attempts": 1})

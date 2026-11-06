@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -168,6 +169,19 @@ async def test_401_without_refresh_fails(fake_base: str, tmp_path: Path) -> None
     with pytest.raises(ProviderError) as caught:
         await adapter.chat_completion({"model": "fake-chat-1"}, stream=False)
     assert caught.value.status_code == 401
+
+
+async def test_upstream_402_408_5xx_register_pool_failure(fake_base: str, tmp_path: Path) -> None:
+    for code in (402, 408, 500):
+        adapter = _adapter(fake_base, tmp_path, options={"tokens": ["codar-token-1", "codar-token-2"]})
+        with patch.object(adapter._scheduler, "note_failure", AsyncMock()) as note:
+            reply = await adapter.chat_completion(
+                {"model": f"fake-chat-1-err-{code}", "messages": [{"role": "user", "content": "hi"}]},
+                stream=False,
+            )
+        assert reply.status_code == code
+        assert note.await_count >= 1
+        assert note.await_args_list[0].args == ("codar-token-1", code)
 
 
 async def test_health(fake_base: str, tmp_path: Path) -> None:

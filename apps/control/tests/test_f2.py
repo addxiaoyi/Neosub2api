@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from app.adapters import qoder, trae
+from app.adapters.base import ProviderError
 from app.config import load_settings
 
 
@@ -112,7 +113,8 @@ class QoderRoutingTests(unittest.TestCase):
 
     def test_error_classification(self):
         dead = self.adapter._classify(401, '{"code":12153}')
-        self.assertEqual(dead.status_code, 429)
+        # 上游 401 原样透传，不再被改写成 429
+        self.assertEqual(dead.status_code, 401)
         self.assertTrue(getattr(dead, "session_dead", False))
         rate = self.adapter._classify(429, '{"code":429,"retry_after":12}')
         self.assertEqual(rate.retry_after, 12)
@@ -294,6 +296,55 @@ class TraeStreamTests(unittest.IsolatedAsyncioTestCase):
             out = await _drain(reply.iter_bytes())
         self.assertIn('"content": "你好"', out.decode())
         self.assertTrue(out.endswith(b"data: [DONE]\n\n"))
+
+
+class TraePoolTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.adapter = trae.build(load_settings())
+        self.adapter.configure(
+            api_key="jwt-a", api_keys=["jwt-a", "jwt-b"], options={"max_attempts": 2}
+        )
+
+    async def test_failover_cools_failed_account(self):
+        seen: list[str] = []
+
+        async def fake(payload: dict[str, Any], *, stream: bool):
+            seen.append(self.adapter._jwt())
+            if self.adapter._jwt() == "jwt-a":
+                raise ProviderError(401, "expired")
+            return f"ok:{self.adapter._jwt()}"
+
+        with patch.object(self.adapter, "_solo_chat", side_effect=fake):
+            result = await self.adapter.chat_completion({"model": "glm-5.2", "messages": []}, stream=False)
+        self.assertEqual(result, "ok:jwt-b")
+        self.assertEqual(seen, ["jwt-a", "jwt-b"])
+        self.assertEqual(await self.adapter._pool.available(["jwt-a", "jwt-b"]), ["jwt-b"])
+
+    async def test_402_and_5xx_reach_pool_tiers(self):
+        for status in (402, 502):
+            adapter = trae.build(load_settings())
+            adapter.configure(api_key="jwt-a", api_keys=["jwt-a", "jwt-b"], options={"max_attempts": 2})
+
+            async def fake(payload: dict[str, Any], *, stream: bool, _status=status):
+                if adapter._jwt() == "jwt-a":
+                    raise ProviderError(_status, "upstream")
+                return "ok"
+
+            with patch.object(adapter, "_solo_chat", side_effect=fake):
+                self.assertEqual(
+                    await adapter.chat_completion({"model": "glm-5.2", "messages": []}, stream=False),
+                    "ok",
+                )
+            self.assertEqual(await adapter._pool.available(["jwt-a", "jwt-b"]), ["jwt-b"])
+
+    async def test_health_reports_rotation_snapshot(self):
+        await self.adapter._pool.report_failure("jwt-a", 402)
+        with patch.object(self.adapter, "fetch_models", AsyncMock(return_value=[{"id": "glm-5.2"}])):
+            health = await self.adapter.health()
+        self.assertTrue(health["connected"])
+        self.assertEqual(health["cooling"], 1)
+        self.assertEqual(health["rotation"]["available"], 1)
+        self.assertEqual(health["rotation"]["credentials"][0]["state"], "cooling")
 
 
 class GatewayRouteTests(unittest.TestCase):

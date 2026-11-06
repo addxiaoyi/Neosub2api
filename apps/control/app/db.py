@@ -330,6 +330,19 @@ CREATE TABLE IF NOT EXISTS prompt_templates(
 CREATE INDEX IF NOT EXISTS idx_prompt_templates_category ON prompt_templates(category);
 """
 
+# 轮转组状态：只存凭据指纹与规则名，明文密钥不复制第二份；重启后同组仍命中同一号
+# 单独抽成常量，适配器层的 RotationStore 在 Database 尚未建库时也能幂等建表
+ROTATION_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS rotation_state(
+  provider TEXT NOT NULL,
+  group_name TEXT NOT NULL DEFAULT 'default',
+  state_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, group_name)
+);
+"""
+SCHEMA = SCHEMA + ROTATION_STATE_DDL
+
 
 class Database:
     def __init__(self, path: Path):
