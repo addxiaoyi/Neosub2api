@@ -105,8 +105,18 @@ http.interceptors.response.use(
   },
 );
 
-const get = async <T>(url: string, params?: Record<string, unknown>): Promise<T> =>
-  (await http.get<T>(url, {params})).data;
+/**
+ * 首屏聚合接口单独限时：后端 /api/status 有 4s 预算、/api/models 有 5s 预算，
+ * 前端再多留 1s 兜住网络抖动。超过就按「拿不到」降级渲染，不能让加载态无限转圈。
+ */
+const STATUS_TIMEOUT_MS = 5_000;
+const MODELS_TIMEOUT_MS = 6_000;
+
+const get = async <T>(
+  url: string,
+  params?: Record<string, unknown>,
+  timeout?: number,
+): Promise<T> => (await http.get<T>(url, {params, ...(timeout ? {timeout} : {})})).data;
 const post = async <T>(url: string, body?: unknown, params?: Record<string, unknown>): Promise<T> =>
   (await http.post<T>(url, body, {params})).data;
 const patch = async <T>(url: string, body?: unknown): Promise<T> =>
@@ -285,9 +295,9 @@ export const accountApi = {
 
 /* ── 上游状态 ───────────────────────────────────────── */
 export const upstreamApi = {
-  status: () => get<UpstreamStatus>('/api/status'),
+  status: () => get<UpstreamStatus>('/api/status', undefined, STATUS_TIMEOUT_MS),
   /** 上游模型简表；realm 非空时只返回该版本的条目 */
-  models: (realm?: Realm) => get<ModelListResponse>('/api/models', {realm}),
+  models: (realm?: Realm) => get<ModelListResponse>('/api/models', {realm}, MODELS_TIMEOUT_MS),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */
@@ -379,10 +389,10 @@ export const logApi = {
 /** 从 Content-Disposition 取文件名；后端给的已是 ASCII */
 const CSV_SUFFIX = '.csv';
 
-function filenameOf(header: unknown): string {
+function filenameOf(header: unknown, fallback: string = `logs${CSV_SUFFIX}`): string {
   const match = typeof header === 'string' ? header.match(/filename="?([^";]+)"?/) : null;
   // 文件名不是界面文案；后缀单独拼，免得被 i18n 键扫描当成翻译键
-  return match ? match[1] : `logs${CSV_SUFFIX}`;
+  return match ? match[1] : fallback;
 }
 
 /**
@@ -453,10 +463,23 @@ export const pricingApi = {
   resolve: (params: {provider: string; model: string; at?: number}) =>
     get<PriceResolveResult>('/api/pricing/resolve', params),
   // 后端的 dry_run 是查询参数（FastAPI 简单类型不读 body），放 body 里会被静默当成 false
-  importBooks: (dry_run = false) =>
-    post<{added: number; skipped: number; errors: string[]; path?: string}>(
-      `/api/pricing/import?dry_run=${dry_run}`,
-    ),
+  // 后端返回的是 inserted/skipped/total（无逐条 errors），这里统一成界面用的 added/skipped/errors。
+  // 少一层归一会让 preview.errors 变成 undefined，渲染 .length 时整页进 Error Boundary。
+  importBooks: async (dry_run = false) => {
+    const r = await post<{
+      inserted?: number;
+      skipped?: number;
+      total?: number;
+      unpriced?: string[];
+      path?: string;
+    }>(`/api/pricing/import?dry_run=${dry_run}`);
+    return {
+      added: Number(r?.inserted ?? 0),
+      skipped: Number(r?.skipped ?? 0),
+      errors: [] as string[],
+      path: r?.path,
+    };
+  },
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */
@@ -669,6 +692,17 @@ export const grokRegisterApi = {
   detail: (id: number) => get<GrokRegisterDetail>(`/api/grok/register/tasks/${id}/detail`),
   /** 队列计数 + 执行器是否已配置（任何登录用户可读） */
   worker: () => get<GrokRegisterWorkerStats>('/api/grok/register/worker'),
+  /** 导出该任务的账号与登录凭据：文件含明文 cookie/token，仅 admin；错误体是 Blob */
+  exportCredentials: async (id: number, fmt: 'json' | 'csv' = 'json') => {
+    const res = await http.get(`/api/grok/register/tasks/${id}/credentials`, {
+      params: {fmt},
+      responseType: 'blob',
+    });
+    return {
+      blob: res.data as Blob,
+      filename: filenameOf(res.headers['content-disposition'], `grok-credentials-task-${id}.${fmt}`),
+    };
+  },
 };
 
 /* ── 提示词库（登录用户只读，admin 增删改）────────────── */

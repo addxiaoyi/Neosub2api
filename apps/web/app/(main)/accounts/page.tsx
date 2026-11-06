@@ -491,27 +491,67 @@ export default function AccountsPage() {
     [merged, realm, providerFilter],
   );
 
+  /** 展示用服务商名：优先能力接口回的 label（含未在 /api/providers 里的家），再退回静态表 */
+  const providerNameOf = useCallback(
+    (pid?: string) => opsMeta[pid || 'codebuddy']?.label || providerLabel(providers, pid),
+    [opsMeta, providers],
+  );
+
   /**
-   * 选中项只保留当前列表可见的行：切分类 / 切版本 / 刷新后账号消失时，
-   * 不能让看不见的行继续被批量接口带着走。
+   * 批量动作只认真正的写能力：停用/启用看 disabled、重启看 restart、删除看 delete。
+   * 三项全都没有的 provider（如 muse）不允许勾选，否则整批必然跑出「0 成功 1 失败」。
+   */
+  const batchOpsOf = useCallback(
+    (a: Account) => {
+      const ops = opsOf(a.provider);
+      return {disable: ops.disabled, restart: ops.restart, delete: ops.delete};
+    },
+    [opsOf],
+  );
+  const canBatchRow = useCallback(
+    (a: Account) => {
+      const ops = batchOpsOf(a);
+      return ops.disable || ops.restart || ops.delete;
+    },
+    [batchOpsOf],
+  );
+  const batchable = useMemo(() => visible.filter(canBatchRow), [visible, canBatchRow]);
+  const selectedRows = useMemo(
+    () => batchable.filter((a) => selected.includes(a.file)),
+    [batchable, selected],
+  );
+  /** 某个批量动作在当前选中项里被哪些服务商卡住（用于禁用按钮并说明原因） */
+  const blockedProviders = useCallback(
+    (action: 'disable' | 'restart' | 'delete') => {
+      const names = selectedRows
+        .filter((a) => !batchOpsOf(a)[action])
+        .map((a) => providerNameOf(a.provider));
+      return [...new Set(names)].join(t('common.listSeparator'));
+    },
+    [selectedRows, batchOpsOf, providerNameOf, t],
+  );
+
+  /**
+   * 选中项只保留当前列表里可批量操作的行：切分类 / 切版本 / 刷新后账号消失，
+   * 或能力接口晚到导致某家不可批量时，都不能让这些行继续被批量接口带着走。
    */
   useEffect(() => {
-    const alive = new Set(visible.map((a) => a.file));
+    const alive = new Set(batchable.map((a) => a.file));
     setSelected((prev) => {
       const next = prev.filter((file) => alive.has(file));
       return next.length === prev.length ? prev : next;
     });
-  }, [visible]);
+  }, [batchable]);
 
   const toggleSelected = useCallback((file: string) => {
     setSelected((prev) => (prev.includes(file) ? prev.filter((f) => f !== file) : [...prev, file]));
   }, []);
 
-  const allVisibleSelected = visible.length > 0 && selected.length === visible.length;
+  const allVisibleSelected = batchable.length > 0 && selectedRows.length === batchable.length;
 
   const toggleAllVisible = useCallback(() => {
-    setSelected(allVisibleSelected ? [] : visible.map((a) => a.file));
-  }, [allVisibleSelected, visible]);
+    setSelected(allVisibleSelected ? [] : batchable.map((a) => a.file));
+  }, [allVisibleSelected, batchable]);
 
   /**
    * 执行批量动作。注意后端整批恒 200，`ok` 只是「全部成功」的聚合；
@@ -1128,6 +1168,13 @@ export default function AccountsPage() {
     );
   }
 
+  // 选中项里不支持某个批量动作的服务商：按钮直接禁掉并说明原因，不让整批白跑
+  const blockerDisable = blockedProviders('disable');
+  const blockerRestart = blockedProviders('restart');
+  const blockerDelete = blockedProviders('delete');
+  const blockHint = (providers: string) =>
+    providers ? t('accounts.batchActionUnsupported', {providers}) : undefined;
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -1373,7 +1420,8 @@ export default function AccountsPage() {
                 size="sm"
                 variant="outline"
                 className="h-7 rounded-full text-[11px]"
-                disabled={batchBusy}
+                disabled={batchBusy || !!blockerDisable}
+                title={blockHint(blockerDisable)}
                 onClick={() => runBatch('disable', true)}
               >
                 <Pause className="mr-1 h-3 w-3" />
@@ -1383,7 +1431,8 @@ export default function AccountsPage() {
                 size="sm"
                 variant="outline"
                 className="h-7 rounded-full text-[11px]"
-                disabled={batchBusy}
+                disabled={batchBusy || !!blockerDisable}
+                title={blockHint(blockerDisable)}
                 onClick={() => runBatch('disable', false)}
               >
                 <Play className="mr-1 h-3 w-3" />
@@ -1399,7 +1448,8 @@ export default function AccountsPage() {
                     size="sm"
                     variant="outline"
                     className="h-7 rounded-full text-[11px]"
-                    disabled={batchBusy}
+                    disabled={batchBusy || !!blockerRestart}
+                    title={blockHint(blockerRestart)}
                   >
                     <Power className="mr-1 h-3 w-3" />
                     {t('accounts.batchRestart')}
@@ -1417,7 +1467,8 @@ export default function AccountsPage() {
                     size="sm"
                     variant="outline"
                     className="h-7 rounded-full text-[11px] text-destructive-text hover:text-destructive-text"
-                    disabled={batchBusy}
+                    disabled={batchBusy || !!blockerDelete}
+                    title={blockHint(blockerDelete)}
                   >
                     <Trash2 className="mr-1 h-3 w-3" />
                     {t('accounts.batchDelete')}
@@ -1484,9 +1535,11 @@ export default function AccountsPage() {
                   {isAdmin && (
                     <input
                       type="checkbox"
-                      className="size-4 shrink-0 cursor-pointer accent-primary"
+                      className="size-4 shrink-0 cursor-pointer accent-primary disabled:cursor-not-allowed disabled:opacity-40"
                       checked={selected.includes(a.file)}
                       onChange={() => toggleSelected(a.file)}
+                      disabled={!canBatchRow(a)}
+                      title={!canBatchRow(a) ? t('accounts.batchRowUnsupported', {provider: providerNameOf(a.provider)}) : undefined}
                       aria-label={t('accounts.batchSelectRow', {name: a.nickname || a.uid})}
                     />
                   )}
@@ -1542,9 +1595,10 @@ export default function AccountsPage() {
                 <TableHead className="w-9 pl-4 pr-0">
                   <input
                     type="checkbox"
-                    className="size-4 cursor-pointer align-middle accent-primary"
+                    className="size-4 cursor-pointer align-middle accent-primary disabled:cursor-not-allowed disabled:opacity-40"
                     checked={allVisibleSelected}
                     onChange={toggleAllVisible}
+                    disabled={batchable.length === 0}
                     aria-label={t('accounts.batchSelectAll')}
                   />
                 </TableHead>
@@ -1564,9 +1618,11 @@ export default function AccountsPage() {
                   <TableCell className="w-9 pl-4 pr-0">
                     <input
                       type="checkbox"
-                      className="size-4 cursor-pointer align-middle accent-primary"
+                      className="size-4 cursor-pointer align-middle accent-primary disabled:cursor-not-allowed disabled:opacity-40"
                       checked={selected.includes(a.file)}
                       onChange={() => toggleSelected(a.file)}
+                      disabled={!canBatchRow(a)}
+                      title={!canBatchRow(a) ? t('accounts.batchRowUnsupported', {provider: providerNameOf(a.provider)}) : undefined}
                       aria-label={t('accounts.batchSelectRow', {name: a.nickname || a.uid})}
                     />
                   </TableCell>

@@ -85,6 +85,7 @@ export default function PricingPage() {
   /* ── YAML 导入（admin） ─────────────── */
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [importing, setImporting] = useState(false);
+  const previewErrors = preview?.errors ?? [];
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -464,15 +465,15 @@ export default function PricingPage() {
                 ? t('pricing.importPreviewDesc', {
                     added: preview.added,
                     skipped: preview.skipped,
-                    errors: preview.errors.length,
+                    errors: previewErrors.length,
                   })
                 : ''}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
-            {preview && preview.errors.length > 0 && (
+            {previewErrors.length > 0 && (
               <div className="scroll-slim max-h-40 space-y-1 overflow-y-auto px-5 pb-4">
-                {preview.errors.map((e, i) => (
+                {previewErrors.map((e, i) => (
                   <p key={i} className="font-mono text-[11px] text-destructive-text">{e}</p>
                 ))}
               </div>

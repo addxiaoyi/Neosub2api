@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -232,14 +233,40 @@ async def collect_models(
     *,
     ttl_sec: int = 60,
     cache: ModelCatalogCache | None = None,
+    timeout_sec: float | None = None,
 ) -> list[dict[str, Any]]:
-    """按 provider 顺序聚合并集；同 id 合并为一条，保留各 provider 的真实来源与就绪状态。"""
+    """按 provider 顺序聚合并集；同 id 合并为一条，保留各 provider 的真实来源与就绪状态。
+
+    `timeout_sec` 非空时整轮聚合共用一个截止时间：超时的 provider 回落到静态声明，
+    已拿到的 provider 照常返回，避免一个卡住的上游拖住整页模型列表。
+    """
     store = cache if cache is not None else DEFAULT_CACHE
+    deadline = None if timeout_sec is None else time.monotonic() + max(0.0, float(timeout_sec))
     merged: dict[str, dict[str, Any]] = {}
     for adapter, enabled in targets:
         if not adapter.spec.capabilities.get("models"):
             continue
-        items, source, fallback_reason = await _load(adapter, ttl_sec, store)
+        if deadline is None:
+            items, source, fallback_reason = await _load(adapter, ttl_sec, store)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                items, source, fallback_reason = (
+                    _declared(adapter),
+                    SOURCE_DECLARED_FALLBACK,
+                    "模型列表聚合超时（已返回部分结果）",
+                )
+            else:
+                try:
+                    items, source, fallback_reason = await asyncio.wait_for(
+                        _load(adapter, ttl_sec, store), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    items, source, fallback_reason = (
+                        _declared(adapter),
+                        SOURCE_DECLARED_FALLBACK,
+                        "模型列表聚合超时（已返回部分结果）",
+                    )
         for item in items:
             _merge(merged, adapter, enabled, item, source, fallback_reason)
     return list(merged.values())

@@ -714,7 +714,14 @@ function pickValues(fields: Field[], source: Record<string, unknown> | undefined
         out[f.key] = Array.isArray(raw) ? hoursToText(raw) : hoursToText(f.def);
         break;
       case 'duration':
-        out[f.key] = durationOk(f, raw) ? String(raw).trim() : f.def;
+        // 字段缺失时必须回落到真实默认值：durationOk 对 offWhenZero 字段接受空串，
+        // 若直接 String(raw) 会把 undefined 写成字面量 "undefined" 填进输入框。
+        out[f.key] =
+          raw === undefined || raw === null
+            ? f.def
+            : durationOk(f, raw)
+              ? String(raw).trim()
+              : f.def;
         break;
       case 'select':
         // 只接受枚举内的取值；配置里是别的值（上游改过枚举）时回退默认
