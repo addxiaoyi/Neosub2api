@@ -13,6 +13,8 @@
 > 2. **`qoder`**（`apps/control/app/adapters/qoder.py`）：clean-room 自研 MIT 直连 COSY 网关，
 >    一等 provider（status implemented，chat/messages/models/responses 能力位，readiness ready），
 >    不含上游代码，**不受 PolyForm-NC 限制**。
+>
+> **2026-11-06 更正（原句逐字留档）**：上一行的「readiness ready」与代码不符——`apps/control/app/adapters/qoder.py:450,459` 为 `status="implemented"`、`readiness="needs_config"`。`ready` 只表示配置齐备，不等于真机跑通；当前 14 家全部 `needs_config`。误判后果：按旧句会把 `qoder` 当成免配置可用，漏掉 access token / uid / refresh_token 卡点。
 
 ## 形态
 

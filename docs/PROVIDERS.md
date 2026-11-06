@@ -26,7 +26,7 @@
 | `sub2api` | Sub2API | Wei-Shaw/sub2api（协议参考，主仓 clean-room 重写） | OpenAI + Anthropic + Responses（responses 流式透传） | —（账号自带） | chat, messages, models, responses | 内置直连 | safe |
 | `codar` | Codar (仓内直连) | Codar 私有 API（行为参考 AiXiaoc/codar2api） | OpenAI + Anthropic + Responses | `https://api.claw.speedai.com` | chat, messages, models, responses | 内置直连 | safe |
 | `codar_sidecar` | Codar (codar2api) | AiXiaoc/codar2api（Go sidecar） | OpenAI + Anthropic + Responses（responses 由 sidecar 转发） | `http://127.0.0.1:8801` | chat, messages, models, responses, sidecar | sidecar 直通 | safe |
-| `trae_sidecar` | Trae Solo+Work (trae2api) | JeffHu0912/trae2api | OpenAI | `http://127.0.0.1:7871` | chat, models, oauth, credits, sidecar | sidecar 直通 | safe |
+| `trae_sidecar` | Trae Solo+Work (trae2api) | JeffHu0912/trae2api | OpenAI | `http://127.0.0.1:7871` | chat, models, sidecar | sidecar 直通 | safe |
 | `deepseek_sidecar` | DeepSeek (Deepseek2Go) | ColudAI/Deepseek2Go | OpenAI + Anthropic（非标路径） | `http://127.0.0.1:5001` | chat, messages, models, sidecar | sidecar 直通 | **danger** |
 | `qoder_sidecar` | Qoder Switch (PolyForm-NC) | NextAgentX/qoder-trae-workbuddy-switch | OpenAI + Anthropic + Responses | `http://127.0.0.1:7873` | chat, messages, models, responses, sidecar | sidecar 直通 | **danger** |
 | `qoder` | Qoder（COSY） | Qoder 客户端协议（主仓 clean-room 重写） | OpenAI + Anthropic + Responses | `https://gateway.qoder.com.cn` | chat, messages, models, responses | 内置直连 | safe |
@@ -42,13 +42,16 @@
 
 > 2026-11-04 更正（原单元格值留档）：`qoder_sidecar` 一行原写作协议「OpenAI + Anthropic」、能力位「chat, messages, models, sidecar」，即按「未接 `/v1/responses`」记载，与代码不符——`apps/control/app/adapters/qoder_sidecar.py:32` 声明 `responses: True`、`:55-57` 实现转发，`apps/control/app/routers/v1.py:479-481` 已挂 `/v1/responses` 路由，故协议列改为「OpenAI + Anthropic + Responses」、能力位补 `responses`。
 
+> 2026-11-06 已更正（原单元格值逐字留档）：`trae_sidecar` 一行能力位原为「`chat, models, oauth, credits, sidecar`」。`apps/control/app/adapters/trae_sidecar.py:23-32` 实际为 `chat=True, messages=False, models=True, oauth=False, checkin=False, credits=False, register=False, sidecar=True`；该适配器只有 `__init__`（`:43`），没有 `start_login` / `refresh_credits` / `sync_accounts` 覆写，账号池与 OAuth 全在 sidecar 进程内。故去掉 `oauth` / `credits`，能力位改为 `chat, models, sidecar`。
+> 误判后果：按旧格会把控制面当成能做 Trae OAuth 登录与积分刷新，去「账号」页找按钮或怀疑能力探测漏项；实际 `apps/control/app/routers/accounts.py:25-42` 的 `_account_ops` 按真实覆写与能力位判定，这两个按钮本就不会出现。
+
 ---
 
 ## 就绪状态
 
 `GET /api/providers` 的每条记录带两个字段，用来区分「填个 key 就能跑」和「还得再配东西才通」：
 
-- `readiness`：`ready` = 填好 api_key / base_url 就能调用；`needs_config` = 还有核实过的卡点，光填 key 不够。
+- `readiness`：`ready` = 填好 api_key / base_url 就能调用（**只表示配置齐备，`ready` ≠ 真机跑通**）；`needs_config` = 还有核实过的卡点，光填 key 不够。
 - `requires`：字符串数组，缺什么（给人看的短句，带症状说明）；`ready` 时为空数组。
 
 只标注**已核实**的卡点；**「有代码」不等于「就绪」**，没有一条真实外呼跑通的 provider 一律按 `needs_config` 展示。
@@ -79,10 +82,12 @@
 | `codar` | needs_config | Codar 账号 JWT（扫码/短信登录仍需 codar2api sidecar） | 未填时模型列表与对话全部 401；token 过期且续期失败时同样 401 | 在「服务商」页 api_key 或 `options.tokens` 填 JWT，点测活能返回模型数量即通 |
 | `codar_sidecar` | needs_config | sidecar 进程（codar2api，默认端口 8801） | 同上，连不上 | 起 sidecar 后 `curl http://127.0.0.1:8801/v1/models`；调用时另填 sidecar 本地 API Key |
 | `opencode` | needs_config | OpenCode Zen/Go 密钥（`api_key` 或 `options.extra_keys`，静态无刷新） | 未填时推理请求 **503**（模型发现可走匿名通道，不保证成功） | 带 key 请求 `/v1/models` 与 `/v1/chat/completions` 各一条，返回 200 且 usage 正常即通 |
-| `trae` | needs_config | Trae 登录后的 **Cloud-IDE JWT**（填 `api_key`） | JWT 缺失或被拒时 **401**；Work 通道还需 `options.channel=work` 与账号积分 | Solo 发一条 `glm-5.2` 非流式请求返回 200；Work 通道另测一次流式与降级 |
+| `trae` | needs_config | Trae 登录后的 **Cloud-IDE JWT**（`api_key`，或多条 JWT 放凭据库 / `api_keys` 与 `options.extra_keys`） | JWT 缺失或被拒时 **401**；Work 通道还需 `options.channel=work` 与账号积分 | Solo 发一条 `glm-5.2` 非流式请求返回 200；Work 通道另测一次流式与降级 |
 | `qoder` | needs_config | Qoder **access token** + `uid` / `refresh_token` 身份字段（`api_key` + `options`） | 未填或会话失效报 **429 session_dead**，需重新登录换 token | 填真实 token 后请求一次 `/v1/models` 与 chat，能返回模型与正常 usage 即通 |
 
 三家（`opencode`、`trae`、`qoder`）当前**没有任何真实外呼证据**：测试全部基于假上游/桩响应，文档也各自列有未真机验证项。因此不按 `ready` 展示，等各自跑通一条真实链路后再回填 `ready`。
+
+> 2026-11-06 口径统一：`ready` 只表示「配置齐备、填 key 能调用」，**不等于真机跑通**；当前 14 家 provider 的 `ProviderSpec` 全部为 `needs_config`（`apps/control/app/adapters/codebuddy.py:129`、`opencode.py:47`、`qoder.py:459`、`trae.py:157` 等），没有任何一家按 `ready` 对外展示。上句只点名三家，是因为它们最容易被误当成「无卡点」；其余 11 家的卡点各自列在上表。此结论与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 同步，原先把三家标成 `ready` 的口径一律作废。
 
 > `codar` 与 `codar_sidecar` 是同一上游的两种接入方式，有意同时保留：前者在仓内直连 Codar 私有 API（自带 token 轮换与 401 续期），后者透传到独立 codar2api 进程（扫码/短信登录、签到留在 sidecar）。两者 provider id、默认地址、凭据来源都不同，可按需启停其一或同时启用；请求按 provider 显式选择，不做自动回退，因此不会互相抢占账号或 token。
 
@@ -93,10 +98,11 @@
 ## 1. codebuddy — CodeBuddy
 
 - **上游**：codebuddy2api 项目。控制面对接它的 **Python 管理端（默认 7864）**，Go 数据面（workbuddy2api，7863）由管理端代理。账号管理、设置下发走管理端 `/api/*`；chat/models 也经管理端网关转发。
-- **协议**：OpenAI Chat Completions + Anthropic Messages 双协议。
+- **协议**：OpenAI Chat Completions + Anthropic Messages 双协议；本地未接上游的 Responses 与 count_tokens（缺口，见下方「未接的扩展端点」）。
 - **必填配置**：管理端的作用域化 API Token（`wbt_` 前缀，`Authorization: Bearer wbt_...`）。可在「服务商」页填 api_key，或用环境变量 `CODEBUDDY_API_KEY` 兜底（页面配置优先）。地址默认 `CODEBUDDY_BASE`（compose 里指向 `host.docker.internal:7864`）。
 - **能力**：14 家里唯一支持账号全套操作的——账号同步、签到（单个/全部）、测活、刷新、清冷却、启停、删除、重启、积分刷新、设置下发（写管理端 config.json 并触发重载）。
 - **已知限制**：管理端的删除账号 / 重启 / 设置下发要求**会话级管理员**，`wbt_` token 可能被拒（403）；控制面如实透传管理端错误，不掩盖。真实账号行为需启动管理端并配好 token 验证。
+- **未接的扩展端点（缺口，不是取舍）**：上游管理端/数据面提供 `POST /v1/responses`，并注明 `/v1/messages/count_tokens` 可用（分析基线 `92b8b91` 的 README 写明 Responses 协议与 `count_tokens`，接口表列出 `POST /v1/responses`）。本地 `apps/control/app/adapters/codebuddy.py:119-127` 的 `stub_capabilities` 只声明 `chat / messages / models / oauth / checkin / credits`，没有 `responses` / `count_tokens`，也没有覆写 `responses()` / `count_tokens()`，故这两条在网关侧回 501（`apps/control/tests/test_v1_extension_endpoints.py:336-343` 已锁定该行为）；要接需补适配器转发、同步改判该用例并补转发用例，缺口登记见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.2。
 - **杂项**：realm 过滤（cn/global）仅对这家生效；「账号」页的 realm 列、`/api/accounts/refresh-credits`、`checkin-all`、`restart` 都固定作用于它。
 
 ## 2. muse — Muse2API
@@ -211,6 +217,7 @@
 - **形态**：内置直连。clean-room 重写 Trae 客户端，直连 Solo 单端点与 Work 有状态桥，不经 trae2api sidecar；Work 积分受限时自动降级 Solo。
 - **协议**：仅 OpenAI Chat + 模型列表（无 `messages` / `responses`，调用 501）。
 - **必填配置**：`api_key` 填登录后的 Cloud-IDE JWT；通道选择 `options.channel`（`solo` 默认 / `work`），无专用环境变量。
+- **账号池**：已接 `CredentialPool`（`trae.py:171,177-207,924-958`）。多 JWT 时按 sticky → weighted → 轮转选号，401/402/429/5xx 换号并按池分档冷却（唯一账号不冷却）；`health()` 返回 `rotation` / `cooling`（`:980-1019`）。408 在本适配器没有产生路径。
 - **实现细节、请求改写、错误语义与已知限制**：见 [providers/trae-adapter.md](providers/trae-adapter.md)；协议契约见 [providers/trae2api.md](providers/trae2api.md)。
 
 ---
@@ -218,6 +225,10 @@
 ## 附：多密钥轮换与冷却（KeyPool）
 
 实现：`apps/control/app/adapters/key_pool.py`。当前接入的是 `zcode` 与 `gptgrok`；其余多密钥适配器（`opencode`、`muse`、`codar`）仍走各自的重试循环，没有冷却表。
+
+> **（2026-11-06 已更正，原句逐字留档）** 上句原写「当前接入的是 `zcode` 与 `gptgrok`；其余多密钥适配器（`opencode`、`muse`、`codar`）仍走各自的重试循环，没有冷却表。」现状已变：`zcode` 改用 `CredentialPool`（`apps/control/app/adapters/zcode.py:98`），`opencode` 用 `CredentialPool` + `RotationStore`（`opencode.py:59-60`），`codar` 用 `Scheduler`（`codar.py:170-171`），`trae` 用 `CredentialPool`（`trae.py:171`）；仍用 `KeyPool` 的只剩 `gptgrok`（`gptgrok.py:417`），`muse` 仍未接池。下面 KeyPool 的语义对 `gptgrok` 继续成立；`zcode` / `opencode` / `codar` 的分档冷却、熔断、粘性、权重与四档策略见 [SCHEDULING.md](SCHEDULING.md)。
+> 误判后果：照旧句会以为 `opencode` / `codar` 没有冷却表而重复实现；排障时也会去 `key_pool.py` 找它们的冷却状态（实际在 `services/rotation.py`），并把「按状态码分档 + 连败升级/熔断」误当成 KeyPool 的单档 30 秒冷却。
+> **（2026-11-06 接线 trae 后补充）** `trae` 现在也接池（`CredentialPool`），可产生的 401/402/429/5xx 会登记冷却（402 档 900s、5xx 档 60s，`trae.py:202-207,924-958`）；`opencode` 仍只登记 401/403/429（`opencode.py:198`），其 402/408/5xx 未接线（5xx 仅解绑粘性，`opencode.py:125-132`）；`trae` 不产生 408。
 
 - **状态按实例隔离**：每个适配器实例各有一份游标与冷却表，模块级不存可变状态，同进程多实例互不打乱顺序。
 - **轮换**：`pick()` 在可用密钥上按游标轮询并推进；`peek()` 只读不推进，供热身/健康探测用。
@@ -266,7 +277,7 @@ python scripts/selfcheck_provider.py --list
 
 ## 附：有意不做的取舍（2026-11-04 盘点）
 
-下列 10 类功能**属于有意不做**，依据来自许可证隔离、设计边界或执行器外置，都有仓内出处，不是能力缺口；后续评审按「取舍」对待，不要重复按缺口提出。引用以章节锚点为准，行号仅作辅证。
+下列 10 类功能（按 2026-11-06 对账细分为 18 项）**属于有意不做**，依据来自许可证隔离、设计边界或执行器外置，都有仓内出处，**不是能力缺口**；后续评审按「取舍」对待，不要重复按缺口提出。引用以章节锚点为准，行号仅作辅证。
 
 | # | 功能 | 属于哪家上游 | 不做的依据（文件:行或条款） |
 | --- | --- | --- | --- |
@@ -280,6 +291,12 @@ python scripts/selfcheck_provider.py --list
 | 8 | 浏览器执行器、邮箱渠道、CPA / Grok2API 产物、GrokIQ 联动 | grok-register（kaibush/grok-register） | **执行器外置**：`docs/providers/grok-register.md` §5.4「执行器协议 v1」（属外部执行器职责）、本文件 §3 grok-register「已知限制」（执行器不随仓交付）、`docs/design/frontend-integration-plan.md:77`（外部执行器职责，不进控制面）；执行器入口为 `GROK_REGISTER_EXECUTOR_URL`；许可证 MIT |
 | 9 | **本项目取舍（非许可证限制）**：本仓不**转发**上游的原生 `/v1/responses`、`/v1/messages`、`/v1/images` 端点（上游确有这些端点：`upstreams/upstreams.yaml:73`「上游另有 responses/messages/images，本仓未接」），改为在网关层提供等价能力——`messages` / `responses` 由适配器在控制面**合成**（`gptgrok.py:400` 声明、`:1323` / `:1353` 实现，流式也是合成），图片输入走 chat 内嵌 `image_url`（`gptgrok.py:57-59`），独立 `/v1/images/generations` 仍不声明（调用 501，见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1.1）。上游管理控制台与 iCloud Privacy Mail sidecar 不透传 | gptGrok2api（addxiaoyi/gptGrok2api） | 上游为 **MIT、可入主仓**，未接是本项目自己选的，不是许可证不允许——`upstreams/upstreams.yaml:65`（license MIT）、`:73`（「上游另有 responses/messages/images，本仓未接」）；控制台与 iCloud sidecar 属上游自有面，不透传：`docs/design/frontend-integration-plan.md:97-101`（gptGrok 各项「不进界面」）、`:182`（上游管理控制台结构只借「实时请求」结构）、上游 README 能力概览（分析基线 `0335d62`：管理控制台、iCloud 隐私邮箱 sidecar） |
 | 10 | 只做协议层，不做各家上游 Web UI；各家 Web 面板由控制面自建等价界面 | 全局（12 个上游） | **设计边界**：`docs/design/frontend-integration-plan.md:190`（借法结论：仅 sub2api 三页结构与 gptGrok 实时请求列表可借，其余「能力留在 sidecar 内、或许可证不允许复制」）、`:235`（sidecar 内部能力不进界面）、本文件文首说明（无章节锚点，引用待核；运行态信息一律由管理页「服务商」或 `PATCH /api/providers/{id}` 下发） |
+
+> **第 6 条更正（2026-11-06，原句逐字留档）**：上表第 6 条原写「扫码/短信登录、每日签到、领免费模型、四策略账号调度、非 401 不换号」，并把「四策略账号调度」按 `docs/providers/codar2api.md:175,263-264,289` 归为 sidecar 才有的能力。现仓内 `codar` 直连已自带本地调度：`apps/control/app/services/scheduling.py:34` 的四档是 `sticky` / `priority` / `weighted` / `failover`，解析与降级规则在 `:69-135`，接在 `codar.py:170-171,242-248`；失败冷却用 `apps/control/app/services/rotation.py:260-281`。「非 401 不换号」也不成立：`codar.py:40-48` 的失败动作表把网络层/5xx 归 `rotate`、429 归 `cool`、401 归 `refresh`，换号与冷却都会发生。**仍有差异**：上游四策略是 `round_robin` / `weighted_round_robin` / `sticky` / `least_connections`（`docs/providers/codar2api.md:175`），本仓是 `priority` / `sticky` / `weighted` / `failover`，只有 `sticky` 同名且语义相近，不能一一对应验收；扫码/短信登录、签到、免费模型领取仍不做。
+> 误判后果：继续按「不做」读，会把已落地的本仓调度记成缺口、重复排期；反过来若以为与 sidecar 四策略同名等价，会按 `least_connections` 找一个本仓不存在的实现，或把 `round_robin` 的验收标准套到 `failover` 上。
+
+> **第 3 条引用更正（2026-11-06，原句逐字留档）**：上表第 3 条括注原写「`apps/control/app/routers/accounts.py:21-23`（trae_sidecar 声明 oauth/credits，但账号在 sidecar 内部，主仓两个方法一个都没实现）」。该括注已与代码不符：`apps/control/app/adapters/trae_sidecar.py:23-32` 的 `oauth` / `checkin` / `credits` 均为 `False`；`accounts.py:21-23` 现写「以实际覆写判定能力，不看 spec.capabilities 声明」，真实判定在 `accounts.py:25-42` 的 `_account_ops`（按 `_implements` 与能力位组合）；该适配器也只有 `__init__`（`trae_sidecar.py:43`）。第 3 条「控制面不做 trae 的 OAuth / 积分刷新」结论不变，依据改为上面两处。
+> 误判后果：照旧括注会把「声明了能力位但没实现」当成缺陷，去补适配器方法或改能力位；实际是本来就不声明、账号能力留在 sidecar，补方法反而会越过许可证/进程边界。
 
 > **第 9 条的原因性质与第 1、2、4、5 条不同**：1/2/4/5 是许可证导致的隔离或禁用（GPL / LGPL / 无 LICENSE / PolyForm-NC），9 是本项目主动选择不接（上游 MIT 允许），两者不可混为一谈。
 

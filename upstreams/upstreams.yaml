@@ -14,7 +14,7 @@
 #   - checked_at 记录最近一次远端巡检日期；巡检只更新它，不自动推进 analyzed_commit。
 
 version: 1
-updated_at: 2026-11-04
+updated_at: 2026-11-06
 
 upstreams:
   - repo: addxiaoyi/codebuddy2api
@@ -26,7 +26,7 @@ upstreams:
     checked_at: 2026-11-03
     our_files: ["apps/control/app/adapters/codebuddy.py", "providers/codebuddy2api/README.md"]
     protocols: ["openai.chat.completions", "anthropic.messages"]
-    notes: "Python 管理端 + Go 数据面（workbuddy2api）。主仓由 CodeBuddyAdapter 代理 127.0.0.1:7864，不复制源码。许可证 MIT（可入主仓）。"
+    notes: "Python 管理端 + Go 数据面（workbuddy2api）。主仓由 CodeBuddyAdapter 代理 127.0.0.1:7864，不复制源码。许可证 MIT（可入主仓）。上游另有 /v1/responses 与 /v1/messages/count_tokens（分析基线 92b8b91 的 README 写明 Responses 协议与 count_tokens，接口表列出 POST /v1/responses），本仓未接，属缺口而非取舍，见 docs/PROTOCOL-MATRIX.md §1.2。"
 
   - repo: czg86389-hub/muse2api
     license: MIT
@@ -123,9 +123,17 @@ upstreams:
     analyzed_commit: 93d873c98775dd145bdb3605aa1ccc37fd426c44
     analyzed_at: 2026-11-02
     checked_at: 2026-11-03
-    our_files: ["apps/control/app/adapters/qoder_sidecar.py", "apps/control/app/adapters/qoder.py", "providers/qoder-switch/README.md"]
+    our_files: ["apps/control/app/adapters/qoder_sidecar.py", "apps/control/app/adapters/qoder.py", "apps/control/app/routers/qoder_sessions.py", "providers/qoder-switch/README.md"]
     protocols: ["openai.chat.completions", "anthropic.messages", "openai.responses"]
     notes: "Rust Axum + package.json，PolyForm Noncommercial 1.0.0（禁止商用，以 LICENSE 文件首行为准）。双路径：qoder.py 为仓内自研 MIT 直连 COSY 网关，已注册为一等 provider（status implemented，chat/messages/models/responses 能力位，readiness ready）；qoder_sidecar 代理 127.0.0.1:7873，属禁止商用部分（needs_config）。2026-11-02 跟进 802e510→93d873c（含 0f972a5）：LICENSE、路由（lib.rs:135-140）、chat/messages/models、错误码、鉴权、启动参数均未变，适配器无需改动；变化仅在未接入的 /v1/responses（namespace 工具扁平化；当时未接入，现已补 responses 能力位与 /v1/responses 转发）与 model_capability 新增可选值 image_input_source=known。2026-11-04 读码 93d873c→930d149（12 commit/74 文件）：网关协议面未变——routes/{chat,messages,responses}.rs 仅给内部日志补 cached_tokens 字段（usage_tap 从 usage 读 prompt_cache_hit_tokens/prompt_tokens_details.cached_tokens/cache_read_input_tokens，只入日志不进响应体）；buddy-switch-server 新增 /api/sessions/export 与 /api/sessions/import{,/preview} 管理端点（加法，非 /v1 协议面）；其余为前端、文档与依赖。端点、鉴权、请求/响应结构、SSE 未变；930d149→5cf62da（3 commit，2026-11-04 02:11Z 又前移）仅 state.rs 注释澄清 base_url 不含 /v1，接入地址补 /v1 的修复在前端 src/lib/gateway-url.ts 与文档，网关路由未动。qoder.py / qoder_sidecar.py 不用改，基线不推进。"
+    # （2026-11-06 已更正，原 notes 中「readiness ready」与「93d873c→930d149 ... 新增 /api/sessions/export|import」两句逐字留档）
+    # ① readiness：qoder.py 的 ProviderSpec 实为 needs_config（apps/control/app/adapters/qoder.py:450,459），
+    #    不是 ready。ready 只表示填好凭据即可调用，不等于真机跑通；当前 14 家全部 needs_config。
+    # ② 会话端点：analyzed_commit 93d873c 的 buddy-switch-server 没有 /api/sessions/export|import；
+    #    仓内实际对接的是更晚版本 5cf62da 的 api.rs:259-264（apps/control/app/routers/qoder_sessions.py:3-7,38-45），
+    #    且属管理面 SessionCopy，不在 /v1 协议面。
+    # 误判后果：照旧 notes 会把「93d873c 已核对」当作会话搬运端点的证据，升级/回退 sidecar 时误以为基线自带这些端点；
+    # 也会把 qoder.py 当成免配置可用，漏掉 access token / uid / refresh_token 这个卡点。
 
   - repo: AiXiaoc/codar2api
     license: MIT

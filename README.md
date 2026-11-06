@@ -1,6 +1,6 @@
 # Neosub2api（仓库目录仍为 unified-2api）
 
-Neosub2api 把多家 2api / 注册上游收敛成**一个控制面 + 14 家 provider 适配器**，对外提供 OpenAI 与 Anthropic 兼容的模型网关。
+Neosub2api 的 **11 家上游均已接入统一网关**（注册表共 **14 家 provider 适配器**），**核心对话协议可用**；管理端、账号池调度与批量/文件类能力按**许可证与设计边界**做了取舍，**未做全量复刻**。对外提供 OpenAI 与 Anthropic 兼容的模型网关。
 
 - 控制面：FastAPI + SQLite，负责账号、服务商、网关密钥、配额、定价、用量、日志、安全与运行参数。
 - 网关：`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1/models`，流式与非流式都支持。
@@ -112,8 +112,8 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 | 能力 | 现状 | 入口 |
 | --- | --- | --- |
 | 多协议网关 | OpenAI `chat/completions`、`responses`，Anthropic `messages`，`/v1/models`；SSE 直通 | `/v1/*` |
-| 14 家 provider | 当前注册表下 `opencode` / `qoder` / `trae` 为 `ready`，其余 `needs_config`；能力位与协议差异见 [docs/PROTOCOL-MATRIX.md](docs/PROTOCOL-MATRIX.md) | `/api/providers`、设置页「服务商」 |
-| 多密钥与凭据中心 | 一个 provider 可配多把 key，按顺序轮换、401/403/429 冷却 | 设置页「服务商 / 凭据」 |
+| 14 家 provider | 静态 `ProviderSpec` 下 14 家均为 `needs_config`（配好凭据并探活成功后接口可动态给出 `ready`；`ready` 只表示配置齐备，**`ready` ≠ 真机跑通**）；能力位与协议差异见 [docs/PROTOCOL-MATRIX.md](docs/PROTOCOL-MATRIX.md) | `/api/providers`、设置页「服务商」 |
+| 多密钥与凭据中心 | 一个 provider 可配多把 key；分档冷却（401/403 600s、402 900s、429 120s、408/5xx 60s）、连败升级与熔断、粘性/权重/轮转组；四档策略（`sticky` / `priority` / `weighted` / `failover`）当前只接 codar，详见 [docs/SCHEDULING.md](docs/SCHEDULING.md) | 设置页「服务商 / 凭据」 |
 | 网关密钥 | `u2a_` 前缀，sha256 入库，明文仅创建时返回一次；支持启停、改名、吊销、归属 | 「密钥」页、`/api/keys` |
 | 配额与告警 | 按密钥/分组/窗口的配额策略、当前周期用量、阈值告警历史 | 「配额」页、`/api/quota/*` |
 | 定价与账单 | 价格簿、按 provider + model 解析价格、请求级账单流水与 usage 快照 | 「定价」页、`/api/pricing/*` |
@@ -124,6 +124,8 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 | 多语言 | `zh-CN` / `zh-TW` / `en` / `ja` / `ko`，缺键按设计回退 | 顶栏语言切换 |
 | 演示模式 | 进程内假上游 + 带标记的演示数据，一条命令开关与清除 | `scripts/demo.ps1` / `scripts/demo.sh` |
 | 注册任务（Grok） | 控制面内任务编排，执行器外置；未配置执行器时任务明确失败 | `/api/grok/register/*`（暂无界面） |
+
+> 2026-11-06 已更正（原句逐字留档）：provider 一行原写「当前注册表下 `opencode` / `qoder` / `trae` 为 `ready`，其余 `needs_config`」。三家 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），静态口径下 14 家全部 `needs_config`；`ready` 只表示配置齐备，不等于真机跑通。误判后果：按旧行会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障。
 
 ## 页面清单
 
@@ -199,7 +201,8 @@ unified-2api/
 
 ## 边界与已知限制
 
-- **真实上游未全覆盖验证**：opencode、sub2api、gptgrok、muse、zcode 等多家链路来自公开协议与假上游实测，真实鉴权细节仍需逐家用真实凭证确认；CodeBuddy 链路需启动管理端（7864）并配置 `wbt_` token。
+- **真实上游未全覆盖验证**：opencode、sub2api、gptgrok、muse、zcode 等多家链路来自公开协议与假上游实测，真实鉴权细节仍需逐家用真实凭证确认；当前 14 家静态 readiness 均为 `needs_config`（`ready` 只表示配置齐备，不等于真机跑通）。CodeBuddy 链路需启动管理端（7864）并配置 `wbt_` token。
+- **有意不做不是缺口**：对账确认的 18 项有意不做（按 [docs/PROVIDERS.md](docs/PROVIDERS.md) 附表的 10 类归并）来自许可证隔离、设计边界与执行器外置，属于取舍，不计入缺口清单，也不按「未实现」排期。
 - **sidecar 许可证**：`deepseek_sidecar` 无 LICENSE，`qoder_sidecar` 为 PolyForm-NC，商用前必须移除或取得书面授权；`codar_sidecar` / `trae_sidecar` 在仓内直连稳定后可只保留一种接入。
 - **Grok 注册执行器不随仓交付**：未配置 `GROK_REGISTER_EXECUTOR_URL` 时任务明确失败，不会假装成功。
 - **没有在线更新**：本部署不提供在线升级，也不操作宿主机 docker；升级需自行拉取代码与镜像。
@@ -214,7 +217,7 @@ unified-2api/
 
 - 上手：[GETTING-STARTED](docs/GETTING-STARTED.md)、[examples](docs/examples.md)、[DEMO](docs/DEMO.md)、[TROUBLESHOOTING](docs/TROUBLESHOOTING.md)
 - 契约：[API-REFERENCE](docs/API-REFERENCE.md)、[CONTRACT](docs/CONTRACT.md)、[error-contract](docs/error-contract.md)、[PROTOCOL-MATRIX](docs/PROTOCOL-MATRIX.md)
-- 运维：[DEPLOYMENT](docs/DEPLOYMENT.md)、[DEPLOYMENT-PROD](docs/DEPLOYMENT-PROD.md)、[PERFORMANCE](docs/PERFORMANCE.md)、[UPSTREAM-SYNC](docs/UPSTREAM-SYNC.md)
+- 运维：[DEPLOYMENT](docs/DEPLOYMENT.md)、[DEPLOYMENT-PROD](docs/DEPLOYMENT-PROD.md)、[PERFORMANCE](docs/PERFORMANCE.md)、[SCHEDULING](docs/SCHEDULING.md)、[UPSTREAM-SYNC](docs/UPSTREAM-SYNC.md)
 - 安全合规：[compliance](docs/compliance.md)、[security-audit](docs/security-audit.md)、[security-retest-2026-11-03](docs/security-retest-2026-11-03.md)、[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)
 - 设计与历史：[unification-audit](docs/unification-audit.md)、[m3-billing-plan](docs/m3-billing-plan.md)、[FRONTEND-BASELINE](docs/FRONTEND-BASELINE.md)
 

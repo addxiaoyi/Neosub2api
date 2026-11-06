@@ -19,15 +19,18 @@ python -c "import sys,inspect; sys.path.insert(0,'apps/control'); import app.ada
 | `grok-register` | — | — | — | ✓ | 控制面任务服务 | needs_config |
 | `gptgrok` | ✓ | ✓ | ✓ | — | 内置直连 | needs_config |
 | `zcode` | ✓ | ✓ | — | — | 内置直连 | needs_config |
-| `opencode` | ✓ | ✓ | — | — | 内置直连 | ready |
+| `opencode` | ✓ | ✓ | — | — | 内置直连 | needs_config |
 | `sub2api` | ✓ | ✓ | ✓ | — | 内置直连（账号池分发） | needs_config |
 | `codar` | ✓ | ✓ | ✓ | — | 内置直连 | needs_config |
 | `codar_sidecar` | ✓ | ✓ | ✓ | — | sidecar 直通（8801） | needs_config |
 | `trae_sidecar` | ✓ | — | — | — | sidecar 直通（7871） | needs_config |
 | `deepseek_sidecar` | ✓ | ✓（仅非流式） | — | — | sidecar 直通（5001） | needs_config |
 | `qoder_sidecar` | ✓ | ✓ | ✓ | — | sidecar 直通（7873） | needs_config |
-| `qoder` | ✓ | ✓ | ✓ | — | 内置直连（COSY） | ready |
-| `trae` | ✓ | — | — | — | 内置直连（Solo/Work） | ready |
+| `qoder` | ✓ | ✓ | ✓ | — | 内置直连（COSY） | needs_config |
+| `trae` | ✓ | — | — | — | 内置直连（Solo/Work） | needs_config |
+
+> 2026-11-06 已更正（原单元格值逐字留档）：`opencode` / `qoder` / `trae` 的 readiness 列原均为「ready」。三家的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），当前 14 家全部 `needs_config`（其余见 `codebuddy.py:129` 等同字段）。`ready` 只表示「填好 key / base_url 就能调用」，**`ready` ≠ 真机跑通**；没有真实外呼证据的 provider 不按 `ready` 展示（同 `docs/PROVIDERS.md` §「就绪状态」）。
+> 误判后果：照旧表会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障；排期也会跳过它们的真实链路验证。`PROVIDERS.md`、`README.md`、`API-REFERENCE.md` 中的旧「3 家 ready」口径同批作废。
 
 `responses` 有 `codar`、`qoder`、`qoder_sidecar`、`codar_sidecar`、`muse`、`sub2api`、`gptgrok` 七家声明（2026-11-05 更正，原句与误判后果见下方更正块）。
 
@@ -78,9 +81,10 @@ python -c "import sys,inspect; sys.path.insert(0,'apps/control'); import app.ada
 
 ## 1.2 仍不支持 / 仍跳过（保留理由，勿当漏项回填）
 
-- **`muse` 的 `/v1/messages` 仍为 501**：`apps/control/app/adapters/muse.py:62-67` 未声明 `messages` 位、也未覆写该方法，故 `_proxy` 在能力门回 501 `capability_unsupported`（`apps/control/app/routers/v1.py:366-372`），不是 400、不假装成功；与 `docs/TROUBLESHOOTING.md:101` 同口径。旧盘点表引「`plan:56`」说 muse 有 messages，该引用是错的，已按上述两处代码反证更正。
+- **`muse` 的 `/v1/messages` 仍为 501**：`apps/control/app/adapters/muse.py:62-67` 未声明 `messages` 位、也未覆写该方法，故 `_pick_capable` 在能力门回 501 `capability_unsupported`（`apps/control/app/routers/v1.py:394-401`），不是 400、不假装成功；与 `docs/TROUBLESHOOTING.md:101` 同口径。旧盘点表引「`plan:56`」说 muse 有 messages，该引用是错的，已按上述两处代码反证更正。
 - **`codar` 直连的 `count_tokens` 仍跳过**：证据只覆盖 sidecar（`docs/providers/codar2api.md:57`、`providers/codar2api/README.md:14`），`codar.py:57` 的 `stub_capabilities` 也没有该位；需要时就近改走 `codar_sidecar`（`codar_sidecar.py:60-62`）。误把 `codar` 也标成支持会让请求打到不存在的上游路径并被 4xx 掩成 502。
-- **sub2api 的 `images/tasks/{id}`、`videos/{id}` 读取未实现**：上游源码副本的 `/v1` 组（`gateway.go:41-110`）只注册了 `POST /v1/videos`（`:107-109`，包在 `h.SoraClient != nil` 内），没有 `GET /v1/videos/:id`，也没有 `GET /v1/images/tasks/:id`；`sub2api.py` 因此未覆写 `image_task` / `video_task`，`_proxy_get` 在 `v1.py:592-597` 明确回 501 `capability_unsupported`，不退化成 500。
+- **sub2api 的 `images/tasks/{id}`、`videos/{id}` 读取未实现**：上游源码副本的 `/v1` 组（`gateway.go:41-110`）只注册了 `POST /v1/videos`（`:107-109`，包在 `h.SoraClient != nil` 内），没有 `GET /v1/videos/:id`，也没有 `GET /v1/images/tasks/:id`；`sub2api.py` 因此未覆写 `image_task` / `video_task`，`_proxy_get` 在 `v1.py:810-815` 明确回 501 `capability_unsupported`，不退化成 500。
+- **`codebuddy` 的 `/v1/responses` 与 `count_tokens` 未接（缺口，待补；与上面三条「保留取舍」不同）**：上游（`addxiaoyi/codebuddy2api`，分析基线 `92b8b91`）的 README 写明同时提供 Responses 协议（`/v1/responses`）与 `/v1/messages/count_tokens`，接口表也列出 `POST /v1/responses`；本地 `apps/control/app/adapters/codebuddy.py:119-127` 的 `stub_capabilities` 没有 `responses` / `count_tokens`，也没有覆写 `responses()` / `count_tokens()`，`_pick_capable` 在能力门回 501（`apps/control/app/routers/v1.py:394-401`）。当前只接 chat/messages；`apps/control/tests/test_v1_extension_endpoints.py:336-343` 已锁定 codebuddy 这批扩展端点返回 501，补接时需同步改判并补转发用例。
 
 ## 2. 鉴权与上行入口
 
@@ -161,7 +165,7 @@ python -c "import sys,inspect; sys.path.insert(0,'apps/control'); import app.ada
 
 1. **`deepseek_sidecar` 的 messages 流式恒 501**：`messages(stream=True)` 直接 `raise ProviderError(501)`，因为 sidecar 的 `/anthropic/v1/messages` 只实现非流式。别把它写成「支持流式」，客户端会拿不到任何帧。
 2. **`deepseek_sidecar` 的 Anthropic 路径非标**：`/anthropic/v1/messages`，不是 `/v1/messages`，改成标准路径会 404。
-3. **`muse` / `trae` / `trae_sidecar` 没有 messages**：调用 `/v1/messages` 是 501，不是 400；模型路由命中后由网关统一拒绝。（2026-11-05 更正，原句「3. **`muse` / `trae` / `trae_sidecar` / `gptgrok` 没有 messages**：调用 `/v1/messages` 是 501，不是 400；模型路由命中后由网关统一拒绝。」保留作历史：`gptgrok` 已不适用——`gptgrok.py:400` 声明 `messages=True`、`:1353` 用 `_render_anthropic` 把 ChatGPT 帧合成 Anthropic 事件，`/v1/messages` 不再 501。`muse` 仍 501 的依据是 `apps/control/app/adapters/muse.py:62-67` 未声明 `messages` 位、未覆写方法，能力门 `apps/control/app/routers/v1.py:366-372` 回 501；旧盘点表引「`plan:56`」说 muse 有 messages 是错的，该引用已按上述两处代码反证更正，勿按旧表回填。）
+3. **`muse` / `trae` / `trae_sidecar` 没有 messages**：调用 `/v1/messages` 是 501，不是 400；模型路由命中后由网关统一拒绝。（2026-11-05 更正，原句「3. **`muse` / `trae` / `trae_sidecar` / `gptgrok` 没有 messages**：调用 `/v1/messages` 是 501，不是 400；模型路由命中后由网关统一拒绝。」保留作历史：`gptgrok` 已不适用——`gptgrok.py:400` 声明 `messages=True`、`:1353` 用 `_render_anthropic` 把 ChatGPT 帧合成 Anthropic 事件，`/v1/messages` 不再 501。`muse` 仍 501 的依据是 `apps/control/app/adapters/muse.py:62-67` 未声明 `messages` 位、未覆写方法，能力门 `apps/control/app/routers/v1.py:394-401` 回 501；旧盘点表引「`plan:56`」说 muse 有 messages 是错的，该引用已按上述两处代码反证更正，勿按旧表回填。）
 4. **`codar_sidecar` 的 responses 已声明（由 sidecar 转发，非合成）**：`apps/control/app/adapters/codar_sidecar.py:30-39` 声明 `responses=True`（同时声明扩展位 `count_tokens=True`），`:56-58` 的 `responses()` 直接 `forward("/v1/responses", payload, stream=stream)`、`:60-62` 的 `count_tokens()` 转 `/v1/messages/count_tokens`，控制面只搬字节；`protocols` 见 `:40`。要排查 501 应看 sidecar 进程是否在线、是否支持该端点，而不是控制面能力位。（2026-11-05 已更正，原句逐字留档：「4. **`codar_sidecar` 的 responses 未声明**：上游 sidecar 可能有该端点，但控制面声明为 False，调用 501；要开就得先补适配器与测试。」；2026-11-04 更正块末句「仍 501 的只剩 `codar_sidecar`」同步失效——误判后果：把真实 501 归因到控制面声明，会去改适配器做无用功；客户端则会绕开 sidecar 直连 codar2api，绕过控制面鉴权/配额/记账。依据当前工作树未提交改动，文档按工作区代码写，未入库。）
 5. **`qoder` 的 `trae` 产品线 501**：COSY 网关不接 Trae 模型，改用 provider `trae`。
 6. **`zcode` 缺 `official_system` 必回 3012**：上游做 system 内容指纹校验，适配器不内置官方原文。

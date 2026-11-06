@@ -98,11 +98,11 @@ detail 形如 `上游不可达（http://...）：...`，是控制面连不上上
 
 detail 形如 `<provider> 不支持 <capability>` 或 `<provider> 适配器未实现 /v1/messages`——请求打到了不支持该协议的 provider：
 
-- trae_sidecar / muse 没有 Anthropic `/v1/messages`（muse 的实证：`apps/control/app/adapters/muse.py:62-67` 未声明 `messages`、也未覆写该方法（`:225` 起只有 `responses`），能力门在 `apps/control/app/routers/v1.py:366-372` 回 501 `capability_unsupported`；原句把 `gptgrok` 一并列入已过期，见本节末更正块）；
+- trae_sidecar / muse 没有 Anthropic `/v1/messages`（muse 的实证：`apps/control/app/adapters/muse.py:62-67` 未声明 `messages`、也未覆写该方法（`:225` 起只有 `responses`），能力门在 `apps/control/app/routers/v1.py:394-401` 回 501 `capability_unsupported`；原句把 `gptgrok` 一并列入已过期，见本节末更正块）；
 - deepseek_sidecar 不支持流式 `/v1/messages`（仅非流式）；
 - 处理：换用声明 `messages` 的 provider（codebuddy / opencode / zcode / sub2api / codar / codar_sidecar / qoder / qoder_sidecar / gptgrok / deepseek_sidecar（仅非流式）；完整清单见 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1），或在请求里用 `provider前缀/模型` 明确路由。
 
-> 2026-11-05 已更正（原句逐字留档）：上一行原为「- trae_sidecar / muse / gptgrok 没有 Anthropic `/v1/messages`；」，其下原为「- 处理：换用双协议 provider（codebuddy / opencode / zcode / sub2api / qoder_sidecar），或在请求里用 `provider前缀/模型` 明确路由。」。两处同因与代码不符：`apps/control/app/adapters/gptgrok.py:400` 声明 `messages=True, responses=True`，`:1353` 的 `messages()` 用 `_render_anthropic` 把 ChatGPT 帧**合成** Anthropic SSE（流式是合成，非透传），路由挂载在 `apps/control/app/routers/v1.py:644`；同时旧清单漏列了 `codar` / `codar_sidecar` / `qoder` / `gptgrok` 等同样声明 `messages` 的家（`PROTOCOL-MATRIX.md` §1）。误判后果：客户端看到「gptgrok 没有 messages」会绕开网关直连 ChatGPT，或被迫降级到 chat 兼容层；按旧清单选路又会误以为只有 5 家可用。另：盘点表曾引 `plan:56` 说 muse 有 `/v1/messages`，该引用是错的；muse 的真实反证是 `muse.py:62-67` 未声明 `messages` 位、未覆写方法，`v1.py:366-372` 能力门统一回 501。核验口径与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 / §3 一致。
+> 2026-11-05 已更正（原句逐字留档）：上一行原为「- trae_sidecar / muse / gptgrok 没有 Anthropic `/v1/messages`；」，其下原为「- 处理：换用双协议 provider（codebuddy / opencode / zcode / sub2api / qoder_sidecar），或在请求里用 `provider前缀/模型` 明确路由。」。两处同因与代码不符：`apps/control/app/adapters/gptgrok.py:400` 声明 `messages=True, responses=True`，`:1353` 的 `messages()` 用 `_render_anthropic` 把 ChatGPT 帧**合成** Anthropic SSE（流式是合成，非透传），路由挂载在 `apps/control/app/routers/v1.py:644`；同时旧清单漏列了 `codar` / `codar_sidecar` / `qoder` / `gptgrok` 等同样声明 `messages` 的家（`PROTOCOL-MATRIX.md` §1）。误判后果：客户端看到「gptgrok 没有 messages」会绕开网关直连 ChatGPT，或被迫降级到 chat 兼容层；按旧清单选路又会误以为只有 5 家可用。另：盘点表曾引 `plan:56` 说 muse 有 `/v1/messages`，该引用是错的；muse 的真实反证是 `muse.py:62-67` 未声明 `messages` 位、未覆写方法，`v1.py:394-401` 能力门统一回 501。核验口径与 [PROTOCOL-MATRIX.md](PROTOCOL-MATRIX.md) §1 / §3 一致。
 
 ## 9. `/api/status` 显示某家 `connected: false`
 

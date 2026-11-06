@@ -16,6 +16,8 @@
 上游 sidecar 自行管理账号池、OAuth 登录、Work 积分探测、SOLO→Work 自动降级；
 控制面不提供 OAuth / 积分操作（`oauth`、`credits` 能力位为 False）。
 
+> **2026-11-06 更正（原句逐字留档）**：第 1 条「readiness ready」与代码不符——`apps/control/app/adapters/trae.py:157` 的 readiness 为 `needs_config`。`ready` 只表示配置齐备，不等于真机跑通；当前 14 家全部 `needs_config`。误判后果：按旧句会把直连 `trae` 当成开箱即用，跳过真实凭证验证。
+
 ## 支持的协议
 
 | 端点 | 说明 |

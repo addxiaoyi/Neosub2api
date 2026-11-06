@@ -115,7 +115,7 @@ OpenAI Chat Completions 协议转发。
 | 项 | 说明 |
 | --- | --- |
 | 鉴权 | 网关密钥 |
-| 请求体 | 上游要求的 OpenAI 请求体原样转发；`model` 必填，缺失返回 400 |
+| 请求体 | 上游要求的 OpenAI 请求体原样转发；`model` 必填，缺失返回 400。体积上限 `UNIFIED_GATEWAY_MAX_BODY_BYTES`（默认 8 MiB），超限 413 `request_too_large` |
 | 请求头 | 可选 `x-provider: <provider_id>` 显式指定服务商 |
 | 流式 | 请求体 `"stream": true` 时 SSE 直通（`text/event-stream`） |
 | 日志 | 旁路写 `request_logs` + `usage_records`（流式从含 usage 的 SSE chunk 提取） |
@@ -216,15 +216,16 @@ Anthropic 外壳示例（`/v1/messages`）：
 
 - Anthropic 的错误对象只认 `type` + `message` 两个标准键，`code`、`provider / upstream_status / upstream_code / upstream_message` 作为 `error` 的**附加键**保留；这是「按协议出形状」与「保留排查信息」之间的取舍。
 - `provider`、`upstream_status`、`upstream_code`、`upstream_message` 是排查用的子字段：
-  - `upstream_status` 是上游原始 HTTP 状态（含被合并的 403）；
+  - `upstream_status` 是上游原始 HTTP 状态（401/403 原样透传，不再合并）；
   - `upstream_code` / `upstream_message` 由适配器从厂商错误体解析（兼容 OpenAI `error.code/message`、Anthropic `error.type/message`、`code` / `message` / `detail` 等常见键），拿不到时留空（键可能不出现），不会编造；
-  - `upstream_message` 已掩码并截断到 200 字符。
+  - `upstream_message` 已掩码、抹掉回环/内网端点与内部路径，并截断到 200 字符；原文只留在服务端日志。
 - 上游状态码映射（`public_status`）：
 
 | 上游状态 | 对外状态 | `error.type`（OpenAI / Anthropic） | `error.code`（两壳同值） |
 | --- | --- | --- | --- |
 | 400 / 409 / 413 / 415 / 422，其余未列出的 4xx | 400 | `invalid_request_error` / `invalid_request_error` | `upstream_bad_request` |
-| 401、403（合并） | 401 | `authentication_error` / `authentication_error` | `upstream_auth_failed` |
+| 401 | 401 | `authentication_error` / `authentication_error` | `upstream_auth_failed` |
+| 403 | 403 | `permission_error` / `permission_error` | `upstream_forbidden` |
 | 402 | 402 | `insufficient_quota` / `invalid_request_error` | `upstream_billing` |
 | 404 | 404 | `invalid_request_error` / `not_found_error` | `upstream_not_found` |
 | 408 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
@@ -234,7 +235,7 @@ Anthropic 外壳示例（`/v1/messages`）：
 | 504 | 504 | `api_error` / `timeout_error` | `upstream_timeout` |
 | 501（能力位未实现） | 501 | `invalid_request_error` / `invalid_request_error` | `capability_unsupported` |
 
-网关本地拒绝同样按协议出外壳：缺密钥/密钥无效 `401 invalid_api_key`；`Authorization` 与 `x-api-key` 同时带上且值不同 `401 conflicting_auth_headers`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；**`x-provider` 与前缀异源** `400 conflicting_provider_hints`、**`x-provider` 指向本地没有的 provider** `404 provider_not_found`（判定顺序：本地存在性 → 冲突 → 停用）；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）；**显式指定已停用的 provider**（`x-provider` 或 `provider/model` 前缀）`503 provider_disabled`，message 直接点明该 provider 已停用——停用状态不能靠显式指定绕过（详见「模型解析失败」表）。
+网关本地拒绝同样按协议出外壳：请求体超过 `UNIFIED_GATEWAY_MAX_BODY_BYTES`（默认 8 MiB）`413 request_too_large`（不会把超大体读进内存，也不记成成功请求）；缺密钥/密钥无效 `401 invalid_api_key`；`Authorization` 与 `x-api-key` 同时带上且值不同 `401 conflicting_auth_headers`；请求体非法 `400 invalid_json`；缺 `model` `400 missing_model`；**`x-provider` 与前缀异源** `400 conflicting_provider_hints`、**`x-provider` 指向本地没有的 provider** `404 provider_not_found`（判定顺序：本地存在性 → 冲突 → 停用）；配额耗尽 `429 quota_exceeded`（`detail` 里仍是结构化拒因，含 `window/metric/used/limit/reset_after`）；**显式指定已停用的 provider**（`x-provider` 或 `provider/model` 前缀）`503 provider_disabled`，message 直接点明该 provider 已停用——停用状态不能靠显式指定绕过（详见「模型解析失败」表）。
 
 > 上表 `503` 行只描述**上游**返回 503（`code=provider_unavailable`）的映射；网关本地的 `provider_disabled` 503 在 Anthropic 壳下是 `type=api_error` 而非 `overloaded_error`，两种 503 的区分见「模型解析失败」表下方的说明。
 
@@ -258,14 +259,15 @@ Anthropic 外壳示例（`/v1/messages`）：
 
 #### 失败请求限流（429 `failure_rate_limited`）
 
-按**密钥**做滑动窗口计数，计数直接聚合 `request_logs`（`status >= 400` 或 `error` 非空），不另建累加器：
+按 **(密钥, provider)** 做滑动窗口计数，计数直接聚合 `request_logs`（`status >= 400` 或 `error` 非空，且 `provider` 与本次请求一致），不另建累加器：
 
+- 一家上游连续失败只会锁住该 provider；同一把 key 上的其他 provider 不受影响（跨 provider 连坐是旧缺陷，已按 (key, provider) 隔离）。
 - 窗口 `UNIFIED_FAILURE_WINDOW_SEC`（默认 60 秒）、上限 `UNIFIED_FAILURE_WINDOW_MAX`（默认 20 次），任一为 `0` 即关闭；匿名请求没有密钥维度，不参与计数。
 - 达到上限后，后续请求在转发前返回 **429**，`error.type = rate_limit_error`、`error.code = failure_rate_limited`，响应头带 `Retry-After: <reset_after>`；`detail` 形状：
 
 ```json
 {
-  "type": "failure_rate_limited", "layer": "key", "metric": "failures",
+  "type": "failure_rate_limited", "layer": "key", "provider": "codebuddy", "metric": "failures",
   "used": 20, "limit": 20, "unit": "requests",
   "window": "sliding", "window_sec": 60,
   "reset_at": 1762000060, "reset_after": 42,
@@ -329,7 +331,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 行为口径：
 
 - **强制非流式**：扩展 POST 端点丢弃请求体里的 `stream` 并置 `stream=False`（`v1.py:410-412`），既不透传给上游，也不返回 SSE。
-- **请求体**：只接受 JSON；`multipart/*` 返回 415 `unsupported_media_type`，非法 JSON 或非对象返回 400 `invalid_json`（`v1.py:280-296`）。
+- **请求体**：只接受 JSON；`multipart/*` 返回 415 `unsupported_media_type`，非法 JSON 或非对象返回 400 `invalid_json`（`v1.py:344-361`）。所有 JSON 端点（含 `chat/completions`、`messages`、`responses`）统一按 `UNIFIED_GATEWAY_MAX_BODY_BYTES`（默认 8 MiB）限体积：先看 `Content-Length`，再按流累计，超限立刻 413 `request_too_large`，不读进内存、不记成功请求（`v1.py:311-341`）。
 - **计费口径**：扩展能力位的空/全零 usage 经 `_usage_for_ledger` 归成 `None`（`v1.py:273-277`），结算仍会写一条 `note=usage_missing`、0 金额的流水（`billing.py:321-323`）；日志侧因此是 `credit_status=usage_missing`、`credit=null`（`logs.py:155-162`），**不是** `billed(0)`。`usage` 不在 `EXTENSION_CAPABILITIES` 内，但 `/v1/usage` 走 GET 代理，同样不采用量。
 - **`_proxy_get`（4 条 GET，`v1.py:584-636`）**：没有 `model` 可解析，按能力位挑 provider（`_pick_capable`，`v1.py:551-581`）：零家支持 501 `capability_unsupported`；多家支持且未带 `x-provider` 400 `ambiguous_provider`；`x-provider` 指向未知/停用 provider 404 `provider_not_found`，指向不支持该能力位的已启用 provider 501。家级能力位为真但适配器没实现读取方法（如只有建视频任务、没有查询）同样 501 `capability_unsupported`（`v1.py:590-597`）。
 - **配额与限流维度**：GET 端点没有 model，`_quota_guard` / `_failure_guard` 按 provider 维度判（model 传空串），model 级配额策略不适用（`v1.py:598-600`）。
@@ -350,6 +352,8 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 | `password` | string | 密码 |
 
 成功：`{"ok": true, "username": "...", "role": "admin|viewer"}`，并种下 HttpOnly Cookie（`u2a_session`，SameSite=Lax，`secure` 取决于 `UNIFIED_COOKIE_SECURE`，有效期 `UNIFIED_SESSION_TTL_SEC`）。失败：401 `用户名或密码错误`（登录失败会记审计日志）。
+
+失败节流：窗口内失败达上限后返回 **429** `{"detail": "登录失败次数过多，请稍后再试。", "retry_after": 秒数}`（`retry_after` 是结构化字段，不带 `Retry-After` 响应头）。计数维度是「来源 IP + 用户名」，冷却从窗口内最后一次失败起算并按失败次数指数退避；所以同名账号在别的 IP 上被撞库不会锁死本 IP 的正确口令，未知与已知账号的 `retry_after` 口径一致（不构成账号枚举信号），管理员账号豁免。429 拒绝本身不计入失败窗口，客户端重试不会把冷却永远续期。阈值：`UNIFIED_LOGIN_MAX_FAILURES`（默认 5）、`UNIFIED_LOGIN_WINDOW_SEC`（默认 900）、`UNIFIED_LOGIN_COOLDOWN_SEC`（默认 60）、`UNIFIED_LOGIN_COOLDOWN_MAX_SEC`（默认 3600，指数退避的上限）。
 
 ### `POST /api/logout`
 
@@ -433,7 +437,7 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 
 ### `GET /api/providers`（登录）
 
-返回 14 家 provider 的公共信息列表（其中 3 家 `ready`、11 家 `needs_config`，逐家卡点见 [PROVIDERS.md](PROVIDERS.md#就绪状态)），每项字段：
+返回 14 家 provider 的公共信息列表（`readiness` 由已存配置与上次探测结果动态推导；静态 `ProviderSpec` 在本次对账时全部为 `needs_config`，逐家卡点见 [PROVIDERS.md](PROVIDERS.md#就绪状态)；`ready` 只表示配置齐备，**`ready` ≠ 真机跑通**），每项字段：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -455,6 +459,9 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 | `has_api_key` | 是否已配置上游密钥（不回显明文） |
 | `credential_count` / `credentials` | 凭据条数 / 掩码列表（`id`、`label`、`base_url`、`secret_masked`、`sort_order`） |
 | `options` | 已保存的高级配置 dict |
+
+> 2026-11-06 已更正（原句逐字留档）：上一段原写「其中 3 家 `ready`、11 家 `needs_config`」。`opencode` / `qoder` / `trae` 的 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），静态口径下 14 家全部 `needs_config`。注意接口的 `readiness` 字段是动态推导（`apps/control/app/registry.py:358-370`），配置好凭据并探活成功后可显示 `ready`；`ready` 语义统一为「配置齐备、填 key 能调用」，**不等于真机跑通**，字段说明 `:455` 的取值仍为 `ready` / `needs_config`。
+> 误判后果：按旧句会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障；也会让前端「服务商」页的 readiness 展示与接口实际值对不上。
 
 ### `PATCH /api/providers/{provider_id}`（管理员）
 
@@ -533,6 +540,9 @@ OpenAI Responses 协议转发，鉴权、模型解析、日志、错误码与 `/
 ### `GET /api/accounts/capabilities`（登录）
 
 每家 provider 的账号管理能力清单，前端据此决定画哪些按钮、哪些家只给「账号在哪里管理」的说明。能力以**适配器实际覆写**为准而不是 spec 声明位（`trae_sidecar` 声明了 oauth/credits 但方法未覆写，按声明画按钮点下去就是 501）。
+
+> 2026-11-06 已更正（原句逐字留档）：上段括注「`trae_sidecar` 声明了 oauth/credits 但方法未覆写」已不符——`apps/control/app/adapters/trae_sidecar.py:23-32` 的 `oauth` / `checkin` / `credits` 均为 `False`，且该适配器只有 `__init__`（`:43`）。能力判定仍以 `apps/control/app/routers/accounts.py:25-42` 的 `_account_ops`（按 `_implements` 与能力位组合）为准，前端按 `ops` 画按钮的结论不变。
+> 误判后果：照旧括注会去补适配器方法或改能力位，实际是本来就不声明、账号能力留在 sidecar；补方法反而会越过许可证/进程边界。
 
 返回 `{"providers": [{id, label, enabled, status, readiness, requires, managed, ops}]}`：
 

@@ -43,10 +43,15 @@ cp .env.example .env
 | `UNIFIED_MODEL_FALLBACK_FIRST` | `0` | 未知模型名是否兜底到首家启用的、支持该端点能力位的 provider | 默认 `0`：404 `model_not_found`（严格模式）；设 `1` 恢复旧行为，只影响「一家都没命中」，多家命中仍是 400 `ambiguous_model` |
 | `UNIFIED_FAILURE_WINDOW_SEC` | `60` | 失败请求滑动窗口长度（秒） | 与下面一项同时 `> 0` 才生效；任一项为 `0` 即关闭失败限流 |
 | `UNIFIED_FAILURE_WINDOW_MAX` | `20` | 窗口内失败请求上限（按密钥计数） | 同上；调高可减少误伤，调低更早拦截刷量 |
+| `UNIFIED_LOGIN_MAX_FAILURES` | `5` | `/api/login` 窗口内失败上限（按来源 IP + 用户名计数） | 调大可减少共享出口 IP 的误伤，调小更早拦截撞库 |
+| `UNIFIED_LOGIN_WINDOW_SEC` | `900` | 登录失败滑动窗口长度（秒） | 与上一项配合；超过上限后的冷却从最后一次失败起算 |
+| `UNIFIED_LOGIN_COOLDOWN_SEC` | `60` | 首次冷却基数（秒） | 超限后按失败次数翻倍退避，这是第一档时长 |
+| `UNIFIED_LOGIN_COOLDOWN_MAX_SEC` | `3600` | 冷却上限（秒） | 退避不会超过这个值；管理员账号始终豁免 |
 | `UNIFIED_HOST` | `127.0.0.1` | 控制面监听地址 | 本机保持回环；容器内由 Dockerfile/compose 固定为 `0.0.0.0` |
 | `UNIFIED_PORT` | `8010` | 控制面监听端口 | 宿主机约定 8010；容器内固定 `8000` |
 | `UNIFIED_ALLOW_PRIVATE_UPSTREAMS` | `false` | 是否放行上游指向环回/私网/链路本地 | 内网 sidecar 场景置 `1`；云元数据地址始终拒绝 |
 | `UNIFIED_SSE_MAX_SECONDS` | `600` | 单请求流式响应最大时长（秒），`0` 不限 | 上游长流被截断时调大 |
+| `UNIFIED_GATEWAY_MAX_BODY_BYTES` | `8388608` | `/v1` JSON 入口单请求体字节上限（下限 1024） | 超限 413 `request_too_large` 且不读进内存；长上下文或大图请求可调大 |
 | `UNIFIED_ENABLE_DOCS` | `false` | 是否开放 `/docs`、`/openapi.json`、`/redoc` | 生产保持 `false` |
 | `UNIFIED_LOG_LEVEL` | `info` | uvicorn 启动日志级别 | 仅 `python -m app.main` 入口读取，`uvicorn` CLI 启动时忽略 |
 | `UNIFIED_LOG_FORMAT` | `text` | 访问日志格式 | 采集系统要 JSON 时设 `json` |
