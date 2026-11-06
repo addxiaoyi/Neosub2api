@@ -42,6 +42,11 @@ class OpenCodeAdapter(ProviderAdapter):
         risk_level="warn",
         risk_note="上游 opencode2api 为 GPL-3.0，只能进程隔离；"
         "主仓实现为按协议 clean-room 重写，不含上游源码。商用前须确认隔离边界。",
+        readiness="needs_config",
+        requires=(
+            "OpenCode Zen/Go 密钥（zen_keys / go_keys，静态无 OAuth 刷新；填 api_key 或 options.extra_keys）",
+            "真实外呼未验证：需带 key 跑通 /v1/models 与 /v1/chat/completions 各一条",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -67,6 +72,29 @@ class OpenCodeAdapter(ProviderAdapter):
     def _attempts(self, key_count: int) -> int:
         configured = int(self.options.get("max_attempts") or 3)
         return max(1, min(configured, 10, max(key_count, 1) * 2))
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        extra = (options or {}).get("extra_keys")
+        if isinstance(extra, str):
+            extra_keys = [part.strip() for part in extra.replace(",", " ").split()]
+        elif isinstance(extra, (list, tuple)):
+            extra_keys = [str(item).strip() for item in extra]
+        else:
+            extra_keys = []
+        if credential_problem:
+            return "needs_config", (credential_problem,)
+        if has_credential or any(key for key in extra_keys):
+            return "ready", ()
+        # 一家都还没填：列出真实卡点，别只报 api_key 而漏掉「外呼未验证」
+        return "needs_config", self.spec.requires
 
     def _client(self, key: str, *, anthropic: bool, timeout: float | None = None) -> UnifiedApiClient:
         headers = dict(self.options.get("extra_headers") or {}) if isinstance(self.options.get("extra_headers"), dict) else {}
@@ -130,8 +158,8 @@ class OpenCodeAdapter(ProviderAdapter):
     async def _discover(self, path: str) -> dict[str, Any]:
         """模型发现与健康探测：设计入口带本地 key，被拒或没配时改走匿名通道。
 
-        上游 /v1/models 匿名直连实测 200（docs/providers/opencode2api.md §4 的匿名请求
-        不保证成功），发现类请求不该被密钥状态挡住；推理调用不走这条兜底。
+        匿名通道不保证成功（docs/providers/opencode2api.md §4），仅作为发现类请求的
+        兜底；推理调用不走这条路径。
         """
         keys = self._keys()
         if keys:

@@ -148,6 +148,11 @@ class TraeAdapter(ProviderAdapter):
         default_base_url=SOLO_HOST,
         capabilities=stub_capabilities(chat=True, models=True),
         protocols=("openai.chat.completions",),
+        readiness="needs_config",
+        requires=(
+            "Trae 登录后的 Cloud-IDE JWT（Trae 客户端登录取 token，填 api_key）",
+            "Work 通道另需 options.channel=work 且账号有积分；stateful 桥未真机验证",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -180,6 +185,33 @@ class TraeAdapter(ProviderAdapter):
             if claims.get(key):
                 return str(claims[key])
         return hashlib.sha256(self._jwt().encode()).hexdigest()[:16]
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        if credential_problem:
+            return "needs_config", (credential_problem,)
+        raw = credential.strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        if not raw:
+            return "needs_config", self.spec.requires
+        parts = raw.split(".")
+        if len(parts) != 3 or not parts[1]:
+            return "needs_config", ("Trae Cloud-IDE JWT 格式不对（应为三段 base64url，从 Trae 客户端登录后复制）",)
+        try:
+            claims = _b64url(parts[1])
+        except ValueError:
+            return "needs_config", ("Trae Cloud-IDE JWT 无法解码（token 可能被截断），请重新复制完整 JWT",)
+        if not claims:
+            return "needs_config", ("Trae Cloud-IDE JWT 的 payload 不是对象，请确认粘贴的是登录 JWT",)
+        return "ready", ()
 
     def _machine_id(self) -> str:
         configured = str(self.options.get("machine_id") or "").strip()
@@ -365,6 +397,15 @@ class TraeAdapter(ProviderAdapter):
         else:
             body.pop("tools", None)
 
+    def _retry_wait(self, reply) -> float | None:
+        """只有上游明确给了 Retry-After 才重试；没给就立即返回，不猜测退避时长。"""
+        raw = (getattr(reply, "headers", None) or {}).get("retry-after")
+        try:
+            wait = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(wait, 30.0))
+
     async def _solo_chat(self, payload: dict[str, Any], *, stream: bool):
         if not self._jwt():
             raise ProviderError(401, "Trae 未配置 JWT（服务商页 api_key 填登录后的 access token）")
@@ -372,6 +413,11 @@ class TraeAdapter(ProviderAdapter):
         model = body["model"]
         client = self._client(self._solo_headers())
         reply = await client.forward(EP_CHAT, body, stream=True)
+        wait = self._retry_wait(reply) if reply.status_code == 429 else None
+        if wait is not None:
+            await reply.aclose()
+            await asyncio.sleep(wait)
+            reply = await client.forward(EP_CHAT, body, stream=True)
         if reply.status_code >= 400:
             text = await self._reply_text(reply)
             code = None

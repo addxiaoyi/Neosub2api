@@ -455,6 +455,11 @@ class QoderAdapter(ProviderAdapter):
         risk_level="safe",
         risk_note="本直连路径为 clean-room 重写（本仓自研 MIT），不复制上游源码，不受上游许可约束；"
         "PolyForm Noncommercial 1.0.0 的非商用限制针对的是 qoder_sidecar，而非本直连路径。",
+        readiness="needs_config",
+        requires=(
+            "Qoder access token（服务商页 api_key；uid 缺省时按 token 派生）",
+            "登录/刷新接口未验证：token 过期只能重新粘贴（refresh_token 仅写入身份字段，可不填）",
+        ),
     )
 
     def __init__(self, settings: Settings, base_url: str = "") -> None:
@@ -512,6 +517,25 @@ class QoderAdapter(ProviderAdapter):
             return configured
         token = self._token()
         return hashlib.sha256(token.encode()).hexdigest()[:16] if token else ""
+
+    def readiness_now(
+        self,
+        *,
+        has_credential: bool,
+        credential_problem: str,
+        last_probe: dict[str, Any] | None,
+        credential: str = "",
+        options: dict[str, Any] | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        if credential_problem:
+            return "needs_config", (credential_problem,)
+        token = credential.strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if not token:
+            return "needs_config", self.spec.requires
+        # uid 缺省可从 token 派生、refresh_token 只参与身份字段，两者都不是直连请求的必要条件
+        return "ready", ()
 
     def _session(self) -> dict[str, Any]:
         token = self._token()

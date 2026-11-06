@@ -9,19 +9,19 @@ from app.adapters.base import ProviderSpec
 
 pytestmark = pytest.mark.providers
 
-# 清单依用户核实结果：needs_config 的 11 家有真实卡点，其余 3 家填好 key/地址即可用
+# 清单依用户核实结果：needs_config 的 14 家都有真实卡点，只有 demo_local 填好地址即可用
 EXPECTED_READINESS = {
     "codebuddy": "needs_config",
     "muse": "needs_config",
     "grok-register": "needs_config",
     "gptgrok": "needs_config",
     "zcode": "needs_config",
-    "opencode": "ready",
+    "opencode": "needs_config",
     "sub2api": "needs_config",
-    "trae": "ready",
+    "trae": "needs_config",
     "trae_sidecar": "needs_config",
     "deepseek_sidecar": "needs_config",
-    "qoder": "ready",
+    "qoder": "needs_config",
     "qoder_sidecar": "needs_config",
     "codar": "needs_config",
     "codar_sidecar": "needs_config",
@@ -40,6 +40,9 @@ EXPECTED_REQUIRES_HINTS = {
     "qoder_sidecar": ("sidecar", "7873"),
     "codar": ("JWT",),
     "codar_sidecar": ("sidecar", "8801"),
+    "opencode": ("api_key", "真实外呼未验证"),
+    "trae": ("Cloud-IDE JWT", "Work"),
+    "qoder": ("access token", "未验证"),
 }
 
 
@@ -192,3 +195,16 @@ def test_patch_base_url_takes_effect(
     restore = admin.patch("/api/providers/codebuddy", json={"base_url": fake_base})
     assert restore.status_code == 200
     assert restore.json()["base_url"] == fake_base
+
+
+def test_provider_options_keep_long_official_system(admin: httpx.Client) -> None:
+    """导入表单要能承载约 10701 字符的官方 system 原文，后端不得截断。"""
+    long_text = "Z" * 10701
+    try:
+        changed = admin.patch("/api/providers/zcode", json={"options": {"official_system": long_text}})
+        assert changed.status_code == 200, f"patch options: {changed.status_code} {changed.text}"
+        listed = _by_id(admin.get("/api/providers").json(), "zcode")
+        assert listed["options"]["official_system"] == long_text
+    finally:
+        # 选项是合并写入，置空串才算真正清掉，别把 10701 字符留给后面的用例
+        admin.patch("/api/providers/zcode", json={"options": {"official_system": ""}})

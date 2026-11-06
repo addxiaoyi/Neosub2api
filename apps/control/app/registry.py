@@ -268,8 +268,22 @@ class ProviderRegistry:
             credentials=credentials,
         )
 
+    def _last_probes(self) -> dict[str, dict[str, Any]]:
+        """最近一次健康探测结果：只读库，用于按配置推导 readiness，渲染时不外呼。"""
+        conn = self.db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT h.provider, h.status, h.error FROM provider_health_checks h JOIN ("
+                "  SELECT provider, MAX(id) AS id FROM provider_health_checks GROUP BY provider"
+                ") m ON h.id = m.id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {row["provider"]: {"status": row["status"], "error": row["error"]} for row in rows}
+
     def list_public(self) -> list[dict[str, Any]]:
         rows, configs, grouped = self._snapshot()
+        probes = self._last_probes()
         out: list[dict[str, Any]] = []
         for pid, adapter in self._adapters.items():
             row = rows.get(pid, {})
@@ -301,7 +315,26 @@ class ProviderRegistry:
             item["has_api_key"] = bool(view.api_keys)
             item["credential_count"] = len(view.credentials)
             item["credentials"] = view.public_credentials()
-            item["options"] = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
+            options = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
+            item["options"] = options
+            # readiness 按「已存配置 + 上次探测结果」推导，渲染时绝不外呼：列表要稳，探活要准
+            # 凭据链里可能混着失效的旧行，只有「全部有问题」才算缺配置；坏的首条不能挡住后面的好 key
+            problems = [adapter.credential_problem("api_key", key) for key in view.api_keys]
+            usable_key = next((key for key, problem in zip(view.api_keys, problems) if not problem), "")
+            first_problem = next((problem for problem in problems if problem), "")
+            state, missing = adapter.readiness_now(
+                has_credential=bool(usable_key),
+                credential_problem="" if usable_key else first_problem,
+                last_probe=probes.get(pid),
+                credential=usable_key or (view.api_keys[0] if view.api_keys else ""),
+                options=options,
+            )
+            item["readiness"] = state
+            item["requires"] = list(missing)
+            # 侧车存活探测结果来自 services 的短 TTL 缓存，这里只贴结果、不发请求
+            from .services.sidecar_status import decorate_public
+
+            decorate_public(item)
             out.append(item)
         return out
 
