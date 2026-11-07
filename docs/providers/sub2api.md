@@ -119,3 +119,12 @@ sub2api 是对外暴露「用户 API Key」的 AI 网关，内部维护分组、
 6. 429：分组额度耗尽或账号池无可用账号时返回 429，并写 `sub2_ledger`（`status=429`）。
 7. 管理 API：分组、账号池、流水与重置额度的 CRUD（`/api/sub2api/*`，管理员会话）。
 8. 不做：复合路由注册表、多平台价格表、支付/订阅计划、Gemini 原生路径（后续批次再评估）。
+
+## 8. 明确不做（2026-11-07 拍板）
+
+> 原句逐字留档：「sub2api 实时 —— 不做。」「#5 sub2api 图片异步/tasks/batches 也不做 —— 上游只有 `images/generations|edits`，没有 tasks/batches 端点，本地另造异步语义属自造契约。」
+
+- **实时（Realtime）**：上游只有 `GET /v1/responses` 的 WebSocket 升级说法，不是 OpenAI Realtime 语义；本文 §1 记录的对外端点是 `POST /v1/responses`（HTTP，JSON 或 SSE），本仓适配器也按 HTTP 转发（`apps/control/app/adapters/sub2api.py:241-242`）。本仓没有 WS 入口（`apps/control/app/routers/v1.py` 的路由全为 HTTP，全仓无 `@router.websocket` 注册）。**上游未提供契约，本方不实现；若将来需要，须先有上游一手契约。**
+  误判后果：按「待实现」排期会自建 WS 入口与另一套事件模型，客户端按 OpenAI Realtime 的事件名与会话生命周期对接不会兼容。
+- **图片异步 / tasks / batches（#5）**：§1 端点清单（第 19 行）只有 `/v1/embeddings` 与 `/v1/images/*`，没有 tasks / batches；本仓适配器也只声明并转发 `images_generations` / `images_edits`（`apps/control/app/adapters/sub2api.py:29-30,74,248,251`），没有 `image_task`。**上游未提供契约，本方不实现；不排期。**
+  误判后果：按「待实现」排期会在本地自建任务表与轮询协议（自造契约）；把网关的 `/v1/tasks`（`apps/control/app/routers/v1.py:1608-1664`）当 sub2api 异步图片，则协议不同源，调用方按 sub2api 语义对接拿不到预期的任务视图。

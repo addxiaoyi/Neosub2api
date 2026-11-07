@@ -101,6 +101,7 @@ Grok：**裸 JSON 行**（每行一个对象）；取 `result.response.token` �
   仅保证同一凭证稳定；`options.extra_headers` 可覆盖为真实值。
 - Grok 的 `modeId` 与 `modelName` 组合是否被上游接受未验证。
 - 两通道都没有 token 计数，本仓不返回 `usage`（记账侧按 `usage_missing` 处理）。
+- **grok SSO + 出口 IP 绑定：不做（2026-11-07 拍板）。** 上游只有 README 级说法，没有可核实的一手代码证据——既没有匹配字段，也没有校验周期；本仓凭据只认 `sso` Cookie 串，不做登录态复用或出口 IP 与账号的绑定。**上游未提供契约，本方不实现**，不排期（档位登记见 [FEATURE-GAP.md](../FEATURE-GAP.md) U-07）。误判后果：按「待实现」排期只能照 README 猜字段与校验周期，等于自造协议。
 
 ## 7. 适配器选项（键名沿用代理版）
 
