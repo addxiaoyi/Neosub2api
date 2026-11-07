@@ -304,3 +304,43 @@ class MediaStore:
             items = [rec for rec in self._editable.values() if rec.get("owner") == owner]
         items.sort(key=lambda rec: int(rec.get("updated_at") or 0), reverse=True)
         return [self._editable_view(rec) for rec in items[:MAX_RECORDS]]
+
+    # ---------- 管理台只读/运维 ----------
+
+    async def admin_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
+        """跨归属的任务台账：只给管理台，仍然只回显脱敏后的错误。"""
+        async with self._lock:
+            items = list(self._tasks.values())
+        items.sort(key=lambda rec: int(rec.get("created_at") or 0), reverse=True)
+        out = []
+        for rec in items[: max(1, min(limit, 200))]:
+            view = self._task_view(rec)
+            view["owner"] = str(rec.get("owner") or "")
+            out.append(view)
+        return out
+
+    async def admin_editable(self, limit: int = 100) -> list[dict[str, Any]]:
+        async with self._lock:
+            items = list(self._editable.values())
+        items.sort(key=lambda rec: int(rec.get("updated_at") or 0), reverse=True)
+        return [self._editable_view(rec) for rec in items[: max(1, min(limit, 200))]]
+
+    async def queue_stats(self) -> dict[str, int]:
+        async with self._lock:
+            items = list(self._tasks.values())
+        stats = {"total": len(items), "queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
+        for rec in items:
+            status = str(rec.get("status") or "")
+            if status in stats:
+                stats[status] += 1
+        return stats
+
+    async def cancel_any(self, tid: str) -> dict[str, Any] | None:
+        async with self._lock:
+            rec = self._tasks.get(tid)
+            if not rec or rec.get("status") in TERMINAL:
+                return None
+            rec["status"] = "cancelled"
+            rec["updated_at"] = _now()
+            await self._save()
+            return {"cancelled": True, "id": tid}

@@ -6,8 +6,10 @@ from pydantic import BaseModel
 from ..adapters.base import ProviderError
 from ..security import admin_user, audit_event, current_user
 from ..services import sidecar_status
+from . import provider_console
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
+router.include_router(provider_console.router)
 
 
 class ProviderPatch(BaseModel):

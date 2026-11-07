@@ -169,6 +169,25 @@ class ZcodeClaimService:
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, target)
 
+    def describe(self, now: datetime.datetime | None = None, *, adapter: Any = None) -> dict[str, Any]:
+        """管理台只读快照：开关、端点是否配置、本轮是否该领、已领周次与指纹。"""
+        target = adapter if adapter is not None else self._adapter
+        options = (getattr(target, "options", None) or {}) if target is not None else {}
+        state = self._read_state()
+        claimed = state["claimed"]
+        stamps = [str(item) for item in claimed.values() if isinstance(item, str)]
+        return {
+            "enabled": _as_bool(options.get("weekend_claim"), False),
+            "path_configured": bool(_claim_path(options)),
+            "due": self.due(now, adapter=target),
+            "claimed_count": len(claimed),
+            "last_week": max(stamps) if stamps else "",
+            "entries": [
+                {"fingerprint": fingerprint, "week": str(week)[:32]}
+                for fingerprint, week in list(claimed.items())[:20]
+            ],
+        }
+
     def due(self, now: datetime.datetime | None = None, *, adapter: Any = None) -> bool:
         target = adapter if adapter is not None else self._adapter
         if target is None:

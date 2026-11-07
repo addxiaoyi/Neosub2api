@@ -198,19 +198,24 @@ def book(
 def list_tasks(
     conn: sqlite3.Connection,
     *,
+    provider: str | None = None,
     status: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     if status is not None and status not in STATUSES:
         raise VideoTaskError(f"status 必须是 {'/'.join(STATUSES)}")
     limit = max(1, min(int(limit), 1000))
-    if status is None:
-        rows = conn.execute(
-            f"SELECT {', '.join(_FIELDS)} FROM video_tasks ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            f"SELECT {', '.join(_FIELDS)} FROM video_tasks WHERE status = ? ORDER BY id DESC LIMIT ?",
-            (status, limit),
-        ).fetchall()
+    where: list[str] = []
+    params: list[Any] = []
+    if provider:
+        where.append("provider = ?")
+        params.append(provider)
+    if status is not None:
+        where.append("status = ?")
+        params.append(status)
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"SELECT {', '.join(_FIELDS)} FROM video_tasks{clause} ORDER BY id DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
     return [dict(row) for row in rows]

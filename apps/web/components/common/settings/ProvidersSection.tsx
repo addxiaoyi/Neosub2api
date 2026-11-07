@@ -37,6 +37,7 @@ import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {GrokRegisterTasks} from '@/components/common/settings/GrokRegisterTasks';
 import {ProviderChecklist} from '@/components/common/settings/ProviderChecklist';
+import {ProviderConsolePanel} from '@/components/common/settings/ProviderConsolePanel';
 import {QoderSessionsPanel} from '@/components/common/settings/QoderSessionsPanel';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
@@ -51,6 +52,19 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+
+// 挂管理台的服务商；其余服务商保持原有展开区不变
+const CONSOLE_PROVIDERS = new Set([
+  'codebuddy',
+  'muse',
+  'gptgrok',
+  'zcode',
+  'trae',
+  'qoder',
+  'qoder_sidecar',
+  'codar',
+  'codar_sidecar',
+]);
 
 interface CredDraft {
   label: string;
@@ -1076,6 +1090,11 @@ export function ProvidersSection() {
 
                         {/* 会话搬运：只挂启用的 qoder_sidecar，admin-only；未启用时整块不出现 */}
                         {p.id === 'qoder_sidecar' && isAdmin && p.enabled && <QoderSessionsPanel />}
+
+                        {/* 管理台：放在既有展开区，不新增顶层导航；viewer 打开是只读态 */}
+                        {CONSOLE_PROVIDERS.has(p.id) && (
+                          <ProviderConsolePanel providerId={p.id} providerLabel={p.label} />
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

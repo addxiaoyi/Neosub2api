@@ -1,6 +1,13 @@
 import axios, {AxiosError} from 'axios';
 import {BASE_PATH} from './base-path';
 import {tp} from './i18n';
+import type {
+  CodebuddyTaskPage,
+  CodebuddyTaskReply,
+  ConsoleActionReply,
+  ConsoleMediaInventory,
+  ProviderConsole,
+} from './provider-console';
 import type {Realm} from './realm-context';
 import type {
   ProviderCredential,
@@ -507,6 +514,46 @@ export const securityApi = {
       '/api/security/login-failures/clear',
       {ip: body.ip ?? '', username: body.username ?? ''},
     ),
+  /** 凭据落库加密现状（admin）：只回计数与开关，不含任何明文/密文片段 */
+  secretAtRest: () => get<SecretAtRest>('/api/security/secret-at-rest'),
+};
+
+export type SecretAtRest = {
+  credentials_total: number;
+  credentials_sealed: number;
+  credentials_plaintext: number;
+  api_keys_total: number;
+  api_keys_sealed: number;
+  api_keys_plaintext: number;
+  undecryptable: number;
+  sessions_plaintext: number;
+  key_configured: boolean;
+  key_state: 'ok' | 'missing' | 'invalid';
+  /** UNIFIED_SECRET_AT_REST_REQUIRED 当前是否为真（改后需重启才影响启动行为） */
+  required: boolean;
+  mode: 'encrypted' | 'plaintext';
+};
+
+/* ── 运行时指标（限流配置的唯一只读出口，admin）────────────── */
+export type RateLimitSnapshot = {
+  window_sec: number;
+  requests_limit: number;
+  concurrency_limit: number;
+  key_rejected: number;
+  concurrency_rejected: number;
+};
+
+export type MetricsSnapshot = {
+  runtime?: {
+    inflight?: number;
+    rate_limit?: RateLimitSnapshot;
+  };
+};
+
+export const metricsApi = {
+  /** 只取 runtime 段；window_seconds 给最小值，避免为了看配置去扫大窗口 */
+  json: (windowSeconds = 60) =>
+    get<MetricsSnapshot>('/api/metrics/json', {window_seconds: windowSeconds}),
 };
 
 /* ── qoder_sidecar 会话搬运（原字节转发，响应保持 sidecar 自有 JSON 壳）── */
@@ -531,6 +578,20 @@ async function postRaw(url: string, body: unknown): Promise<RawSidecarReply> {
     body: typeof r.data === 'string' ? r.data : JSON.stringify(r.data),
   };
 }
+
+/* ── 服务商管理台（只读快照 + 显式运维动作） ─────────── */
+export const providerConsoleApi = {
+  snapshot: (id: string, window = '7d') =>
+    get<ProviderConsole>(`/api/providers/${encodeURIComponent(id)}/console`, {window}),
+  action: (id: string, action: string, extra?: {task?: string; task_id?: string; force?: boolean}) =>
+    post<ConsoleActionReply>(`/api/providers/${encodeURIComponent(id)}/console/actions`, {action, ...extra}),
+  media: (id: string, kind: 'files' | 'editable' = 'files') =>
+    get<ConsoleMediaInventory>(`/api/providers/${encodeURIComponent(id)}/console/media`, {kind}),
+  codebuddyTasks: (limit = 20) =>
+    get<CodebuddyTaskPage>('/api/providers/codebuddy/tasks', {limit}),
+  runCodebuddyTask: (task: string, force = false) =>
+    post<CodebuddyTaskReply>('/api/providers/codebuddy/tasks', {task, force}),
+};
 
 export const qoderSessionsApi = {
   /** 包写到 sidecar 主机的 outPath，本仓不产出可下载文件 */
