@@ -41,6 +41,7 @@ import {TokensPanel} from '@/components/common/settings/TokensPanel';
 import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
 import {ProvidersSection} from '@/components/common/settings/ProvidersSection';
 import {ModelMapTransfer} from '@/components/common/settings/ModelMapTransfer';
+import {SecurityPostureSection} from '@/components/common/settings/SecurityPostureSection';
 import {RuntimeConfigSection} from './RuntimeConfigSection';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
@@ -1145,8 +1146,9 @@ export default function SettingsPage() {
         </div>
 
         {/* ═══ 运行参数（仅 admin） ═══ */}
-        <TabsContent value="runtime" className="mt-4">
+        <TabsContent value="runtime" className="mt-4 space-y-3">
           <RuntimeConfigSection isAdmin={isAdmin} />
+          <SecurityPostureSection isAdmin={isAdmin} />
         </TabsContent>
 
         <TabsContent value="upstream" className="mt-3 space-y-3">
