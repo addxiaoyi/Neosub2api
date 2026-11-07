@@ -444,7 +444,7 @@ export function ProviderConsolePanel({
     );
   }
 
-  const {provider, health, rotation, accounts, credentials, config, usage, logs, features} = data;
+  const {provider, health, rotation, accounts, credentials, config, usage, features} = data;
   const statusTone = provider.ready ? 'secondary' : 'destructive';
 
   return (

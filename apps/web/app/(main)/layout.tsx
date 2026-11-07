@@ -70,14 +70,13 @@ export default function MainLayout({
         <MemoizedManagementBar />
         <div className="flex flex-1 flex-col">
           <div className="@container/main flex flex-1 flex-col gap-2">
-            <div className="flex min-h-0 flex-1 flex-col px-4 pt-12 py-8 sm:px-6 md:px-8 lg:px-12">
+            <div className="flex min-h-0 flex-1 flex-col px-4 pt-12 pb-[var(--dock-safe-area)] sm:px-6 md:px-8 lg:px-12">
               {/*
-                底部安全边距按右下浮动 dock 实际占位算：dock 64px + 首访引导卡 90px
-                共约 154px，移动端留 192px（pb-40 + py-8）保证页尾控件不被盖住；
-                桌面 dock 居中且同为固定占位，维持原 pb-24（128px > dock 80px），
-                不加也不减，避免多出空白或页尾相交。
+                底部安全区统一在布局层留，页面不再各自补 pb：dock 实际高度 64px
+                （--dock-height）+ 离屏间距 16px（DOCK_MARGIN）+ 8px 余量 = 88px，
+                滚到页底时最后一排控件不会被固定 dock 压住。
               */}
-              <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-4 pb-40 md:pb-24 md:gap-6">
+              <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-4 md:gap-6">
                 {/*
                   版本切换固定在右上角：底栏是照 LDC 原样保留的，控件不往那里加。
                   移动端只显示图标（compact），避免窄屏被它占掉一行。

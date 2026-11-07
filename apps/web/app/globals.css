@@ -47,6 +47,12 @@
 
 :root {
   --radius: 0.625rem;
+  /* 固定底栏 dock 的占位尺寸：高度被 ManagementBar 的 h-[var(--dock-height)] 直接引用，
+     离屏间距对应 ManagementBar 的 DOCK_MARGIN。安全区 = 64 + 16 + 8 余量 = 88px，
+     保证滚到页底时最后一排可点元素不会被 dock 压住。 */
+  --dock-height: 4rem;
+  --dock-offset: 1rem;
+  --dock-safe-area: calc(var(--dock-height) + var(--dock-offset) + 0.5rem);
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
