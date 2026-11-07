@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -148,6 +149,28 @@ def _announce_password(settings, *, created: bool) -> None:
         logger.info("管理员口令来自 UNIFIED_ADMIN_PASSWORD")
 
 
+# 对端主动断开在 Windows 上是正常事件（WinError 10053/10054/10058），
+# 只在 asyncio transport 的异常回调里出现，不代表服务端逻辑出错
+_CLIENT_DISCONNECT_ERRORS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+def silence_client_disconnects(loop: asyncio.AbstractEventLoop) -> None:
+    """压掉客户端断连的 Traceback，其余异常原样交给原处理器，诊断信息不丢。"""
+    previous = loop.get_exception_handler()
+
+    def handle(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, _CLIENT_DISCONNECT_ERRORS):
+            logger.debug("客户端已断开连接：%s", exc)
+            return
+        if previous is None:
+            _loop.default_exception_handler(context)
+        else:
+            previous(_loop, context)
+
+    loop.set_exception_handler(handle)
+
+
 def create_app() -> FastAPI:
     # 日志格式在第一个 logger 使用前确定：UNIFIED_LOG_FORMAT=json 时全局换 formatter
     configure_logging()
@@ -179,6 +202,8 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # uvicorn 装自己的异常处理器之后再接一层：只过滤客户端断连，其余照旧
+        silence_client_disconnects(asyncio.get_running_loop())
         if demo_runtime is not None:
             await demo_runtime.seed()
         grok_service.start()
