@@ -10,6 +10,7 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -42,6 +43,11 @@ _TOKEN_SPLIT = re.compile(r"[\s,;]+")
 RETRY_ACTIONS = {NETWORK_STATUS: "rotate", 401: "refresh", 402: "stop", 408: "cool", 429: "cool"}
 # 只认上游显式报出的风控码；靠文案猜会把正常账号打进冷却，宁可漏判也不扩大拦截面
 RESTRICTED_CODES = {"restricted_request", "restricted_request_block", "forbidden_fingerprint", "risk_control_block"}
+# 上游 account_restricted 才是「该请求永久拉黑」的判据，其余风控码只原样透传
+REQUEST_BLOCK_CODE = "account_restricted"
+BLOCKED_REQUEST_MESSAGE = (
+    "该请求曾触发 403 账号受限，已列入请求黑名单；可在设置 → 调度与换号中清空黑名单"
+)
 
 
 def _retryable(status: int) -> str:
@@ -51,11 +57,46 @@ def _retryable(status: int) -> str:
     return RETRY_ACTIONS.get(status, "")
 
 
+def request_fingerprint(path: str, payload: dict[str, Any] | None) -> str:
+    """请求指纹：接口路径 + 原始 JSON 参数（键有序、去空白），不含鉴权头与凭据。"""
+    raw = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(f"{path}\n{raw}".encode("utf-8")).hexdigest()
+
+
+class _RequestBlocklist:
+    """403 账号受限的请求黑名单：只存指纹与元数据，不存请求体与凭据。
+
+    上游落盘到 data 目录并提供清空端点；本适配器没有 data 目录也没有管理端点
+    （改路由属于另一路），因此仅进程内保存，通过 `clear_request_blocks()` 手动清空。
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[str, dict[str, Any]] = {}
+
+    def has(self, fingerprint: str) -> bool:
+        return fingerprint in self._items
+
+    def add(self, fingerprint: str, path: str, model: str, reason: str) -> bool:
+        if fingerprint in self._items:
+            return False
+        self._items[fingerprint] = {"path": path, "model": model, "reason": reason, "at": int(time.time())}
+        return True
+
+    def clear(self) -> int:
+        removed = len(self._items)
+        self._items = {}
+        return removed
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"count": len(self._items), "items": [dict(row, fingerprint=key) for key, row in self._items.items()]}
+
+
 def _restricted_signal(status: int, body: bytes, headers, extra_codes) -> str:
-    """命中则返回上游码，否则空串；只读显式 code 字段，不猜 message 文案。
+    """命中则返回上游码，否则空串；只读显式 code/type 字段，不猜 message 文案。
 
     headers 留给后续按响应头判定，当前上游只会把风控码放在 JSON 体里。状态码先卡
-    400 以上：成功响应里出现同名字段不该触发短路。
+    400 以上：成功响应里出现同名字段不该触发短路。字段位置对齐上游 `restriction()`：
+    顶层、`detail`、`error`、`response.error` 四处，都看 `code` 与 `type`。
     """
     if status < 400:
         return ""
@@ -66,24 +107,28 @@ def _restricted_signal(status: int, body: bytes, headers, extra_codes) -> str:
     else:
         extras = set()
     extras.discard("")
-    codes = RESTRICTED_CODES | extras
+    codes = RESTRICTED_CODES | extras | {REQUEST_BLOCK_CODE}
     try:
         data = json.loads(body or b"")
     except (ValueError, TypeError):
         return ""
     if not isinstance(data, dict):
         return ""
-    candidates: list[Any] = []
-    inner = data.get("error")
-    if isinstance(inner, dict):
-        candidates.append(inner.get("code"))
-    elif isinstance(inner, str):
-        candidates.append(inner)
-    candidates.append(data.get("code"))
-    for value in candidates:
-        code = str(value).strip() if value is not None else ""
-        if code in codes:
-            return code
+    response = data.get("response")
+    candidates: list[Any] = [
+        data,
+        data.get("detail"),
+        data.get("error"),
+        response.get("error") if isinstance(response, dict) else None,
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for field in ("code", "type"):
+            value = candidate.get(field)
+            code = str(value).strip() if value is not None else ""
+            if code in codes:
+                return code
     return ""
 
 
@@ -208,6 +253,8 @@ class CodarAdapter(OpenAICompatAdapter):
         self._config_signature: tuple[str, ...] = ()
         # 账号调度：四档策略 + 冷却表，顺序决定与健康登记都在 services/scheduling.py
         self._scheduler = Scheduler()
+        # 403 account_restricted 的请求黑名单：默认开关关闭，空表等同 no-op
+        self._request_blocks = _RequestBlocklist()
         self._lock = asyncio.Lock()
         super().__init__(settings, base_url)
 
@@ -355,6 +402,18 @@ class CodarAdapter(OpenAICompatAdapter):
             self._tokens[index] = fresh
         return fresh
 
+    def _block_restricted_enabled(self) -> bool:
+        """上游设置项 `restricted_request_block` 的本地开关，默认关闭。"""
+        return _enabled(self.options.get("restricted_request_block", False))
+
+    def request_blocks(self) -> dict[str, Any]:
+        """请求黑名单快照（只含指纹与元数据，可直接进健康/诊断输出）。"""
+        return self._request_blocks.snapshot()
+
+    def clear_request_blocks(self) -> int:
+        """清空请求黑名单，返回清掉的条数；对应上游 /request-blocklist/clear。"""
+        return self._request_blocks.clear()
+
     async def _forward_with_tokens(
         self,
         path: str,
@@ -365,6 +424,10 @@ class CodarAdapter(OpenAICompatAdapter):
         session_payload: dict[str, Any] | None = None,
     ):
         # session_payload 是客户端原始请求体：chat 转发前会改写成上游格式，会话字段只在这里可读
+        # 黑名单判据同上游：接口路径 + 客户端原始 JSON（不含鉴权头），命中即拒绝，不再转发
+        block_restricted = self._block_restricted_enabled()
+        request_id = request_fingerprint(path, session_payload) if block_restricted else ""
+        model = str((session_payload or payload or {}).get("model") or "")
         plan = await self._rotation(session_payload)
         if not plan.indices:
             raise ProviderError(
@@ -383,6 +446,9 @@ class CodarAdapter(OpenAICompatAdapter):
         last_reply = None
         last_error: ProviderError | None = None
         while plan.indices and attempts < MAX_TOKEN_ATTEMPTS:
+            # 每轮尝试前重查：同一请求一旦被拉黑，后续账号都不再转发
+            if request_id and self._request_blocks.has(request_id):
+                raise ProviderError(403, BLOCKED_REQUEST_MESSAGE)
             index = plan.indices.pop(0)
             attempts += 1
             token = await self._current_token(index)
@@ -414,6 +480,13 @@ class CodarAdapter(OpenAICompatAdapter):
                     restricted,
                     reply.status_code,
                 )
+                # 上游语义：403 + account_restricted ⇒ 账号登记受限 + 请求拉黑 + 不换号。
+                # 本地账号侧只有既有冷却表（无永久 restricted），用 403 冷却代替；
+                # 开关关闭时不登记，保持「403 原样透传」的既有行为。
+                if block_restricted and reply.status_code == 403 and restricted == REQUEST_BLOCK_CODE:
+                    await self._scheduler.note_failure(token, reply.status_code)
+                    if self._request_blocks.add(request_id, path, model, restricted):
+                        logger.warning("Codar 请求拉黑 path=%s model=%s", path, model)
                 return reply
             action = _retryable(reply.status_code)
             if not action:

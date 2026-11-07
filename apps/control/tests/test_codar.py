@@ -193,3 +193,83 @@ async def test_health(fake_base: str, tmp_path: Path) -> None:
     missing = await _adapter(fake_base, tmp_path).health()
     assert missing["connected"] is False
     assert "未配置" in missing["error"]
+
+
+# ---------- 403 账号受限：请求黑名单 ----------
+
+
+def test_request_fingerprint_ignores_key_order_but_not_path() -> None:
+    """指纹只认「路径 + 键有序的 JSON」：换顺序同一条，换路径就是另一条。"""
+    path = "/v1/chat/completions"
+    assert codar.request_fingerprint(path, {"model": "m", "messages": []}) == codar.request_fingerprint(
+        path, {"messages": [], "model": "m"}
+    )
+    assert codar.request_fingerprint(path, {"model": "m"}) != codar.request_fingerprint(
+        "/v1/messages", {"model": "m"}
+    )
+    assert codar.request_fingerprint(path, {}) == codar.request_fingerprint(path, None)
+
+
+def test_restricted_signal_reads_same_field_paths_as_upstream() -> None:
+    """上游 restriction() 看顶层 / detail / error / response.error 的 code 与 type。"""
+    assert codar._restricted_signal(403, b'{"detail":{"type":"account_restricted"}}', {}, None) == "account_restricted"
+    assert codar._restricted_signal(
+        403, b'{"response":{"error":{"code":"account_restricted"}}}', {}, None
+    ) == "account_restricted"
+    assert codar._restricted_signal(403, b'{"code":"account_restricted"}', {}, None) == "account_restricted"
+    # 成功响应里出现同名字段不该短路
+    assert codar._restricted_signal(200, b'{"code":"account_restricted"}', {}, None) == ""
+    assert codar._restricted_signal(403, b'{"code":403}', {}, None) == ""
+    assert codar._restricted_signal(403, None, {}, None) == ""
+
+
+async def test_restricted_403_keeps_passthrough_when_switch_off(fake_base: str, tmp_path: Path) -> None:
+    """默认开关关闭：原样透传、不登记黑名单（空表即 no-op）。"""
+    adapter = _adapter(fake_base, tmp_path, api_key="codar-forbidden")
+    reply = await adapter.chat_completion(
+        {"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]}, stream=False
+    )
+    assert reply.status_code == 403
+    assert adapter.request_blocks()["count"] == 0
+
+
+async def test_restricted_403_blocks_same_request_when_enabled(fake_base: str, tmp_path: Path) -> None:
+    adapter = _adapter(
+        fake_base, tmp_path, api_key="codar-forbidden", options={"restricted_request_block": True}
+    )
+    body = {"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]}
+    reply = await adapter.chat_completion(body, stream=False)
+    assert reply.status_code == 403
+
+    snapshot = adapter.request_blocks()
+    assert snapshot["count"] == 1
+    row = snapshot["items"][0]
+    assert row["path"] == "/v1/chat/completions"
+    assert row["model"] == "fake-chat-1"
+    assert row["reason"] == "account_restricted"
+    # 指纹本身就是黑名单 key：同一请求再发 = 直接 403，不再打上游
+    assert snapshot["items"][0]["fingerprint"] == codar.request_fingerprint("/v1/chat/completions", body)
+
+    with pytest.raises(ProviderError) as caught:
+        await adapter.chat_completion(body, stream=False)
+    assert caught.value.status_code == 403
+    assert "黑名单" in caught.value.message
+    assert adapter.request_blocks()["count"] == 1
+
+    # 换了请求体就是另一条请求，不连带拦
+    other = await adapter.chat_completion(
+        {"model": "fake-chat-1", "messages": [{"role": "user", "content": "other"}]}, stream=False
+    )
+    assert other.status_code == 403
+    assert adapter.request_blocks()["count"] == 2
+
+
+async def test_clear_request_blocks(fake_base: str, tmp_path: Path) -> None:
+    adapter = _adapter(
+        fake_base, tmp_path, api_key="codar-forbidden", options={"restricted_request_block": True}
+    )
+    await adapter.chat_completion(
+        {"model": "fake-chat-1", "messages": [{"role": "user", "content": "hi"}]}, stream=False
+    )
+    assert adapter.clear_request_blocks() == 1
+    assert adapter.request_blocks()["count"] == 0

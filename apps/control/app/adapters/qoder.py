@@ -13,16 +13,24 @@ import hashlib
 import json
 import logging
 import os
+import random
+import secrets
+import sys
 import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlencode
 
 from ..config import Settings
+from ..net_guard import UpstreamAddressError, guard_upstream_url
 from ..services.rotation import (
     MODEL_RATE_LIMIT_COOLDOWN,
     CredentialPool,
+    Pick,
     RotationStore,
     fingerprint,
     pick_in_group,
@@ -44,6 +52,12 @@ REGIONS: dict[str, dict[str, Any]] = {
         "client_id": "1c5e33e1-364d-4ce6-b02c-acaa81274a5c",
         "user_agent": "QoderWork/1.1.64",
         "workbuddy": "https://copilot.tencent.com",
+        "domain": "qoder.com.cn",
+        "redirect_uri": "qoder-work-cn://",
+        "send_redirect_uri": True,
+        "nonce_dashed": True,
+        "cli_home_dir": ".qoder-cn",
+        "desktop_app_dir": "com.qodercn.app.stable",
     },
     "global": {
         "website": "https://qoder.com",
@@ -53,6 +67,12 @@ REGIONS: dict[str, dict[str, Any]] = {
         "client_id": "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
         "user_agent": "Qoder/1.1.64",
         "workbuddy": "https://www.workbuddy.ai",
+        "domain": "qoder.com",
+        "redirect_uri": "qoder://aicoding.aicoding-agent/login-success",
+        "send_redirect_uri": False,
+        "nonce_dashed": False,
+        "cli_home_dir": ".qoder",
+        "desktop_app_dir": "com.qoder.app.stable",
     },
 }
 
@@ -317,6 +337,234 @@ def machine_identity(uid: str) -> dict[str, str]:
     }
 
 
+# ---------- OAuth 设备授权（PKCE S256） ----------
+#
+# 走设备流而不是本地回调：官方客户端回跳用的是自定义 scheme（国内 qoder-work-cn://、
+# 国际 qoder://aicoding.aicoding-agent/login-success），由官方客户端注册成系统协议处理器；
+# 本仓不注册任何协议、也收不到那条回跳。设备流只「发起授权 → 用户在任意浏览器确认 →
+# 轮询换令牌」，全程不需要本仓被回调。
+#
+# 两区差异（client_id / 授权页域 / 是否带 redirect_uri / nonce 形态）全部查 REGIONS 表，
+# 不写 `if region == "cn"` 分支。
+
+OAUTH_TIMEOUT_SECONDS = 600
+VERIFIER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+VERIFIER_LEN = 64
+
+EP_DEVICE_TOKEN_POLL = "/api/v1/deviceToken/poll"
+EP_DEVICE_TOKEN_REFRESH = "/api/v1/deviceToken/refresh"
+EP_JOB_TOKEN_REFRESH = "/api/v1/jobToken/refresh"
+EP_JOB_TOKEN_EXCHANGE = "/api/v1/jobToken/exchange"
+EP_USERINFO = "/api/v1/userinfo"
+
+FALLBACK_EXPIRY_DEVICE_SECS = 30 * 86_400
+FALLBACK_EXPIRY_JOB_SECS = 24 * 3_600
+
+# 刷新按**令牌前缀**路由，不按区域：拿错端点会得到 401 而不是静默失败
+TOKEN_PREFIXES = (
+    ("drt-", "device_refresh"),
+    ("jrt-", "job_refresh"),
+    ("dt-", "device_access"),
+    ("jt-", "job_access"),
+    ("pt-", "personal"),
+)
+ACCEPT_ANY = "application/json, text/plain, */*"
+
+
+def pkce_pair() -> tuple[str, str]:
+    """PKCE：(64 字符 verifier, BASE64URL_NOPAD(SHA256(verifier))) —— 去 padding。"""
+    verifier = "".join(secrets.choice(VERIFIER_ALPHABET) for _ in range(VERIFIER_LEN))
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return verifier, challenge
+
+
+def nonce_for(region: str) -> str:
+    """按区域生成 nonce：国内带横线 uuid，国际 32 位无横线 hex。"""
+    value = uuid.uuid4()
+    return str(value) if REGIONS[region]["nonce_dashed"] else value.hex
+
+
+def build_authorize_url(region: str, machine_id: str, nonce: str, challenge: str) -> str:
+    """授权页地址；国内额外带 redirect_uri（两区实测差异）。
+
+    值不做 URL 编码：全部是本文件生成的 uuid / base64url（天然安全字符集）或区域表里的
+    字面值，与官方客户端的拼串口径一致。
+    """
+    info = REGIONS[region]
+    query = (
+        f"challenge={challenge}&challenge_method=S256&nonce={nonce}"
+        f"&client_id={info['client_id']}&machine_id={machine_id}"
+    )
+    if info["send_redirect_uri"]:
+        query += f"&redirect_uri={info['redirect_uri']}"
+    return f"{info['website']}/device/selectAccounts?{query}"
+
+
+def token_kind(token: str) -> str:
+    """令牌家族（fail-closed：空串 / 含空白 / 认不出前缀 ⇒ 空串，不猜）。"""
+    value = str(token or "")
+    if not value or any(char.isspace() for char in value):
+        return ""
+    for prefix, kind in TOKEN_PREFIXES:
+        if value.startswith(prefix):
+            return kind
+    return ""
+
+
+# ---------- 账号选择策略：对齐上游 account_strategy.rs 的五档 ----------
+#
+# 上游五档 ↔ 本地调度档位（services/scheduling.py 的 priority / sticky / weighted / failover）：
+#
+#   current     → sticky   ：跟随「当前号」不按权重抽签。本地用轮转组持久化成员 + 会话粘滞表达。
+#   sequential  → sticky   ：一个号用到不能再用才换。与 current 同实现（上游把两档写在同一个
+#                            match 分支里，池空时语义相同）。
+#   pinned      → priority ：指定账号优先。本地没有账号库 id，`account_id` 收凭据原文或其指纹。
+#   random      → weighted ：合格候选内均匀抽签；本地加权随机在均权时就是均匀，上游则完全不看权重。
+#   max_credits → 无        ：需要按账号查实时积分（上游是三次资源查询 + 惰性刷新）；本地既没有
+#                           积分查询端点，也没有确定性的「积分最高」调度档 —— 显式拒绝，不假装实现。
+#
+# 本地 `failover`（游标轮转）在上游没有对应档，属本地扩展。
+ACCOUNT_STRATEGIES = ("current", "pinned", "max_credits", "random", "sequential")
+ACCOUNT_STRATEGY_POLICIES = {
+    "current": "sticky",
+    "sequential": "sticky",
+    "pinned": "priority",
+    "random": "weighted",
+    "max_credits": "",
+}
+DEFAULT_ACCOUNT_STRATEGY = "current"
+MAX_CREDITS_UNSUPPORTED = (
+    "max_credits 本地未实现：缺少按账号查询积分的资源端点，也没有确定性的「积分最高」调度档；"
+    "请改用 current / sequential / pinned / random"
+)
+
+
+def parse_account_strategy(value: Any) -> dict[str, Any]:
+    """解析上游 `account_strategy` 形态：`"current"` 或 `{"kind": "pinned", "account_id": "…"}`。
+
+    缺省（未配置）回落 current，与上游 `#[default] Current` 一致。
+    """
+    if isinstance(value, str):
+        kind, account_id = value.strip().lower(), ""
+    elif isinstance(value, dict):
+        kind = str(value.get("kind") or "").strip().lower()
+        account_id = str(value.get("account_id") or "").strip()
+    else:
+        kind, account_id = "", ""
+    kind = kind or DEFAULT_ACCOUNT_STRATEGY
+    if kind not in ACCOUNT_STRATEGIES:
+        raise ProviderError(
+            400, f"未知的账号选择策略：{kind}（可选 {' / '.join(ACCOUNT_STRATEGIES)}）"
+        )
+    if kind == "pinned" and not account_id:
+        raise ProviderError(400, "pinned 策略必须给 account_id（凭据原文或其指纹）")
+    return {"kind": kind, "account_id": account_id, "policy": ACCOUNT_STRATEGY_POLICIES[kind]}
+
+
+def _oauth_region(region: str) -> str:
+    """区域键规范化；未知区域直接拒绝（不猜默认区，防止凭据落到错误区域）。"""
+    key = str(region or "").strip().lower()
+    if key not in REGIONS:
+        raise ProviderError(400, f"未知的 Qoder 区域：{region}")
+    return key
+
+
+def refresh_plan(credential: dict[str, Any]) -> str:
+    """按凭据形态选刷新路由：device / job / pat-exchange；都没有 ⇒ 空串。"""
+    kind = token_kind(str(credential.get("refresh_token") or ""))
+    if kind == "device_refresh":
+        return "device"
+    if kind == "job_refresh":
+        return "job"
+    if str(credential.get("personal_token") or "").strip():
+        return "pat-exchange"
+    return ""
+
+
+def token_expiry(data: dict[str, Any], fallback_secs: int, now: float | None = None) -> int:
+    """令牌到期（unix 秒）：`expires_in`（上游按毫秒下发）/ `expires_at` / 家族兜底。"""
+    current = time.time() if now is None else now
+    expires_in = data.get("expires_in")
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        return int(current + expires_in / 1000)
+    text = data.get("expires_at")
+    if isinstance(text, str):
+        try:
+            moment = datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            moment = None
+        if moment is not None:
+            return int(moment.timestamp())
+    return int(current + fallback_secs)
+
+
+def credential_state(credential: dict[str, Any], now: float | None = None, window_sec: int = 48 * 3_600) -> str:
+    """凭据状态：unknown（无到期信息）/ expired / expiring（进入提前刷新窗口）/ fresh。"""
+    expires = credential.get("expires_at")
+    if not isinstance(expires, (int, float)) or isinstance(expires, bool) or expires <= 0:
+        return "unknown"
+    remaining = expires / 1000 - (time.time() if now is None else now)
+    if remaining <= 0:
+        return "expired"
+    return "expiring" if remaining < window_sec else "fresh"
+
+
+def _read_trimmed(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _appdata_dir() -> Path:
+    """Electron userData 的父目录：Windows 走 %APPDATA%，macOS 走 Application Support。"""
+    roaming = os.environ.get("APPDATA")
+    if roaming:
+        return Path(roaming)
+    if sys.platform.startswith("darwin"):
+        return Path.home() / "Library" / "Application Support"
+    return Path.home() / ".config"
+
+
+def _json_object(body: bytes | None) -> dict[str, Any] | None:
+    try:
+        data = json.loads(body or b"")
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _response_field(data: dict[str, Any], key: str) -> str:
+    """上游两种信封都兼容：先看顶层，再看 `data` 子对象。"""
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        return value
+    inner = data.get("data")
+    if isinstance(inner, dict) and isinstance(inner.get(key), str):
+        return inner[key]
+    return ""
+
+
+def _flatten_envelope(data: dict[str, Any]) -> dict[str, Any]:
+    """上游把 `data` 子对象摊平后才读 `expires_in/expires_at`，这里同样摊平一层。"""
+    inner = data.get("data")
+    return {**data, **inner} if isinstance(inner, dict) else data
+
+
+class _OAuthSession:
+    """一次登录会话。`verifier` 是 PKCE 秘密：只存内存，不落盘、不进日志、不进结果。"""
+
+    def __init__(self, region: str, verifier: str, nonce: str, expires_at: float) -> None:
+        self.region = region
+        self.verifier = verifier
+        self.nonce = nonce
+        self.expires_at = expires_at
+        self.done = False
+        self.result: dict[str, Any] | None = None
+        self.error = ""
+
+
 class _Reply:
     def __init__(
         self,
@@ -454,17 +702,182 @@ def _tool_call_to_tool_use(call: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_call_to_function_item(call: dict[str, Any]) -> dict[str, Any]:
-    """OpenAI tool_calls 项 → Responses function_call output item。"""
-    fn = call.get("function") or {}
+_NAMESPACE_SEP = "__ns__"
+"""命名空间工具名的分隔符：OpenAI 函数名只允许 `[a-zA-Z0-9_-]`，点号会被上游拒收。"""
+
+_FREEFORM_HINT = (
+    "这是自由格式（freeform）工具：请把完整的原始内容原样放进唯一的 input 字符串参数，"
+    "不要包成 JSON，不要加 markdown 代码块，不要加解释。"
+)
+
+
+def _namespace_of(tool: dict[str, Any]) -> str:
+    """namespace 工具的命名空间：优先 `namespace` 字段，回落 `name`，空串视为无效。"""
+    value = tool.get("namespace")
+    if not isinstance(value, str) or not value:
+        value = tool.get("name")
+    return value if isinstance(value, str) else ""
+
+
+def _mangle_namespaced(namespace: str, name: str) -> str:
+    """`namespace` + 原名 → 上游能接受的扁平函数名。
+
+    若某段本身含分隔符，拼出的名字可能与另一对撞车；此时上游按同名工具处理
+    （`_restore_tool_identity` 只按第一个分隔符拆分，规则确定、可预测）。
+    """
+    return f"{namespace}{_NAMESPACE_SEP}{name}"
+
+
+def _is_freeform(tool: dict[str, Any]) -> bool:
+    kind = tool.get("type")
+    return isinstance(kind, str) and kind.lower() == "custom"
+
+
+def _downgrade_freeform(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """`custom`（freeform）工具 → 单 `input` 字符串参数的 function 工具。
+
+    不降级会被上游静默丢弃：客户端以为工具在，模型却永远调不到。
+    """
+    name = str(tool.get("name") or "")
+    if not name:
+        return None
+    description = str(tool.get("description") or "").strip()
     return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": f"{description}\n\n{_FREEFORM_HINT}".strip(),
+            "parameters": {
+                "type": "object",
+                "properties": {"input": {"type": "string", "description": "该工具的完整原始内容，原样填写。"}},
+                "required": ["input"],
+            },
+        },
+    }
+
+
+def _flatten_namespace_tools(tools: list[Any]) -> list[dict[str, Any]]:
+    """把 `type: "namespace"` 的工具摊平成上游可接受的 function 工具。
+
+    不摊平的后果是整组命名空间工具被静默丢弃（请求 200、回答正常，工具却没了）。
+    同名工具靠扁平名里的命名空间区分。
+    """
+    flat: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "namespace":
+            continue
+        namespace = _namespace_of(tool)
+        nested = tool.get("tools")
+        if not namespace or not isinstance(nested, list):
+            continue
+        for inner in nested:
+            if not isinstance(inner, dict):
+                continue
+            name = str(inner.get("name") or "")
+            if not name:
+                continue
+            converted = _downgrade_freeform(inner) if _is_freeform(inner) else {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": inner.get("description") or "",
+                    "parameters": inner.get("parameters") or {"type": "object", "properties": {}},
+                },
+            }
+            if converted is None:
+                continue
+            converted["function"]["name"] = _mangle_namespaced(namespace, name)
+            flat.append(converted)
+    return flat
+
+
+def _custom_tool_names(tools: Any) -> set[str]:
+    """请求里声明为 freeform 的工具名 —— 出站降级与入站还原共用这一份。
+
+    命名空间里的 freeform 工具，上游回给我们的是扁平名，因此登记 mangled 名。
+    """
+    names: set[str] = set()
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if _is_freeform(tool):
+            name = str(tool.get("name") or "")
+            if name:
+                names.add(name)
+            continue
+        if tool.get("type") != "namespace":
+            continue
+        namespace = _namespace_of(tool)
+        nested = tool.get("tools")
+        if not namespace or not isinstance(nested, list):
+            continue
+        for inner in nested:
+            if not isinstance(inner, dict) or not _is_freeform(inner):
+                continue
+            name = str(inner.get("name") or "")
+            if name:
+                names.add(_mangle_namespaced(namespace, name))
+    return names
+
+
+def _restore_tool_identity(item: dict[str, Any], mangled: str) -> None:
+    """出站：扁平名还原成 `name` + `namespace`；不含分隔符的名字原样不动。
+
+    只给扁平名，客户端认不出是哪个命名空间的工具。
+    """
+    namespace, sep, name = mangled.partition(_NAMESPACE_SEP)
+    if not sep:
+        return
+    item["name"] = name
+    item["namespace"] = namespace
+
+
+def _upstream_tool_name(item: dict[str, Any]) -> str:
+    """入站历史项的工具名 → 上游函数名：带 `namespace` 的必须拼回扁平名。
+
+    客户端回传的历史项是「原名 + namespace 字段」（我们出站时还原过）；
+    不拼回去，下一轮发给上游的 `tool_calls.function.name` 与工具清单对不上。
+    """
+    name = str(item.get("name") or "")
+    namespace = item.get("namespace")
+    if isinstance(namespace, str) and namespace:
+        return _mangle_namespaced(namespace, name)
+    return name
+
+
+def _unwrap_freeform_input(arguments: str) -> str:
+    """从 `{"input": …}` 参数里取回 freeform 原文（取不到就原样返回）。"""
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        return arguments
+    if isinstance(parsed, dict):
+        inner = parsed.get("input")
+        if inner is None:
+            return arguments
+        return inner if isinstance(inner, str) else json.dumps(inner, ensure_ascii=False)
+    return parsed if isinstance(parsed, str) else arguments
+
+
+def _tool_call_to_output_item(call: dict[str, Any], custom: set[str]) -> dict[str, Any]:
+    """OpenAI tool_calls 项 → Responses output item（freeform 还原成 custom_tool_call）。"""
+    fn = call.get("function") or {}
+    name = str(fn.get("name") or "")
+    raw = str(fn.get("arguments") or "")
+    item: dict[str, Any] = {
         "id": f"fc_{uuid.uuid4().hex[:24]}",
-        "type": "function_call",
         "call_id": str(call.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
-        "name": str(fn.get("name") or ""),
-        "arguments": str(fn.get("arguments") or ""),
+        "name": name,
         "status": "completed",
     }
+    if name in custom:
+        item.update({"type": "custom_tool_call", "input": _unwrap_freeform_input(raw)})
+    else:
+        item.update({"type": "function_call", "arguments": raw})
+    _restore_tool_identity(item, name)
+    return item
 
 
 @dataclass(frozen=True)
@@ -544,6 +957,8 @@ class QoderAdapter(ProviderAdapter):
         self._pool = CredentialPool()
         self._store = RotationStore(getattr(settings, "db_path", None))
         self._active: ContextVar[_Account | None] = ContextVar("qoder_active_account", default=None)
+        # 设备授权会话：verifier/nonce 只活在内存里，进程重启即作废（重新发起即可）
+        self._oauth_logins: dict[str, _OAuthSession] = {}
         super().__init__(base_url)
 
     # ---------- 账号 ----------
@@ -584,6 +999,249 @@ class QoderAdapter(ProviderAdapter):
     def _attempts(self, key_count: int) -> int:
         configured = int(self.options.get("max_attempts") or 3)
         return max(1, min(configured, 10, max(key_count, 1) * 2))
+
+    # ---------- 账号选择（五档策略） ----------
+
+    def _account_strategy(self) -> dict[str, Any] | None:
+        """未配置策略时返回 None：保持既有「组粘滞 → 权重 → 游标」行为不变。"""
+        raw = self.options.get("account_strategy")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        return parse_account_strategy(raw)
+
+    def _selection_weights(self, strategy: dict[str, Any] | None) -> Any:
+        """上游 random / pinned / sequential 都不看权重，配了也要忽略。"""
+        if strategy and strategy["kind"] in ("random", "pinned", "sequential"):
+            return None
+        return self.options.get("key_weights")
+
+    async def _pick(self, strategy: dict[str, Any], keys: list[str], sticky: str, model: str) -> Pick | None:
+        kind = strategy["kind"]
+        if kind == "max_credits":
+            raise ProviderError(400, MAX_CREDITS_UNSUPPORTED)
+        if kind == "pinned":
+            target = strategy["account_id"]
+            chosen = next(
+                (key for key in keys if key == target or fingerprint(key) == target), None
+            )
+            if chosen is None:
+                raise ProviderError(
+                    401, "pinned 指定的账号不在凭据池中：请重新指定，或改回 current"
+                )
+            await self._pool.touch(chosen)
+            return Pick(chosen, keys.index(chosen), "pinned", note="pinned 指定账号")
+        if kind == "random":
+            available = await self._pool.available(keys, model=model) or list(keys)
+            chosen = random.choice(available)
+            await self._pool.touch(chosen)
+            return Pick(chosen, keys.index(chosen), "random", note="合格候选内均匀抽签")
+        return await pick_in_group(
+            self._pool, self._store, provider="qoder", group=self._group(), keys=keys,
+            sticky_key=sticky, model=model,
+        )
+
+    # ---------- OAuth 登录（设备流） ----------
+
+    def _oauth_base(self, region: str) -> str:
+        """OAuth 出站基址：默认取区域表，允许 options 覆盖（内网/联调），两者都过出站守卫。"""
+        key = _oauth_region(region)
+        override = str(self.options.get("oauth_openapi_base") or "").strip()
+        field = "options.oauth_openapi_base" if override else "REGIONS.openapi"
+        try:
+            url = guard_upstream_url(
+                override or REGIONS[key]["openapi"],
+                allow_private=getattr(self._settings, "allow_private_upstreams", False),
+                provider="qoder",
+                field=field,
+            )
+        except UpstreamAddressError as exc:
+            raise ProviderError(400, f"OAuth 端点未通过出站守卫：{exc}") from exc
+        if not url:
+            raise ProviderError(400, "OAuth 端点为空，未通过出站守卫")
+        return url
+
+    def _oauth_client(self, region: str, token: str = "") -> UnifiedApiClient:
+        return UnifiedApiClient(
+            self._oauth_base(region),
+            api_key=token,
+            timeout=15.0,
+            extra_headers={"user-agent": REGIONS[region]["user_agent"]},
+        )
+
+    def _machine_id(self, region: str) -> str:
+        """设备身份：官方 CLI 文件 → 桌面端 auth.machine-id → 本仓落盘值 → 生成并落盘。
+
+        上游把 machine_id 落盘且写失败即硬失败；这里保持同样的「不降级」，
+        否则每次登录都会生成新设备，账号侧会看到一串陌生设备。
+        """
+        info = REGIONS[region]
+        store_dir = Path(self._settings.data_dir) / "qoder"
+        candidates = (
+            Path.home() / info["cli_home_dir"] / ".auth" / "machine_id",
+            _appdata_dir() / info["desktop_app_dir"] / "auth.machine-id",
+            store_dir / f"oauth_machine_id.{region}.txt",
+        )
+        for path in candidates:
+            value = _read_trimmed(path)
+            if value:
+                return value
+        generated = str(uuid.uuid4())
+        try:
+            store_dir.mkdir(parents=True, exist_ok=True)
+            (store_dir / f"oauth_machine_id.{region}.txt").write_text(generated, encoding="utf-8")
+        except OSError as exc:
+            raise ProviderError(500, f"OAuth 设备身份落盘失败（{store_dir}）：{exc}") from exc
+        return generated
+
+    def login_start(self, region: str = "cn") -> dict[str, Any]:
+        """发起设备授权：只返回授权页与会话号，不建本地回调、不监听端口。"""
+        key = _oauth_region(region)
+        verifier, challenge = pkce_pair()
+        nonce = nonce_for(key)
+        login_id = f"qoder_{uuid.uuid4().hex}"
+        self._oauth_logins[login_id] = _OAuthSession(
+            region=key, verifier=verifier, nonce=nonce, expires_at=time.time() + OAUTH_TIMEOUT_SECONDS
+        )
+        return {
+            "loginId": login_id,
+            "verificationUri": build_authorize_url(key, self._machine_id(key), nonce, challenge),
+            "expiresIn": OAUTH_TIMEOUT_SECONDS,
+        }
+
+    def login_cancel(self, login_id: str) -> bool:
+        return self._oauth_logins.pop(str(login_id), None) is not None
+
+    async def login_poll(self, region: str, login_id: str) -> dict[str, Any]:
+        """轮询一次授权状态：`{"done": False}` 或 `{"done": True, result|error}`。
+
+        幂等：会话一旦 done 就只回放结果，重复轮询不会二次换令牌。
+        """
+        session = self._oauth_logins.get(str(login_id))
+        if session is None:
+            return {"done": True, "error": "登录请求不存在或已取消"}
+        if session.region != _oauth_region(region):
+            return {"done": True, "error": "登录请求与目标版本不匹配"}
+        if session.done:
+            return {"done": True, "result": session.result, "error": session.error}
+        if time.time() > session.expires_at:
+            session.done = True
+            session.error = "登录超时"
+            return {"done": True, "result": None, "error": session.error}
+
+        query = urlencode(
+            {"nonce": session.nonce, "verifier": session.verifier, "challenge_method": "S256"}
+        )
+        client = self._oauth_client(session.region)
+        try:
+            reply = await client.forward(
+                f"{EP_DEVICE_TOKEN_POLL}?{query}", None, stream=False, method="GET", raw=b"", accept=ACCEPT_ANY
+            )
+        except ProviderError:
+            # 网络抖动不算结束：设备流本来就要连续轮询几十次
+            return {"done": False}
+
+        if reply.status_code in (202, 404):
+            return {"done": False}
+        if reply.status_code >= 400:
+            session.done, session.error = True, f"轮询失败: HTTP {reply.status_code} {(reply.body or b'')[:160].decode(errors='replace')}"
+            return {"done": True, "result": None, "error": session.error}
+        data = _json_object(reply.body)
+        if data is None:
+            session.done, session.error = True, "轮询失败: 响应不是合法 JSON"
+            return {"done": True, "result": None, "error": session.error}
+        token = _response_field(data, "token") or _response_field(data, "device_token")
+        if not token:
+            # 一般说明用户尚未完成授权
+            return {"done": False}
+        try:
+            profile = await self._oauth_userinfo(session.region, token)
+        except ProviderError as exc:
+            session.done, session.error = True, str(exc)
+            return {"done": True, "result": None, "error": session.error}
+        uid = _response_field(profile, "uid")
+        if not uid:
+            session.done, session.error = True, "账号身份响应缺少 uid（已拒绝生成空 uid 凭据）"
+            return {"done": True, "result": None, "error": session.error}
+
+        session.done = True
+        session.result = self._oauth_credential(
+            session.region,
+            data,
+            token=token,
+            refresh=_response_field(data, "refresh_token") or _response_field(profile, "refresh_token"),
+            uid=uid,
+            nickname=_response_field(profile, "nickname") or _response_field(profile, "name"),
+        )
+        return {"done": True, "result": session.result, "error": ""}
+
+    async def _oauth_userinfo(self, region: str, token: str) -> dict[str, Any]:
+        client = self._oauth_client(region, token=token)
+        try:
+            reply = await client.forward(
+                EP_USERINFO, None, stream=False, method="GET", raw=b"", accept=ACCEPT_ANY
+            )
+        except ProviderError as exc:
+            raise ProviderError(502, f"拉取账号身份失败: {exc.message}") from exc
+        if reply.status_code >= 400:
+            detail = (reply.body or b"")[:160].decode(errors="replace")
+            raise ProviderError(502, f"拉取账号身份失败: HTTP {reply.status_code} {detail}")
+        data = _json_object(reply.body)
+        if data is None:
+            raise ProviderError(502, "拉取账号身份失败: 响应不是合法 JSON")
+        return data
+
+    def _oauth_credential(
+        self, region: str, data: dict[str, Any], *, token: str, refresh: str, uid: str, nickname: str
+    ) -> dict[str, Any]:
+        """产出一条与「粘贴 token」同形的凭据 JSON，交给既有 provider_credentials 落库。
+
+        适配器不碰数据库：这里只产出凭据，落库由 management 层调用既有凭据接口完成。
+        """
+        return {
+            "access_token": token,
+            "refresh_token": refresh,
+            "expires_at": token_expiry(_flatten_envelope(data), FALLBACK_EXPIRY_DEVICE_SECS) * 1000,
+            "uid": uid,
+            "nickname": nickname,
+            "region": region,
+            "domain": REGIONS[region]["domain"],
+        }
+
+    async def refresh_credential(self, credential: str | dict[str, Any], region: str = "cn") -> dict[str, Any]:
+        """刷新一条 OAuth 凭据，返回**新凭据 JSON**；不回写，落库仍由调用方走既有接口。"""
+        key = _oauth_region(region)
+        parsed: Any = json.loads(credential) if isinstance(credential, str) else dict(credential or {})
+        if not isinstance(parsed, dict):
+            raise ProviderError(400, "凭据不是 JSON 对象，无法刷新")
+        plan = refresh_plan(parsed)
+        if not plan:
+            raise ProviderError(400, "这条凭据既没有可用的刷新令牌也没有 PAT，需重新登录或重新导入")
+
+        if plan == "device":
+            endpoint, body = EP_DEVICE_TOKEN_REFRESH, {"refresh_token": parsed["refresh_token"]}
+        elif plan == "job":
+            endpoint, body = EP_JOB_TOKEN_REFRESH, {"refresh_token": parsed["refresh_token"]}
+        else:
+            endpoint, body = EP_JOB_TOKEN_EXCHANGE, {"personal_token": str(parsed["personal_token"]).strip()}
+
+        client = self._oauth_client(key)
+        try:
+            reply = await client.post_json(endpoint, body)
+        except ProviderError as exc:
+            raise ProviderError(exc.status_code, f"刷新令牌失败: {exc.message}") from exc
+
+        token = _response_field(reply, "token") or _response_field(reply, "device_token")
+        if not token:
+            raise ProviderError(502, "刷新响应没有携带新 access token —— 已拒绝回写（不写空令牌）")
+        fallback = FALLBACK_EXPIRY_JOB_SECS if plan != "device" else FALLBACK_EXPIRY_DEVICE_SECS
+        refreshed = dict(parsed)
+        refreshed["access_token"] = token
+        refreshed["refresh_token"] = _response_field(reply, "refresh_token") or str(
+            parsed.get("refresh_token") or ""
+        )
+        refreshed["expires_at"] = token_expiry(_flatten_envelope(reply), fallback) * 1000
+        refreshed.setdefault("region", key)
+        return refreshed
 
     @staticmethod
     def _rotatable(status: int) -> bool:
@@ -658,21 +1316,25 @@ class QoderAdapter(ProviderAdapter):
         keys = self._keys()
         if not keys:
             raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
-        self._pool.set_weights(keys, self.options.get("key_weights"))
+        strategy = self._account_strategy()
+        self._pool.set_weights(keys, self._selection_weights(strategy))
         sticky = sticky_key_from_payload(payload)
         model = self._cooldown_model(payload)
         last: ProviderError | None = None
 
         for _ in range(self._attempts(len(keys))):
-            pick = await pick_in_group(
-                self._pool,
-                self._store,
-                provider="qoder",
-                group=self._group(),
-                keys=keys,
-                sticky_key=sticky,
-                model=model,
-            )
+            if strategy is None:
+                pick = await pick_in_group(
+                    self._pool,
+                    self._store,
+                    provider="qoder",
+                    group=self._group(),
+                    keys=keys,
+                    sticky_key=sticky,
+                    model=model,
+                )
+            else:
+                pick = await self._pick(strategy, keys, sticky, model)
             if pick is None:
                 raise self._all_keys_error(keys, last)
             account = self._account(pick.key)
@@ -1419,7 +2081,8 @@ class QoderAdapter(ProviderAdapter):
                     messages.append({"role": "user", "content": item})
                 elif isinstance(item, dict):
                     kind = item.get("type")
-                    if kind == "function_call":
+                    if kind in ("function_call", "custom_tool_call"):
+                        freeform = kind == "custom_tool_call"
                         messages.append({
                             "role": "assistant",
                             "content": None,
@@ -1427,13 +2090,16 @@ class QoderAdapter(ProviderAdapter):
                                 "id": str(item.get("call_id") or f"call_{uuid.uuid4().hex[:16]}"),
                                 "type": "function",
                                 "function": {
-                                    "name": str(item.get("name") or ""),
-                                    "arguments": str(item.get("arguments") or ""),
+                                    "name": _upstream_tool_name(item),
+                                    "arguments": (
+                                        json.dumps({"input": str(item.get("input") or "")}, ensure_ascii=False)
+                                        if freeform else str(item.get("arguments") or "")
+                                    ),
                                 },
                             }],
                         })
                         continue
-                    if kind == "function_call_output":
+                    if kind in ("function_call_output", "custom_tool_call_output"):
                         inner = item.get("output")
                         if isinstance(inner, str):
                             text = inner
@@ -1497,16 +2163,26 @@ class QoderAdapter(ProviderAdapter):
             for tool in tools:
                 if not isinstance(tool, dict):
                     continue
+                kind = tool.get("type")
+                # namespace 工具不能原样透传，也不能丢：先跳过，末尾统一摊平追加
+                if isinstance(kind, str) and kind.lower() == "namespace":
+                    continue
                 # Responses 的 function 工具是扁平形状（name/parameters 同级），OpenAI 聊天要嵌套
-                if "function" not in tool and tool.get("name") and tool.get("type") in (None, "function"):
+                if "function" not in tool and tool.get("name") and kind in (None, "function"):
                     fn = {
                         key: tool[key]
                         for key in ("name", "description", "parameters", "strict")
                         if tool.get(key) is not None
                     }
                     mapped.append({"type": "function", "function": fn})
-                else:
-                    mapped.append(tool)
+                    continue
+                if _is_freeform(tool):
+                    downgraded = _downgrade_freeform(tool)
+                    if downgraded:
+                        mapped.append(downgraded)
+                    continue
+                mapped.append(tool)
+            mapped.extend(_flatten_namespace_tools(tools))
             if mapped:
                 out["tools"] = mapped
         return out
@@ -1519,13 +2195,14 @@ class QoderAdapter(ProviderAdapter):
         product, model = self._product(model)
         if product != "qoder":
             raise ProviderError(501, f"Qoder 的 {product} 产品线不支持 Responses 协议")
+        freeform = _custom_tool_names(payload.get("tools"))
         reply, _ = await self._run_with_account(
             openai_payload,
             lambda account: self._open_upstream(account, model, region, openai_payload),
             streamed=stream,
         )
         if stream:
-            return _Reply(200, stream=self._render_responses(reply, model), content_type="text/event-stream")
+            return _Reply(200, stream=self._render_responses(reply, model, freeform), content_type="text/event-stream")
         data = await self._collect(reply, model)
         message = data["choices"][0]["message"]
         text = message.get("content") or ""
@@ -1538,7 +2215,7 @@ class QoderAdapter(ProviderAdapter):
             "status": "completed",
             "content": [{"type": "output_text", "text": text, "annotations": []}],
         }]
-        output.extend(_tool_call_to_function_item(call) for call in tool_calls)
+        output.extend(_tool_call_to_output_item(call, freeform) for call in tool_calls)
         body = {
             "id": f"resp_{uuid.uuid4().hex[:20]}",
             "object": "response",
@@ -1554,7 +2231,10 @@ class QoderAdapter(ProviderAdapter):
         }
         return _Reply(200, body=json.dumps(body, ensure_ascii=False).encode())
 
-    async def _render_responses(self, reply, model: str) -> AsyncIterator[bytes]:
+    async def _render_responses(
+        self, reply, model: str, freeform: set[str] | None = None
+    ) -> AsyncIterator[bytes]:
+        freeform = freeform or set()
         resp_id = f"resp_{uuid.uuid4().hex[:20]}"
         item_id = f"msg_{uuid.uuid4().hex[:20]}"
 
@@ -1576,6 +2256,7 @@ class QoderAdapter(ProviderAdapter):
         full: list[str] = []
         # function_call 输出项按 OpenAI tool_calls.index 建，与 message 项（index 0）并列
         fc_items: dict[int, dict[str, Any]] = {}
+        fc_raw: dict[int, str] = {}
         fc_order: list[int] = []
         try:
             async for obj in self._chunks(reply):
@@ -1602,14 +2283,16 @@ class QoderAdapter(ProviderAdapter):
                         args = str(fn.get("arguments") or "")
                         item = fc_items.get(idx)
                         if item is None:
+                            name = str(fn.get("name") or "")
                             item = {
                                 "id": f"fc_{uuid.uuid4().hex[:24]}",
-                                "type": "function_call",
+                                "type": "custom_tool_call" if name in freeform else "function_call",
                                 "call_id": str(call.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
-                                "name": str(fn.get("name") or ""),
-                                "arguments": "",
+                                "name": name,
                                 "status": "in_progress",
                             }
+                            item["input" if name in freeform else "arguments"] = ""
+                            _restore_tool_identity(item, name)
                             fc_items[idx] = item
                             fc_order.append(idx)
                             yield event("response.output_item.added", {
@@ -1618,13 +2301,17 @@ class QoderAdapter(ProviderAdapter):
                                 "item": dict(item),
                             })
                         if args:
-                            item["arguments"] += args
-                            yield event("response.function_call_arguments.delta", {
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": item["id"],
-                                "output_index": fc_order.index(idx) + 1,
-                                "delta": args,
-                            })
+                            fc_raw[idx] = fc_raw.get(idx, "") + args
+                            # freeform 的增量刻意不发：上游给的是 `{"input": …}` 的 JSON 片段，
+                            # 而 custom_tool_call_input.delta 的语义是原文片段，发了客户端会拼出违约内容
+                            if item["type"] != "custom_tool_call":
+                                item["arguments"] += args
+                                yield event("response.function_call_arguments.delta", {
+                                    "type": "response.function_call_arguments.delta",
+                                    "item_id": item["id"],
+                                    "output_index": fc_order.index(idx) + 1,
+                                    "delta": args,
+                                })
         finally:
             await reply.aclose()
         yield event("response.output_text.done", {
@@ -1633,11 +2320,18 @@ class QoderAdapter(ProviderAdapter):
         })
         for position, idx in enumerate(fc_order, start=1):
             item = fc_items[idx]
-            yield event("response.function_call_arguments.done", {
-                "type": "response.function_call_arguments.done",
-                "item_id": item["id"], "output_index": position,
-                "name": item["name"], "arguments": item["arguments"],
-            })
+            if item["type"] == "custom_tool_call":
+                item["input"] = _unwrap_freeform_input(fc_raw.get(idx, ""))
+                yield event("response.custom_tool_call_input.done", {
+                    "type": "response.custom_tool_call_input.done",
+                    "item_id": item["id"], "output_index": position, "input": item["input"],
+                })
+            else:
+                yield event("response.function_call_arguments.done", {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item["id"], "output_index": position,
+                    "name": item["name"], "arguments": item["arguments"],
+                })
             yield event("response.output_item.done", {
                 "type": "response.output_item.done", "output_index": position,
                 "item": {**item, "status": "completed"},
@@ -1712,13 +2406,17 @@ class QoderAdapter(ProviderAdapter):
         keys = self._keys()
         if not keys:
             raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
-        self._pool.set_weights(keys, self.options.get("key_weights"))
+        strategy = self._account_strategy()
+        self._pool.set_weights(keys, self._selection_weights(strategy))
         region = str(self.options.get("region") or "cn")
         last_error: ProviderError | None = None
         for _ in range(self._attempts(len(keys))):
-            pick = await pick_in_group(
-                self._pool, self._store, provider="qoder", group=self._group(), keys=keys
-            )
+            if strategy is None:
+                pick = await pick_in_group(
+                    self._pool, self._store, provider="qoder", group=self._group(), keys=keys
+                )
+            else:
+                pick = await self._pick(strategy, keys, "", "")
             if pick is None:
                 raise self._all_keys_error(keys, last_error)
             account = self._account(pick.key)

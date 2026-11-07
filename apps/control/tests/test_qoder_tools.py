@@ -493,3 +493,168 @@ def test_tool_call_with_broken_arguments_kept_verbatim():
     """上游参数不是合法 JSON 时保原文，不静默吞掉。"""
     block = qoder._tool_call_to_tool_use({"id": "call_x", "function": {"name": "fn", "arguments": "{broken"}})
     assert block["input"] == {"_raw": "{broken"}
+
+
+# ---------- Responses 命名空间工具：摊平 / 还原 ----------
+
+
+def _namespaced_tools() -> list[dict]:
+    return [
+        {"type": "function", "name": "plain", "parameters": {"type": "object"}},
+        {"type": "namespace", "namespace": "mcp__search", "tools": [
+            {"type": "function", "name": "search", "description": "搜", "parameters": {"type": "object"}},
+            {"type": "custom", "name": "apply_patch", "description": "改文件"},
+        ]},
+        {"type": "namespace", "name": "mcp__repo", "tools": [
+            {"type": "function", "name": "search", "parameters": {"type": "object"}},
+        ]},
+    ]
+
+
+def test_namespace_tools_flattened_with_distinct_names():
+    """同 namespace 多工具 + 跨 namespace 同名工具：扁平名带命名空间，互不碰撞。"""
+    converted = qoder.QoderAdapter._responses_to_openai({
+        "model": "cn:qwen3", "input": "hi", "tools": _namespaced_tools(), "stream": False,
+    })
+    names = [tool["function"]["name"] for tool in converted["tools"]]
+    assert names == [
+        "plain",
+        "mcp__search__ns__search",
+        "mcp__search__ns__apply_patch",
+        "mcp__repo__ns__search",
+    ]
+    assert len(set(names)) == len(names)
+    # 原始 namespace 工具不许原样透传给上游
+    assert all(tool["function"] for tool in converted["tools"])
+
+
+def test_namespace_name_prefers_field_then_falls_back_to_name():
+    """namespace 缺 `namespace` 字段时回落 `name`，两者都空则整组跳过。"""
+    converted = qoder.QoderAdapter._responses_to_openai({
+        "model": "cn:qwen3", "input": "hi", "stream": False,
+        "tools": [
+            {"type": "namespace", "name": "mcp__fallback", "tools": [
+                {"type": "function", "name": "read"},
+            ]},
+            {"type": "namespace", "namespace": "", "name": "", "tools": [
+                {"type": "function", "name": "dropped"},
+            ]},
+            {"type": "namespace", "namespace": "mcp__noinner"},
+        ],
+    })
+    assert [tool["function"]["name"] for tool in converted["tools"]] == ["mcp__fallback__ns__read"]
+
+
+def test_namespace_collision_rule_is_deterministic():
+    """命名空间本身含分隔符时按「第一个分隔符」切分，规则确定且可预测。"""
+    mangled = qoder._mangle_namespaced("a__ns__b", "tool")
+    item: dict = {"type": "function_call", "name": mangled}
+    qoder._restore_tool_identity(item, mangled)
+    assert item["namespace"] == "a"
+    assert item["name"] == "b__ns__tool"
+    assert mangled == "a__ns__b__ns__tool"
+
+
+def test_non_namespace_tool_names_unchanged():
+    """非 namespace 工具名与还原行为不变（含 freeform 降级的单 input 参数形状）。"""
+    converted = qoder.QoderAdapter._responses_to_openai({
+        "model": "cn:qwen3", "input": "hi", "stream": False,
+        "tools": [
+            {"type": "function", "name": "get_weather", "parameters": {"type": "object"}},
+            {"type": "custom", "name": "apply_patch", "description": "改文件"},
+        ],
+    })
+    weather, patch = converted["tools"]
+    assert weather["function"]["name"] == "get_weather"
+    assert set(patch["function"]["parameters"]["properties"]) == {"input"}
+    assert patch["function"]["parameters"]["required"] == ["input"]
+    item = {"type": "function_call", "name": "get_weather", "arguments": "{}"}
+    qoder._restore_tool_identity(item, "get_weather")
+    assert item == {"type": "function_call", "name": "get_weather", "arguments": "{}"}
+
+
+def test_namespaced_history_items_are_remangled():
+    """出站还原过身份 ⇒ 下一轮历史项要拼回扁平名，否则上游工具清单对不上。"""
+    converted = qoder.QoderAdapter._responses_to_openai({
+        "model": "cn:qwen3", "stream": False,
+        "input": [
+            {"role": "user", "content": "搜一下"},
+            {"type": "function_call", "call_id": "c1", "name": "search",
+             "namespace": "mcp__search", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            {"type": "custom_tool_call", "call_id": "c2", "name": "apply_patch",
+             "namespace": "mcp__search", "input": "PATCH"},
+            {"type": "custom_tool_call_output", "call_id": "c2", "output": "done"},
+        ],
+    })
+    calls = [row["tool_calls"][0]["function"] for row in converted["messages"] if row.get("tool_calls")]
+    assert calls[0]["name"] == "mcp__search__ns__search"
+    assert json.loads(calls[1]["arguments"]) == {"input": "PATCH"}
+    assert calls[1]["name"] == "mcp__search__ns__apply_patch"
+
+
+async def test_responses_nonstream_restores_namespace_identity(monkeypatch):
+    """上游回扁平名 ⇒ 非流式 output 还原成原名 + namespace。"""
+    mangled_sse = (
+        'data: {"body": "{\\"id\\":\\"c1\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"tool_calls\\":'
+        '[{\\"index\\":0,\\"id\\":\\"call_ns\\",\\"type\\":\\"function\\",\\"function\\":'
+        '{\\"name\\":\\"mcp__search__ns__search\\",\\"arguments\\":\\"{}\\"}}]}}]}"}\n\n'
+        'data: {"body":"[DONE]"}\n\n'
+    ).encode()
+    _record(monkeypatch, mangled_sse)
+    reply = await _fresh().responses({
+        "model": "cn:qwen3", "input": "搜一下", "tools": _namespaced_tools(),
+    }, stream=False)
+    call = json.loads(reply.body)["output"][1]
+    assert call["type"] == "function_call"
+    assert call["name"] == "search"
+    assert call["namespace"] == "mcp__search"
+    assert "arguments" in call
+
+
+async def test_responses_stream_restores_namespace_identity(monkeypatch):
+    """流式三处（added/done/completed）都要还原身份。"""
+    mangled_sse = (
+        'data: {"body": "{\\"id\\":\\"c1\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"tool_calls\\":'
+        '[{\\"index\\":0,\\"id\\":\\"call_ns\\",\\"type\\":\\"function\\",\\"function\\":'
+        '{\\"name\\":\\"mcp__search__ns__search\\",\\"arguments\\":\\"{}\\"}}]}}]}"}\n\n'
+        'data: {"body":"[DONE]"}\n\n'
+    ).encode()
+    _record(monkeypatch, mangled_sse)
+    reply = await _fresh().responses({
+        "model": "cn:qwen3", "input": "搜一下", "tools": _namespaced_tools(),
+    }, stream=True)
+    events = _events(b"".join([chunk async for chunk in reply.iter_bytes()]))
+    call_events = [data for name, data in events if name == "response.output_item.added"
+                   and data["item"]["type"] == "function_call"]
+    done = [data for name, data in events if name == "response.output_item.done"][0]
+    completed = [data for name, data in events if name == "response.completed"][0]
+    assert call_events[0]["item"]["name"] == "search"
+    assert call_events[0]["item"]["namespace"] == "mcp__search"
+    assert done["item"]["namespace"] == "mcp__search"
+    assert completed["response"]["output"][1]["name"] == "search"
+    assert completed["response"]["output"][1]["namespace"] == "mcp__search"
+
+
+async def test_responses_stream_freeform_call_uses_input_field(monkeypatch):
+    """命名空间里的 freeform 工具：输出是 custom_tool_call + 拆好的原文，不发 JSON 增量。"""
+    freeform_sse = (
+        'data: {"body": "{\\"id\\":\\"c1\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"tool_calls\\":'
+        '[{\\"index\\":0,\\"id\\":\\"call_ns\\",\\"type\\":\\"function\\",\\"function\\":'
+        '{\\"name\\":\\"mcp__search__ns__apply_patch\\",\\"arguments\\":\\"{\\\\\\"input\\\\\\":\\\\\\"PATCH\\\\\\"}\\"}}]}}]}"}\n\n'
+        'data: {"body":"[DONE]"}\n\n'
+    ).encode()
+    _record(monkeypatch, freeform_sse)
+    reply = await _fresh().responses({
+        "model": "cn:qwen3", "input": "改文件", "tools": _namespaced_tools(),
+    }, stream=True)
+    events = _events(b"".join([chunk async for chunk in reply.iter_bytes()]))
+    names = [name for name, _ in events]
+    assert "response.function_call_arguments.delta" not in names
+    assert "response.custom_tool_call_input.done" in names
+    done = [data for name, data in events if name == "response.custom_tool_call_input.done"][0]
+    assert done["input"] == "PATCH"
+    item = [data for name, data in events if name == "response.output_item.done"][0]["item"]
+    assert item["type"] == "custom_tool_call"
+    assert item["name"] == "apply_patch"
+    assert item["namespace"] == "mcp__search"
