@@ -8,6 +8,27 @@
 
 - **`opencode` / `trae` / `qoder` 的 readiness 由 `ready` 降为 `needs_config`**：三家此前只因 `ProviderSpec` 默认值被算作就绪，实际没有任何真实外呼证据；`requires` 分别写明缺少的密钥类型、必需字段与未验证项。影响服务商页/模型页的「就绪」徽标与 `/api/health/ready` 的 `available` 计数。
 
+### 调度
+
+- **账号池轮转接线扩到 `muse` / `zcode` / `opencode` / `codar` / `trae` / `qoder`**：分档冷却、连败升级、熔断、粘性、权重与轮转组走 `services/rotation.py`；四档策略（`sticky` / `priority` / `weighted` / `failover`）仍只接 `codar`（`services/scheduling.py`），其余适配器是池的 `sticky → weighted → round_robin`。影响多账号凭据的换号与冷却，`health()` 会回 `rotation` / `cooling`。`weighted` 无权重降级当前不生效，见 [docs/SCHEDULING.md](docs/SCHEDULING.md) §7。
+- **`key_pool` 改租约式占用**：并发请求不再共用同一把 key，`gptgrok` 同步接入。影响高并发下的账号占用正确性。
+
+### 网关与媒体
+
+- **媒体子工程接入统一准入**：`/v1/images/generations`、`/v1/images/edits`、`/v1/images/tasks/{id}`、`/v1/videos`、`/v1/videos/{id}`、`/v1/media/{name}`、`/v1/files`、`/v1/editable-file-tasks` 统一走鉴权、能力选路、配额与失败限流；影响媒体客户端不再需要绕过网关。实现见 `apps/control/app/routers/v1.py:1401-1602`。
+- **新增通用任务队列 `/v1/tasks`**：提交、查询、取消；单 worker、五态（`queued` / `running` / `completed` / `failed` / `cancelled`），只存 JSON 元数据，二进制产物留在上游，记录保留 7 天且最多 200 条；影响长任务调用方可以在网关侧查询与取消，不再只能轮询上游。
+- **请求级限流（G3）**：`UNIFIED_RATE_LIMIT_RPM`（每密钥每分钟请求数）与 `UNIFIED_RATE_LIMIT_MAX_CONCURRENCY`（进程内在途 `/v1` 请求上限），默认 0 关闭；超限分别返回 429 `key_rate_limited`（带 `Retry-After`）与 503 `gateway_overloaded`。与失败预算限流、账号冷却分开计数，多 worker 每进程各一份；影响默认行为不变，开启后突发请求会更早被拦。
+
+### 安全
+
+- **凭据落库加密 Phase 1**：`provider_credentials.secret` 与 `provider_config.api_key` 写入时 AES-256-GCM 封存（`u2a-enc:v1:`，复用 `UNIFIED_BACKUP_ENCRYPTION_KEY`）；启动时把存量明文就地迁移并回验；缺密钥时读明文直通、写保持明文并计数，`UNIFIED_SECRET_AT_REST_REQUIRED=1` 直接拒绝启动；`GET /api/security/secret-at-rest` 只返回计数与开关。影响备份归档与库内字段共用同一套密文，轮换密钥前需先解密回写。
+- **token 配额与密钥白名单**：配额策略新增 `limit_tokens`，与金额、请求数任一命中即拦截，状态接口同时回 `used_tokens` / `remaining_tokens` / `ratio_tokens`；密钥新增 `model_allow`（`*` 通配）与 `ip_allow`（单 IP / CIDR，写入时解析）。影响可按 token 量控额，坏白名单配置在写入时 400，不会拖到请求时才失败。
+
+### 计费
+
+- **计费规则表**：新增 `price_rules`，支持 `per_call` / `per_second` / `long_context` 倍率，按 provider + model + 生效时间取版本；`GET /api/pricing/rules` 开放读，`POST /api/pricing/rules` 仅管理员且只追加。影响图片、视频与长上下文可按非 token 口径计费。
+- **视频任务台账**：新增 `video_tasks`，按 `(provider, upstream_task_id)` 登记状态、秒数与金额；状态 `pending` / `running` / `succeeded` / `failed`，同状态重复回调幂等，终态后不能改状态，只有 `succeeded` / `failed` 能 `book()` 回填金额；影响视频计费可对账，不再只依赖上游响应。
+
 ## 未发布 - 2026-11-04
 
 ### 网关行为

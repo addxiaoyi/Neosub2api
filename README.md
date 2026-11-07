@@ -1,6 +1,6 @@
 # Neosub2api（仓库目录仍为 unified-2api）
 
-Neosub2api 的 **11 家上游均已接入统一网关**（注册表共 **14 家 provider 适配器**），**核心对话协议可用**；管理端、账号池调度与批量/文件类能力按**许可证与设计边界**做了取舍，**未做全量复刻**。对外提供 OpenAI 与 Anthropic 兼容的模型网关。
+Neosub2api 的 **11 家上游均已接入统一网关**（注册表共 **14 家 provider 适配器**），**核心对话协议可用**。账号池轮转（`muse` / `zcode` / `opencode` / `codar` / `trae` / `qoder`）与 codar 四档调度、gptgrok 媒体子工程与通用任务队列、请求级限流、凭据落库加密、token 配额与模型/IP 白名单、计费规则表与视频台账均已接线；管理端、批量/文件类能力按**许可证与设计边界**做了取舍，**未做全量复刻**。对外提供 OpenAI 与 Anthropic 兼容的模型网关。
 
 - 控制面：FastAPI + SQLite，负责账号、服务商、网关密钥、配额、定价、用量、日志、安全与运行参数。
 - 网关：`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1/models`，流式与非流式都支持。
@@ -112,20 +112,22 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 | 能力 | 现状 | 入口 |
 | --- | --- | --- |
 | 多协议网关 | OpenAI `chat/completions`、`responses`，Anthropic `messages`，`/v1/models`；SSE 直通 | `/v1/*` |
+| 媒体与任务队列 | `/v1/images/generations`、`/v1/images/edits`、`/v1/images/tasks/{task_id}`、`/v1/videos`、`/v1/videos/{task_id}`、`/v1/media/{name}`、`/v1/files`、`/v1/editable-file-tasks` 走同一套鉴权 / 能力选路 / 配额 / 失败限流；通用 `/v1/tasks` 队列支持提交、查询、取消（`queued` / `running` / `completed` / `failed` / `cancelled`），单 worker，产物留在上游 | `/v1/*`；实现见 `apps/control/app/routers/v1.py:1401-1664` |
 | 14 家 provider | 静态 `ProviderSpec` 下 14 家均为 `needs_config`（配好凭据并探活成功后接口可动态给出 `ready`；`ready` 只表示配置齐备，**`ready` ≠ 真机跑通**）；能力位与协议差异见 [docs/PROTOCOL-MATRIX.md](docs/PROTOCOL-MATRIX.md) | `/api/providers`、设置页「服务商」 |
-| 多密钥与凭据中心 | 一个 provider 可配多把 key；分档冷却（401/403 600s、402 900s、429 120s、408/5xx 60s）、连败升级与熔断、粘性/权重/轮转组；四档策略（`sticky` / `priority` / `weighted` / `failover`）当前只接 codar，详见 [docs/SCHEDULING.md](docs/SCHEDULING.md) | 设置页「服务商 / 凭据」 |
+| 多密钥与凭据中心 | 一个 provider 可配多把 key；分档冷却（401/403 600s、402 900s、429 120s、408/5xx 60s）、连败升级与熔断、粘性/权重/轮转组、租约式占用；账号池轮转已接 `muse` / `zcode` / `opencode` / `codar` / `trae` / `qoder`，四档策略（`sticky` / `priority` / `weighted` / `failover`）当前只接 codar，详见 [docs/SCHEDULING.md](docs/SCHEDULING.md) | 设置页「服务商 / 凭据」 |
 | 网关密钥 | `u2a_` 前缀，sha256 入库，明文仅创建时返回一次；支持启停、改名、吊销、归属 | 「密钥」页、`/api/keys` |
-| 配额与告警 | 按密钥/分组/窗口的配额策略、当前周期用量、阈值告警历史 | 「配额」页、`/api/quota/*` |
-| 定价与账单 | 价格簿、按 provider + model 解析价格、请求级账单流水与 usage 快照 | 「定价」页、`/api/pricing/*` |
+| 配额与告警 | 按密钥/分组/窗口的配额策略（金额、请求数、token 三类上限，任一命中即拦截）、当前周期用量、阈值告警历史；密钥支持模型白名单（`*` 通配）与 IP/CIDR 白名单 | 「配额」页、`/api/quota/*` |
+| 定价与账单 | 价格簿、按 provider + model 解析价格、计费规则表（`per_call` / `per_second` / `long_context` 倍率）、请求级账单流水与 usage 快照、视频任务台账（终态入账） | 「定价」页、`/api/pricing/*` |
 | 模型目录 | 上游实拉 + 声明回退，返回 `provider/providers/source/provider_states` 等字段 | 「模型」页、`GET /api/models` |
 | 用量与日志 | 请求日志、用量记录、日统计；失败请求按密钥滑动窗口限流 | 「统计」页、「日志」页 |
-| 安全 | 角色隔离、审计日志、登录失败节流与统计、上游地址 SSRF 校验、安全响应头 | 「安全」页、「设置」页 |
+| 请求级限流 | 每密钥每分钟请求数 `UNIFIED_RATE_LIMIT_RPM`、进程内全局在途上限 `UNIFIED_RATE_LIMIT_MAX_CONCURRENCY`，默认 0 关闭；超限 429 `key_rate_limited` / 503 `gateway_overloaded`，只作用于 `/v1` | `/v1/*` |
+| 安全 | 凭据落库 AES-256-GCM 封存（`provider_credentials.secret` / `provider_config.api_key`，复用备份密钥）、角色隔离、审计日志、登录失败节流与统计、上游地址 SSRF 校验、安全响应头 | 「安全」页、「设置」页、`/api/security/secret-at-rest` |
 | 运行参数 | 可在界面修改并落库，数据库值覆盖 env 默认值，支持导出/导入 | 设置页「运行参数」、`/api/settings/runtime-config` |
 | 多语言 | `zh-CN` / `zh-TW` / `en` / `ja` / `ko`，缺键按设计回退 | 顶栏语言切换 |
 | 演示模式 | 进程内假上游 + 带标记的演示数据，一条命令开关与清除 | `scripts/demo.ps1` / `scripts/demo.sh` |
 | 注册任务（Grok） | 控制面内任务编排，执行器外置；未配置执行器时任务明确失败 | `/api/grok/register/*`（暂无界面） |
 
-> 2026-11-06 已更正（原句逐字留档）：provider 一行原写「当前注册表下 `opencode` / `qoder` / `trae` 为 `ready`，其余 `needs_config`」。三家 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:47`、`qoder.py:459`、`trae.py:157`），静态口径下 14 家全部 `needs_config`；`ready` 只表示配置齐备，不等于真机跑通。误判后果：按旧行会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障。
+> 2026-11-06 已更正（原句逐字留档）：provider 一行原写「当前注册表下 `opencode` / `qoder` / `trae` 为 `ready`，其余 `needs_config`」。三家 `ProviderSpec` 实为 `needs_config`（`apps/control/app/adapters/opencode.py:83`、`qoder.py:532`、`trae.py:162`，2026-11-06 行号复核），静态口径下 14 家全部 `needs_config`；`ready` 只表示配置齐备，不等于真机跑通。误判后果：按旧行会把这三家当成开箱即用，遇到 401 / 429 / 503 时误判为网关故障。
 
 ## 页面清单
 
@@ -147,12 +149,15 @@ curl http://127.0.0.1:8010/v1/chat/completions \
 | `/security` | 审计日志、登录失败统计、防护状态 |
 | `/settings` | 服务商、凭据、运行参数、模型映射、令牌、用户 |
 
-`/tasks` 页面已整体删除；后端从未提供任务、签到记录或上游日志端点，不要再按旧文档找它。
+`/tasks` 管理页已删除，控制面也没有签到记录或上游日志端点；网关侧另有 `/v1/tasks` 任务队列接口（见「媒体与任务队列」），两者不是一回事，不要再按旧文档找页面。
 
 ## 关键约定（新人最容易踩）
 
 - **模型解析默认严格**：`<provider>/<model>` 或 `x-provider` 头最稳；未知模型 `404 model_not_found`，未启用 provider 里的模型 `404 model_unavailable`，同名多家 `400 ambiguous_model`。存量客户端可设 `UNIFIED_MODEL_FALLBACK_FIRST=1` 临时恢复旧兜底。
 - **失败限流**：同一密钥在窗口内失败次数达到 `UNIFIED_FAILURE_WINDOW_MAX` 后返回 `429 failure_rate_limited`，带 `Retry-After`；被拒请求也会入库，所以看日志时会看到 429。
+- **请求级限流**：`UNIFIED_RATE_LIMIT_RPM` 与 `UNIFIED_RATE_LIMIT_MAX_CONCURRENCY` 默认都是 0（关闭）；开启后按进程各算一份，多 worker 不等于全局限额；与失败限流、账号冷却分开计数，错误码分别是 `429 key_rate_limited` 与 `503 gateway_overloaded`。
+- **凭据落库加密**：复用 `UNIFIED_BACKUP_ENCRYPTION_KEY` 派生 AES-256-GCM 密钥，密文前缀 `u2a-enc:v1:`；缺密钥时读取明文直通、写入保持明文并累计错误计数，`UNIFIED_SECRET_AT_REST_REQUIRED=1` 则拒绝启动。轮换密钥前先把旧密文解密回写。
+- **视频台账幂等**：`video_tasks` 按 `(provider, upstream_task_id)` 登记，状态是 `pending` / `running` / `succeeded` / `failed`；同状态重复回调幂等，终态后不能改状态；只有 `succeeded` / `failed` 才能 `book()` 回填金额。任务队列的 `completed` / `cancelled` 是另一套状态，别混用。
 - **密钥归属**：`api_keys.owner_user_id` 存用户名。admin 可见全部；viewer 只可见自有密钥，配额读接口只能查自有 key；历史 `NULL` 归属只有 admin 可见。
 - **审计与登录失败按角色收敛**：viewer 只看到与自己相关的审计记录和 `scope=self` 的登录失败聚合，显式查他人返回 403。
 - **运行参数优先读库**：设置页保存后立即生效并重启保留；数据库值优先于 `.env` 默认值。排障时先看设置页标的 `source=db|default`。
@@ -184,13 +189,14 @@ unified-2api/
 │  └─ control/             # FastAPI 控制面
 │     ├─ app/adapters/     # 14 家 provider 适配器 + key_pool.py
 │     ├─ app/routers/      # auth / providers / accounts / keys / stats / settings /
-│     │                    # pricing / quota / logs / security / v1 / sub2api / grok
-│     ├─ app/services/     # Grok 注册任务编排
+│     │                    # pricing / quota / logs / security / v1 / sub2api / grok / backup
+│     ├─ app/middleware/   # 请求级限流
+│     ├─ app/services/     # 调度 / 任务队列 / 视频台账 / 凭据封存 / Grok 注册编排
 │     ├─ app/db.py         # SQLite 表结构与连接（WAL）
 │     ├─ app/demo.py       # 演示模式：进程内假上游 + 演示数据
 │     └─ tests/            # 控制面测试
 ├─ docs/                   # 文档，入口见 docs/README.md
-├─ docs/providers/         # 逐家上游的 clean-room 协议契约
+├─ docs/providers/         # 逐家上游的协议契约与内置适配器说明
 ├─ providers/              # 上游参考来源说明，不是运行依赖
 ├─ upstreams/              # 上游清单与巡检脚本
 ├─ scripts/                # demo / backup / restore / 契约与 i18n 检查 / 压测
@@ -205,6 +211,8 @@ unified-2api/
 - **有意不做不是缺口**：对账确认的 18 项有意不做（按 [docs/PROVIDERS.md](docs/PROVIDERS.md) 附表的 10 类归并）来自许可证隔离、设计边界与执行器外置，属于取舍，不计入缺口清单，也不按「未实现」排期。
 - **sidecar 许可证**：`deepseek_sidecar` 无 LICENSE，`qoder_sidecar` 为 PolyForm-NC，商用前必须移除或取得书面授权；`codar_sidecar` / `trae_sidecar` 在仓内直连稳定后可只保留一种接入。
 - **Grok 注册执行器不随仓交付**：未配置 `GROK_REGISTER_EXECUTOR_URL` 时任务明确失败，不会假装成功。
+- **凭据加密只覆盖 Phase 1**：只封存 `provider_credentials.secret` 与 `provider_config.api_key` 两个字段；`.env` 与日志不在范围内，备份归档另用同一把备份密钥；未设置 `UNIFIED_BACKUP_ENCRYPTION_KEY` 时仍是明文兼容模式。
+- **请求级限流不跨进程**：每个 uvicorn worker 各持一份计数，重启或多 worker 会放大实际放行量；需要全局限额应在反向代理层另做。
 - **没有在线更新**：本部署不提供在线升级，也不操作宿主机 docker；升级需自行拉取代码与镜像。
 - **管理面错误文案仍有中文硬编码**：网关已带稳定错误码，管理面部分路径（令牌、设置、内网地址校验）仍直接返回中文，非中文用户会看到中文；见 [docs/unification-audit.md](docs/unification-audit.md) P2-10。
 - **viewer 仍可读全站请求日志**：`GET /api/logs` 只校验登录、不按 owner 过滤，不含密钥明文但能看到他人请求元信息；见 [docs/security-retest-2026-11-03.md](docs/security-retest-2026-11-03.md)。
@@ -217,8 +225,9 @@ unified-2api/
 
 - 上手：[GETTING-STARTED](docs/GETTING-STARTED.md)、[examples](docs/examples.md)、[DEMO](docs/DEMO.md)、[TROUBLESHOOTING](docs/TROUBLESHOOTING.md)
 - 契约：[API-REFERENCE](docs/API-REFERENCE.md)、[CONTRACT](docs/CONTRACT.md)、[error-contract](docs/error-contract.md)、[PROTOCOL-MATRIX](docs/PROTOCOL-MATRIX.md)
-- 运维：[DEPLOYMENT](docs/DEPLOYMENT.md)、[DEPLOYMENT-PROD](docs/DEPLOYMENT-PROD.md)、[PERFORMANCE](docs/PERFORMANCE.md)、[SCHEDULING](docs/SCHEDULING.md)、[UPSTREAM-SYNC](docs/UPSTREAM-SYNC.md)
-- 安全合规：[compliance](docs/compliance.md)、[security-audit](docs/security-audit.md)、[security-retest-2026-11-03](docs/security-retest-2026-11-03.md)、[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)
-- 设计与历史：[unification-audit](docs/unification-audit.md)、[m3-billing-plan](docs/m3-billing-plan.md)、[FRONTEND-BASELINE](docs/FRONTEND-BASELINE.md)
+- 运维：[DEPLOYMENT](docs/DEPLOYMENT.md)、[DEPLOYMENT-PROD](docs/DEPLOYMENT-PROD.md)、[OPS-RUNBOOK](docs/OPS-RUNBOOK.md)、[BACKUP](docs/BACKUP.md)、[PERFORMANCE](docs/PERFORMANCE.md)、[SCHEDULING](docs/SCHEDULING.md)、[UPSTREAM-SYNC](docs/UPSTREAM-SYNC.md)、[UPSTREAM-CHECK-RUNBOOK](docs/UPSTREAM-CHECK-RUNBOOK.md)
+- 安全合规：[compliance](docs/compliance.md)、[security-audit](docs/security-audit.md)、[security-retest-2026-11-03](docs/security-retest-2026-11-03.md)、[authz-audit](docs/authz-audit.md)、[secret-leak-audit](docs/secret-leak-audit.md)、[RISK-REGISTER](docs/RISK-REGISTER.md)、[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)
+- 现状与历史：[FEATURE-GAP](docs/FEATURE-GAP.md)、[unification-audit](docs/unification-audit.md)、[m3-billing-plan](docs/m3-billing-plan.md)、[FRONTEND-BASELINE](docs/FRONTEND-BASELINE.md)
+- 逐家上游：[docs/providers/](docs/providers/)（`qoder-adapter`、`trae-adapter` 等 15 篇）
 
 行为变化按日期记录在 [CHANGELOG.md](CHANGELOG.md)。

@@ -30,7 +30,7 @@
 | E-03 | 访问令牌批量动作 | 控制面自建（各上游共用） | 已实现 | `apps/control/app/routers/keys.py:205`（`POST /batch`）；`tests/test_keys_batch.py:55-198`（含超限 400、不泄密、单行审计）；`apps/web/app/(main)/keys/page.tsx:210`（批量操作条） | 无（后端批量与测试在 8b2d54d 入库、前端在 adf22d8 入库） |
 | E-04 | 请求日志导出 CSV（管理员与普通用户） | sub2api（系统日志）、控制面自建 | 已实现 | `apps/control/app/routers/logs.py:64`（`_owner`）、`:71`（`_assert_key_owned`）、`:376`（`GET /logs/export`）、`:354`（`_audit_export`，动作名 `logs.export` 见 `:369`）；`tests/test_logs_export.py:113-137`（viewer 可导出）、`:139-194`（按 key 归属收窄、显式传他人 key 403、审计 `logs.export`）；`apps/web/app/(main)/logs/page.tsx:296-306`（导出按钮对所有登录用户可见） | 无（导出路由与测试在 82f03a2 入库、文件首入库 dc19c82，前端 eacc574 入库；2026-11-06 扩到普通用户，见 N-04） |
 | E-05 | 模型映射导入 / 导出 / 回滚 | codebuddy2api（模型映射页） | 已实现 | `apps/control/app/routers/settings.py:866,887,1085`；`tests/test_model_map_transfer.py:40-136`；`apps/web/app/(main)/settings/page.tsx:1848` | 无（已在 65e88b9 入库，组件在 dafb3c4 入库） |
-| E-06 | Antigravity / Sora / Claude Code 客户端兼容面 | sub2api | 已实现 | `apps/control/app/routers/v1.py:890-984`；`tests/test_v1_client_compat.py:224-500` | 无（已在 65e88b9 入库）；只对声明了 compat surface 的 provider 生效，其余 501（有意） |
+| E-06 | Antigravity / Sora / Claude Code 客户端兼容面 | sub2api | 已实现 | `apps/control/app/routers/v1.py:1687-1774`（2026-11-06 行号复核；原 `890-984` 已被媒体与任务路由占用）；`tests/test_v1_client_compat.py:224-500` | 无（已在 65e88b9 入库）；只对声明了 compat surface 的 provider 生效，其余 501（有意） |
 | E-07 | TOTP 两步验证 + 恢复码 | 控制面自建 | 已实现 | `apps/control/app/routers/auth.py:321-462`（status/setup/enable/disable/verify）；`apps/control/app/totp.py`；`apps/web/components/common/layout/ManagementBar.tsx:643`；`tests/test_user_account_system.py:163-253` | 无（已在 8b2d54d 入库） |
 | E-08 | 多用户与角色体系 | 控制面自建 | 已实现 | `settings.py:1430-1502`（users CRUD）；`auth.py` 注册开关 / 登录冷却 / 会话轮换；`tests/test_user_account_system.py:60-278` | 无（users CRUD 基线在 b5772fb，账号体系改动与测试在 8b2d54d 入库） |
 | E-09 | 跨 provider 故障转移 | 控制面自建（多上游共性） | 已实现 | `apps/control/app/model_resolve.py:388`（`resolve_targets`）；`v1.py:426-427`（尝试序列与上限）；`settings.py:532,537`（`/api/settings/failover` 读写，带 env 锁定提示）；`apps/web/app/(main)/settings/RuntimeConfigSection.tsx:66`（开关/上限 UI 与来源提示）；`tests/test_failover.py:340-543` | 无（已在 65e88b9 入库；运行参数前端在 7f4d9a1 入库） |
@@ -77,7 +77,7 @@
 
 **E-05 模型映射搬运。** 导出下载当前映射，导入分 merge / overwrite 两种语义并逐条报告改动，回滚恢复上一版。
 
-**E-06 客户端兼容面。** `v1.py:890-984` 挂了 Claude Code、Antigravity、Sora 三组路径，包含 `v1beta` 模型列表、媒体签名路径与匿名 GET 白名单。没有 compat surface 的 provider 返回 501，这是设计，不是缺口。
+**E-06 客户端兼容面。** `v1.py:1687-1774` 挂了 Claude Code、Antigravity、Sora 三组路径，包含 `v1beta` 模型列表、媒体签名路径与匿名 GET 白名单。没有 compat surface 的 provider 返回 501，这是设计，不是缺口。（2026-11-06 行号复核：原 `890-984` 现在已是媒体与任务队列的辅助函数区域。）
 
 **E-07 TOTP。** 登录、绑定、验证、关闭全链路，恢复码一次性使用，重启计数器防重放；关闭必须同时给密码和验证码。
 
@@ -90,6 +90,8 @@
 **E-11 指标与告警。** 两个出口：`/api/metrics`（Prometheus 文本，admin 或抓取令牌可读）与 `/api/metrics/json`（旧版 JSON，保持字段不变）。两条路径都会先跑 `evaluate_alerts`，失败只记日志、不带走指标读取；告警表复用 `quota_alerts`，按 `(policy_id, threshold_percent, period_start)` 去重。
 
 **E-12 备份 / 恢复。** 归档、校验、恢复、自检失败不改线上库、恢复失败从快照回滚、WAL 打开时仍可用，测试覆盖了这些关口。这是本地归档，远端与定时不在内。
+
+**（2026-11-06 已更正，原句逐字留档）** 「这是本地归档，远端与定时不在内」已过期：远端上传、轮转、定时调度与远端恢复都已落地，见 U-03 的 2026-11-05 入库复核块；远端恢复入口是 `routers/backup_remote.py:166`，定时开关默认关闭。误判后果：会以为远端只有上传、没有取回路径，或重复实现一套远端恢复链路。
 
 **E-13 qoder 会话搬运。** 控制面把导出、导入整包透传给 `qoder_sidecar`，前端面板两个方向都做，回包原样展示、不替上游改写措辞。限制来自上游 `SessionCopy` 只认绝对路径：包落在 sidecar 主机，浏览器不能上传也不能下载。要把包搬回浏览器，得 sidecar 先提供流式出口，这一步不在本仓控制范围内。
 
@@ -220,6 +222,7 @@
 
 **（2026-11-05 已更正）** `routers/v1.py:844-869` 已挂 `/v1/images/generations`、`/v1/images/edits`、`/v1/images/tasks/{task_id}`、`/v1/videos`、`/v1/videos/{task_id}`、`/v1/media/{name}`，`/v1` 路由总数为 14 条（`v1.py:806-884`）。这几条尚在工作区未入库（`M apps/control/app/routers/v1.py`）。
 **（2026-11-05 入库复核）** 上一块末尾「尚在工作区未入库」是写块当时的状态：`v1.py` 的路由改动已随 `65e88b9`（适配器协议面与客户端兼容端点）入库，工作树对该文件无未提交改动。结论（已接入、不再是缺口）不变，只有「未入库」这半句过期。
+**（2026-11-06 行号与范围复核）** 上块的 `v1.py:844-869` / `806-884` 只适用于 65e88b9 时点，已被媒体与任务路由整体下移：图片/视频六条在 `v1.py:1401`、`1406`、`1411`、`1416`、`1421`、`1426`；`/v1/files` 在 `1433-1512`，`/v1/editable-file-tasks` 在 `1517-1602`，`/v1/tasks` 提交 / 查询 / 取消在 `1608-1664`；`v1.py` 路由总数也由当时的 14 条增至 43 条。结论不变（已接入），新增的是通用任务队列；不要再按 `844-869` 找这几条路由。
 **误判后果**：会把已经写好的图片/视频转发当成缺口重做；更糟的是有人据此在 `PROTOCOL-MATRIX` 的「仍不支持」清单里留下错误条目，客户端按 501 处理而实际可用。
 
 ### 4.3 旧「11 项真缺失」清单
