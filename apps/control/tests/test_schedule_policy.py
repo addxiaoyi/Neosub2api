@@ -15,6 +15,7 @@ import pytest
 from app.adapters import codar, trae
 from app.adapters.codar import _retryable
 from app.config import Settings
+from app.services.rotation import fingerprint
 from app.services.scheduling import Scheduler, session_key
 
 pytestmark = pytest.mark.providers
@@ -134,6 +135,52 @@ async def test_plan_limit_truncates_attempt_order():
     keys = ["tok-a", "tok-b", "tok-c", "tok-d"]
     plan = await scheduler.plan(keys, policy="failover", limit=2)
     assert len(plan.indices) == 2
+
+
+# ---------- 模型级冷却 ----------
+
+
+async def test_plan_model_cooled_token_still_serves_other_models():
+    scheduler = Scheduler()
+    keys = ["tok-a", "tok-b"]
+    await scheduler.note_failure("tok-a", 429, model="cn:m-a")
+
+    same_model = await scheduler.plan(keys, policy="priority", limit=1, model="cn:m-a")
+    assert keys[same_model.indices[0]] == "tok-b", "同模型 429 后不能再撞 tok-a"
+
+    other_model = await scheduler.plan(keys, policy="priority", limit=1, model="cn:m-b")
+    assert keys[other_model.indices[0]] == "tok-a", "同一账号换了模型必须回到首选"
+
+
+async def test_plan_account_level_failure_cools_every_model():
+    scheduler = Scheduler()
+    keys = ["tok-a", "tok-b"]
+    await scheduler.note_failure("tok-a", 401, model="cn:m-a")
+    other_model = await scheduler.plan(keys, policy="priority", limit=1, model="cn:m-b")
+    assert keys[other_model.indices[0]] == "tok-b", "401 是账号级失败，换模型也不能选它"
+
+
+async def test_plan_all_model_cooled_degrades():
+    scheduler = Scheduler()
+    keys = ["tok-a", "tok-b"]
+    for key in keys:
+        await scheduler.note_failure(key, 429, model="cn:m-a")
+    plan = await scheduler.plan(keys, policy="priority", limit=2, model="cn:m-a")
+    assert plan.degraded is True
+    assert plan.indices == [0, 1], "全模型冷却时仍要给出可尝试顺序，而不是直接空转"
+    assert "冷却" in plan.note
+
+
+async def test_snapshot_reports_model_cooling_without_account_cooling():
+    scheduler = Scheduler()
+    keys = ["tok-a", "tok-b"]
+    await scheduler.note_failure("tok-a", 429, model="cn:m-a")
+    state = await scheduler.snapshot(keys)
+    assert state["cooling"] == 0, "模型 429 不能把账号算进账号级冷却"
+    assert state["available"] == 2
+    assert state["model_cooling"] == 1
+    assert state["model_cooldowns"][fingerprint("tok-a")] == {"cn:m-a": 60.0}
+    assert state["policy"]
 
 
 async def test_unknown_policy_falls_back_with_warning(caplog):

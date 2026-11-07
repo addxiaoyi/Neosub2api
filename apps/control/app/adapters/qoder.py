@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from ..config import Settings
 from ..services.rotation import (
+    MODEL_RATE_LIMIT_COOLDOWN,
     CredentialPool,
     RotationStore,
     fingerprint,
@@ -588,8 +589,20 @@ class QoderAdapter(ProviderAdapter):
     def _rotatable(status: int) -> bool:
         return status in ROTATE_STATUSES or 500 <= status <= 599
 
-    async def _note_failure(self, key: str, status: int, keys: list[str], retry_after: int = 0) -> bool:
-        """登记分档冷却；没有别的可用账号时不冷却，避免把唯一账号关进冷却后请求全 429。"""
+    async def _note_failure(
+        self, key: str, status: int, keys: list[str], retry_after: int = 0, model: str = ""
+    ) -> bool:
+        """登记分档冷却；没有别的可用账号时不冷却，避免把唯一账号关进冷却后请求全 429。
+
+        429 是上游按模型报的：只冷「账号+模型」60s，账号本身继续服务其它模型，
+        即使池里只有这一个账号也要记，下一次换模型仍能用它。
+        """
+        if model and status == 429:
+            await self._pool.report_failure(
+                key, status, cooldown_sec=MODEL_RATE_LIMIT_COOLDOWN, model=model
+            )
+            others = [item for item in keys if item != key]
+            return bool(others and await self._pool.available(others, model=model))
         others = [item for item in keys if item != key]
         if others and await self._pool.available(others):
             await self._pool.report_failure(key, status, cooldown_sec=float(retry_after) if retry_after else None)
@@ -607,7 +620,7 @@ class QoderAdapter(ProviderAdapter):
         return ProviderError(429, f"Qoder {len(keys)} 个账号全部处于冷却中，请稍后重试")
 
     def _tracked_stream(
-        self, source: AsyncIterator[bytes], key: str, keys: list[str], sticky: str
+        self, source: AsyncIterator[bytes], key: str, keys: list[str], sticky: str, model: str = ""
     ) -> AsyncIterator[bytes]:
         """流式响应只有读到正常收尾才算成功；中途报错按非流式同一口径登记账号池。"""
 
@@ -620,7 +633,7 @@ class QoderAdapter(ProviderAdapter):
             except ProviderError as exc:
                 if self._rotatable(exc.status_code):
                     await self._note_failure(
-                        key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0)
+                        key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0), model
                     )
                 raise
             except Exception:  # noqa: BLE001 - 断流/连接错误按出口问题处理，不判死账号
@@ -628,7 +641,7 @@ class QoderAdapter(ProviderAdapter):
                 raise
             finally:
                 if completed:
-                    await self._pool.report_success(key)
+                    await self._pool.report_success(key, model=model)
                     if sticky:
                         await self._pool.bind_sticky(sticky, key)
 
@@ -647,11 +660,18 @@ class QoderAdapter(ProviderAdapter):
             raise ProviderError(401, "Qoder 未配置 access token（服务商页 api_key 或 options.extra_keys）")
         self._pool.set_weights(keys, self.options.get("key_weights"))
         sticky = sticky_key_from_payload(payload)
+        model = self._cooldown_model(payload)
         last: ProviderError | None = None
 
         for _ in range(self._attempts(len(keys))):
             pick = await pick_in_group(
-                self._pool, self._store, provider="qoder", group=self._group(), keys=keys, sticky_key=sticky
+                self._pool,
+                self._store,
+                provider="qoder",
+                group=self._group(),
+                keys=keys,
+                sticky_key=sticky,
+                model=model,
             )
             if pick is None:
                 raise self._all_keys_error(keys, last)
@@ -671,7 +691,7 @@ class QoderAdapter(ProviderAdapter):
                     raise
                 await self._rotate_away(pick.key)
                 if not await self._note_failure(
-                    pick.key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0)
+                    pick.key, exc.status_code, keys, int(getattr(exc, "retry_after", 0) or 0), model
                 ):
                     raise
                 continue
@@ -681,9 +701,9 @@ class QoderAdapter(ProviderAdapter):
             if streamed:
                 stream = getattr(reply, "_stream", None)
                 if stream is not None:
-                    reply._stream = self._tracked_stream(stream, pick.key, keys, sticky)
+                    reply._stream = self._tracked_stream(stream, pick.key, keys, sticky, model)
                     return reply, pick
-            await self._pool.report_success(pick.key)
+            await self._pool.report_success(pick.key, model=model)
             if sticky:
                 await self._pool.bind_sticky(sticky, pick.key)
             return reply, pick
@@ -706,6 +726,15 @@ class QoderAdapter(ProviderAdapter):
                 return name, model[len(name) + 1:]
         configured = str(self.options.get("product") or "qoder").strip().lower()
         return (configured if configured in PRODUCTS else "qoder"), model
+
+    def _cooldown_model(self, payload: dict[str, Any]) -> str:
+        """冷却键：区域+上游模型名。同名的 cn/global 是两条上游，429 不能串冷。"""
+        raw = str(payload.get("model") or "")
+        if not raw:
+            return ""
+        region, bare = self._region(raw)
+        _, bare = self._product(bare)
+        return f"{region}:{bare}"
 
     def _hosts(self, region: str) -> list[str]:
         info = REGIONS[region]

@@ -154,7 +154,7 @@ async def test_bad_account_cools_then_recovers(monkeypatch):
     assert {item["state"] for item in snap["credentials"]} == {"ready"}
 
 
-async def test_rate_limit_uses_rotation_tier_not_retry_after(monkeypatch):
+async def test_rate_limit_cools_only_the_model_not_the_account(monkeypatch):
     adapter = _adapter(["token-a", "token-b"])
     uid_a = _uid("token-a")
     _record(
@@ -169,8 +169,12 @@ async def test_rate_limit_uses_rotation_tier_not_retry_after(monkeypatch):
     await adapter.chat_completion(dict(PAYLOAD), stream=False)
     snap = await adapter._pool.snapshot(adapter._keys())
     bad = next(item for item in snap["credentials"] if item["id"] == fingerprint("token-a"))
-    # 429 档位是 120s；小于档位的 Retry-After 不能把冷却缩短
-    assert 115 <= bad["cooldown_remaining"] <= 120
+    # 429 只冷 (账号, 模型) 60s，账号本身仍 ready；Retry-After 不能把 60s 缩短
+    assert bad["cooldown_remaining"] == 0
+    assert bad["state"] == "ready"
+    assert snap["cooling"] == 0
+    assert snap["model_cooling"] == 1
+    assert 55 <= snap["model_cooldowns"][fingerprint("token-a")]["cn:qwen3"] <= 60
 
 
 async def test_single_account_auth_failure_not_masked(monkeypatch):

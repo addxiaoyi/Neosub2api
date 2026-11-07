@@ -82,6 +82,7 @@ class Scheduler:
         session_key: str = "",
         limit: int = DEFAULT_LIMIT,
         weights: Any = None,
+        model: str = "",
     ) -> Plan:
         creds: list[str] = []
         for credential in credentials:
@@ -93,7 +94,8 @@ class Scheduler:
         self._policy = resolved
         # 每次请求都重设权重：options 改回均权时不能沿用上一轮的旧权重
         self._pool.set_weights(creds, weights)
-        usable = await self._pool.available(creds)
+        # 传 model 时按「账号+模型」判断健康：429 只挡该模型，账号仍可用于其它模型
+        usable = await self._pool.available(creds, model=model)
         degraded = not usable
         note = ""
         if degraded:
@@ -105,7 +107,7 @@ class Scheduler:
         if resolved == "sticky" and not session_key:
             resolved = "failover"
             note = note or "请求未带会话标识，粘滞退化为故障转移"
-        first = await self._first(creds, usable, resolved, session_key)
+        first = await self._first(creds, usable, resolved, session_key, model)
         start = creds.index(first)
         # 从选中号开始向后轮转，跳过已选中的号与非健康号
         ordered: list[int] = []
@@ -123,30 +125,32 @@ class Scheduler:
         return Plan(indices, resolved, degraded, note)
 
     async def _first(
-        self, creds: Sequence[str], usable: Sequence[str], policy: str, session_key: str
+        self, creds: Sequence[str], usable: Sequence[str], policy: str, session_key: str, model: str = ""
     ) -> str:
         if policy == "priority":
             chosen = usable[0]
             await self._pool.touch(chosen)
             return chosen
-        pick = await self._pool.acquire(creds, sticky_key=session_key, allow_degraded=True)
+        pick = await self._pool.acquire(creds, sticky_key=session_key, allow_degraded=True, model=model)
         if pick is None:
             return usable[0]
         return pick.key
 
     # ---------- 健康登记 ----------
 
-    async def note_failure(self, credential: str, status: int, *, cooldown_sec: float | None = None) -> Failure:
-        return await self._pool.report_failure(credential, status, cooldown_sec=cooldown_sec)
+    async def note_failure(
+        self, credential: str, status: int, *, cooldown_sec: float | None = None, model: str = ""
+    ) -> Failure:
+        return await self._pool.report_failure(credential, status, cooldown_sec=cooldown_sec, model=model)
 
-    async def note_success(self, credential: str) -> None:
-        await self._pool.report_success(credential)
+    async def note_success(self, credential: str, *, model: str = "") -> None:
+        await self._pool.report_success(credential, model=model)
 
     async def cool(self, credential: str, seconds: float) -> float:
         return await self._pool.cool(credential, seconds)
 
-    async def snapshot(self, credentials: Sequence[str]) -> dict[str, Any]:
-        state = await self._pool.snapshot(credentials)
+    async def snapshot(self, credentials: Sequence[str], *, model: str = "") -> dict[str, Any]:
+        state = await self._pool.snapshot(credentials, model=model)
         state["policy"] = self._policy
         return state
 

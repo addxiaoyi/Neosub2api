@@ -89,6 +89,49 @@ async def test_cooldown_tiers_escalate_and_breaker_opens():
     assert third.cooldown_sec == BREAKER_COOLDOWN
 
 
+async def test_model_rate_limit_only_cools_the_model():
+    now, tick = _clock()
+    pool = CredentialPool(clock=tick)
+    keys = ["tok-a", "tok-b"]
+    failure = await pool.report_failure("tok-a", 429, model="cn:m-a")
+    assert failure.cooldown_sec == 60.0, "模型级 429 固定 60s，不套账号连续失败倍数"
+    assert (failure.consecutive, failure.breaker_open, failure.model) == (0, False, "cn:m-a")
+    assert await pool.available(keys, model="cn:m-a") == ["tok-b"]
+    assert await pool.available(keys, model="cn:m-b") == keys, "同账号换了模型仍可用"
+    assert await pool.remaining("tok-a", model="cn:m-a") == pytest.approx(60.0)
+    assert await pool.remaining("tok-a") == 0.0, "模型 429 不能把账号本身关进冷却"
+
+
+async def test_model_rate_limit_keeps_single_account_usable():
+    now, tick = _clock()
+    pool = CredentialPool(clock=tick)
+    await pool.report_failure("only", 429, model="cn:m-a")
+    assert await pool.acquire(["only"], model="cn:m-a") is None, "该模型冷却期间不允许再撞"
+    pick = await pool.acquire(["only"], model="cn:m-b")
+    assert pick.key == "only", "单一账号被模型限流后换个模型必须还能用"
+
+
+async def test_account_level_failure_ignores_model_scope():
+    now, tick = _clock()
+    pool = CredentialPool(clock=tick)
+    await pool.report_failure("tok-a", 401, model="cn:m-a")
+    assert await pool.available(["tok-a"], model="cn:m-b") == [], "401 是账号级失败，不能只冷一个模型"
+    assert await pool.remaining("tok-a", model="cn:m-b") == pytest.approx(600.0)
+    assert await pool.remaining("tok-a") == pytest.approx(600.0)
+
+
+async def test_model_cooldown_clears_on_success_and_expires_after_60s():
+    now, tick = _clock()
+    pool = CredentialPool(clock=tick)
+    await pool.report_failure("tok-a", 429, model="cn:m-a")
+    await pool.report_success("tok-a", model="cn:m-a")
+    assert await pool.available(["tok-a"], model="cn:m-a") == ["tok-a"], "该模型成功一次就解除冷却"
+
+    await pool.report_failure("tok-a", 429, model="cn:m-a")
+    now[0] += 61
+    assert await pool.available(["tok-a"], model="cn:m-a") == ["tok-a"]
+
+
 async def test_cooling_credential_is_skipped():
     now, tick = _clock()
     pool = CredentialPool(clock=tick)
@@ -129,6 +172,29 @@ async def test_snapshot_exposes_cooldown_remaining_and_last_used():
     assert entries[fingerprint("tok-b")]["last_used_sec_ago"] is None
     raw = json.dumps(snapshot)
     assert "tok-a" not in raw and "tok-b" not in raw, "快照只能暴露指纹，不能泄露明文凭据"
+
+
+async def test_snapshot_exposes_model_cooling_without_killing_account():
+    now, tick = _clock()
+    pool = CredentialPool(clock=tick)
+    keys = ["tok-a", "tok-b"]
+    await pool.report_failure("tok-a", 429, model="cn:m-a")
+
+    snapshot = await pool.snapshot(keys)
+    assert snapshot["cooling"] == 0, "账号级冷却计数不能被模型冷却污染"
+    assert snapshot["available"] == 2
+    assert snapshot["model_cooling"] == 1
+    assert snapshot["model_cooldowns"][fingerprint("tok-a")] == {"cn:m-a": 60.0}
+    entries = {entry["id"]: entry for entry in snapshot["credentials"]}
+    assert entries[fingerprint("tok-a")]["state"] == "ready"
+
+    scoped = await pool.snapshot(keys, model="cn:m-a")
+    entries = {entry["id"]: entry for entry in scoped["credentials"]}
+    assert entries[fingerprint("tok-a")]["state"] == "cooling"
+    assert entries[fingerprint("tok-a")]["cooldown_remaining"] == pytest.approx(60.0)
+    assert scoped["available"] == 1
+    raw = json.dumps(snapshot) + json.dumps(scoped)
+    assert "tok-a" not in raw and "tok-b" not in raw, "模型冷却快照同样不能泄露明文凭据"
 
 
 async def test_group_selection_sticks_across_restart(tmp_path: Path):
@@ -175,6 +241,21 @@ async def test_group_with_all_members_cooled_returns_none(tmp_path: Path):
     for key in keys:
         await pool.report_failure(key, 429)
     assert await pick_in_group(pool, store, provider="opencode", group="sota", keys=keys) is None
+
+
+async def test_group_skips_only_the_model_cooled_active_member(tmp_path: Path):
+    keys = ["tok-a", "tok-b"]
+    pool = CredentialPool()
+    store = RotationStore(tmp_path / "rotation.db")
+    first = await pick_in_group(pool, store, provider="qoder", group="default", keys=keys, model="cn:m-a")
+    await pool.report_failure(first.key, 429, model="cn:m-b")
+
+    same = await pick_in_group(pool, store, provider="qoder", group="default", keys=keys, model="cn:m-a")
+    assert (same.key, same.rule) == (first.key, "group_sticky"), "别的模型被限流不能把当前成员换掉"
+
+    rotated = await pick_in_group(pool, store, provider="qoder", group="default", keys=keys, model="cn:m-b")
+    assert rotated.key != first.key
+    assert rotated.rule == "group_rotate"
 
 
 def test_sticky_key_from_payload_sources():

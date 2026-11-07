@@ -9,7 +9,8 @@
 5. 全冷却：strict 模式显式拒绝；degraded 模式按「最早恢复」降级试一次。
 
 失败冷却按状态码分档，同账号连续失败按倍数升级；连续失败达到阈值即熔断，
-熔断窗口内该账号不再参与选择。落库只存凭据指纹，不复制明文密钥。
+熔断窗口内该账号不再参与选择。429 额外按「账号+模型」记一条 60s 冷却：只挡
+这一个模型，账号本身不判死，其它模型照常可用。落库只存凭据指纹，不复制明文密钥。
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ COOLDOWN_BY_STATUS = {
 }
 TIER_FACTOR = 2.0
 MAX_COOLDOWN = 3600.0
+# 模型级限流：上游按模型报 429，只冷这一条模型，账号本身继续服务其它模型
+MODEL_RATE_LIMIT_COOLDOWN = 60.0
 BREAKER_THRESHOLD = 3
 BREAKER_COOLDOWN = 3600.0
 STICKY_TTL = 1800.0
@@ -103,10 +106,12 @@ class Failure:
     cooldown_sec: float
     consecutive: int
     breaker_open: bool
+    model: str = ""
 
     def describe(self) -> str:
         state = "熔断" if self.breaker_open else "冷却"
-        return f"{self.cred_id} {state} {self.cooldown_sec:.0f}s（连续失败 {self.consecutive} 次）"
+        scope = f" 模型={self.model}" if self.model else ""
+        return f"{self.cred_id} {state} {self.cooldown_sec:.0f}s（连续失败 {self.consecutive} 次）{scope}"
 
 
 class CredentialPool:
@@ -131,6 +136,7 @@ class CredentialPool:
         self._lock = asyncio.Lock()
         self._cursor = 0
         self._cooling: dict[str, float] = {}
+        self._model_cooling: dict[tuple[str, str], float] = {}
         self._failures: dict[str, int] = {}
         self._last_used: dict[str, float] = {}
         self._sticky: dict[str, tuple[str, float]] = {}
@@ -177,19 +183,38 @@ class CredentialPool:
         for cred_id, until in list(self._cooling.items()):
             if until <= now:
                 self._cooling.pop(cred_id, None)
+        for (cred_id, model), until in list(self._model_cooling.items()):
+            if until <= now:
+                self._model_cooling.pop((cred_id, model), None)
 
-    def _available(self, keys: Sequence[str], now: float) -> list[str]:
+    def _model_until(self, cred_id: str, model: str) -> float:
+        return self._model_cooling.get((cred_id, model), 0.0) if model else 0.0
+
+    def _recovery(self, cred_id: str, model: str) -> float:
+        """账号最早可再用的时刻：账号冷却与模型冷却取较晚者。"""
+        return max(self._cooling.get(cred_id, 0.0), self._model_until(cred_id, model))
+
+    def _available(self, keys: Sequence[str], now: float, model: str = "") -> list[str]:
         self._expire(now)
-        return [key for key in keys if self._cooling.get(fingerprint(key), 0.0) <= now]
+        result: list[str] = []
+        for key in keys:
+            cred_id = fingerprint(key)
+            if self._cooling.get(cred_id, 0.0) > now:
+                continue
+            if model and self._model_until(cred_id, model) > now:
+                continue
+            result.append(key)
+        return result
 
-    async def available(self, keys: Sequence[str]) -> list[str]:
+    async def available(self, keys: Sequence[str], *, model: str = "") -> list[str]:
         async with self._lock:
-            return self._available(keys, self._now())
+            return self._available(keys, self._now(), model)
 
-    async def remaining(self, key: str) -> float:
+    async def remaining(self, key: str, *, model: str = "") -> float:
         async with self._lock:
-            self._expire(self._now())
-            return max(0.0, self._cooling.get(fingerprint(key), 0.0) - self._now())
+            now = self._now()
+            self._expire(now)
+            return max(0.0, self._recovery(fingerprint(key), model) - now)
 
     def _weighted(self, keys: Sequence[str]) -> str:
         weights = [max(self._weights.get(fingerprint(key), 1.0), 0.0001) for key in keys]
@@ -209,21 +234,27 @@ class CredentialPool:
         return ""
 
     async def acquire(
-        self, keys: Sequence[str], *, sticky_key: str = "", allow_degraded: bool = False
+        self,
+        keys: Sequence[str],
+        *,
+        sticky_key: str = "",
+        allow_degraded: bool = False,
+        model: str = "",
     ) -> Pick | None:
         async with self._lock:
             now = self._now()
-            available = self._available(keys, now)
+            available = self._available(keys, now, model)
             if not available:
                 if not allow_degraded:
                     return None
                 # 降级：所有号都在冷却，挑最早恢复的那个试一次，并明确标记 degraded
-                soonest = min(keys, key=lambda key: self._cooling.get(fingerprint(key), 0.0))
+                soonest = min(keys, key=lambda key: self._recovery(fingerprint(key), model))
                 index = list(keys).index(soonest)
                 self._touch(soonest, now)
+                wait = self._recovery(fingerprint(soonest), model) - now
                 logger.warning(
-                    "账号池全冷却，降级选号 provider_pool=%d cred=%s 剩余=%.0fs",
-                    len(keys), fingerprint(soonest), self._cooling.get(fingerprint(soonest), 0.0) - now,
+                    "账号池全冷却，降级选号 provider_pool=%d cred=%s 模型=%s 剩余=%.0fs",
+                    len(keys), fingerprint(soonest), model or "-", wait,
                 )
                 return Pick(soonest, index, "degraded", note="全部账号冷却中，按最早恢复降级")
             if sticky_key:
@@ -246,9 +277,9 @@ class CredentialPool:
     def _touch(self, key: str, now: float) -> None:
         self._last_used[fingerprint(key)] = now
 
-    async def pick(self, keys: Sequence[str], *, sticky_key: str = "") -> str | None:
+    async def pick(self, keys: Sequence[str], *, sticky_key: str = "", model: str = "") -> str | None:
         """兼容旧 KeyPool 调用点：只返回凭据本体，不返回规则。"""
-        result = await self.acquire(keys, sticky_key=sticky_key)
+        result = await self.acquire(keys, sticky_key=sticky_key, model=model)
         return result.key if result else None
 
     async def touch(self, key: str) -> None:
@@ -257,11 +288,22 @@ class CredentialPool:
 
     # ---------- 健康登记 ----------
 
-    async def report_failure(self, key: str, status: int, *, cooldown_sec: float | None = None) -> Failure:
+    async def report_failure(
+        self, key: str, status: int, *, cooldown_sec: float | None = None, model: str = ""
+    ) -> Failure:
         async with self._lock:
             now = self._now()
             self._expire(now)
             cred_id = fingerprint(key)
+            # 429 是上游按模型报的限流：只冷这一条模型，账号与粘性都不动
+            if model and status == 429:
+                span = float(cooldown_sec if cooldown_sec is not None else MODEL_RATE_LIMIT_COOLDOWN)
+                span = min(max(span, 1.0), MAX_COOLDOWN)
+                self._model_cooling[(cred_id, model)] = now + span
+                self._last_used[cred_id] = now
+                failure = Failure(cred_id, status, span, 0, False, model)
+                logger.info("模型限流 %s", failure.describe())
+                return failure
             consecutive = self._failures.get(cred_id, 0) + 1
             self._failures[cred_id] = consecutive
             base = max(COOLDOWN_BY_STATUS.get(status, 0.0), cooldown_sec if cooldown_sec is not None else DEFAULT_COOLDOWN)
@@ -287,10 +329,12 @@ class CredentialPool:
                 if bound == cred_id:
                     self._sticky.pop(session, None)
 
-    async def report_success(self, key: str) -> None:
+    async def report_success(self, key: str, *, model: str = "") -> None:
         async with self._lock:
             now = self._now()
             cred_id = fingerprint(key)
+            if model:
+                self._model_cooling.pop((cred_id, model), None)
             failures = self._failures.pop(cred_id, 0)
             self._cooling.pop(cred_id, None)
             self._last_used[cred_id] = now
@@ -312,16 +356,38 @@ class CredentialPool:
 
     # ---------- 可观测性 ----------
 
-    async def snapshot(self, keys: Sequence[str], *, group: str = "", group_active: str = "") -> dict[str, Any]:
+    async def snapshot(
+        self,
+        keys: Sequence[str],
+        *,
+        group: str = "",
+        group_active: str = "",
+        model: str = "",
+    ) -> dict[str, Any]:
         async with self._lock:
             now = self._now()
             self._expire(now)
+            wanted = [fingerprint(key) for key in keys]
+            cooled: dict[str, dict[str, float]] = {}
+            for (cred_id, name), until in self._model_cooling.items():
+                if cred_id not in wanted:
+                    continue
+                wait = until - now
+                if wait > 0:
+                    cooled.setdefault(cred_id, {})[name] = round(wait, 1)
+            model_cooling = (
+                sum(1 for cred_id in wanted if cooled.get(cred_id, {}).get(model, 0.0) > 0)
+                if model
+                else sum(len(entries) for entries in cooled.values())
+            )
             entries: list[dict[str, Any]] = []
             cooling = 0
             for key in keys:
                 cred_id = fingerprint(key)
                 until = self._cooling.get(cred_id, 0.0)
                 remaining = max(0.0, until - now)
+                if model:
+                    remaining = max(remaining, cooled.get(cred_id, {}).get(model, 0.0))
                 if remaining > 0:
                     cooling += 1
                 last = self._last_used.get(cred_id)
@@ -344,6 +410,8 @@ class CredentialPool:
                 "rule": "sticky>weighted>round_robin" if self._weights else "sticky>round_robin",
                 "available": len(keys) - cooling,
                 "cooling": cooling,
+                "model_cooling": model_cooling,
+                "model_cooldowns": cooled,
                 "credentials": entries,
             }
             if group:
@@ -452,17 +520,19 @@ async def pick_in_group(
     group: str,
     keys: Sequence[str],
     sticky_key: str = "",
+    model: str = "",
 ) -> Pick | None:
     """轮转组选号：组内粘滞成员优先；成员失败/冷却后换组内下一个并落库。
 
     组状态只记 active 指纹，所以进程重启后同一组仍命中同一个号（冷却态除外）。
+    传 model 时按「账号+模型」粒度排除冷却，这是 qoder 上游按模型限流的口径。
     """
     if not keys:
         return None
     group = _clip(group)
     state = store.load(provider, group)
     active = str(state.get("active") or "")
-    available = await pool.available(keys)
+    available = await pool.available(keys, model=model)
     if active:
         for index, key in enumerate(keys):
             if fingerprint(key) == active and key in available:
@@ -472,7 +542,7 @@ async def pick_in_group(
                     provider, group, active,
                 )
                 return Pick(key, index, "group_sticky", note=f"group={group} 沿用持久化成员")
-    pick = await pool.acquire(keys, sticky_key=sticky_key)
+    pick = await pool.acquire(keys, sticky_key=sticky_key, model=model)
     if pick is None:
         return None
     rule = "group_rotate" if active else "group_init"
