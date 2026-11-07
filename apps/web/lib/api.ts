@@ -4,8 +4,12 @@ import {tp} from './i18n';
 import type {
   CodebuddyTaskPage,
   CodebuddyTaskReply,
+  ConsoleAccountRow,
   ConsoleActionReply,
+  ConsoleLog,
   ConsoleMediaInventory,
+  ConsolePage,
+  ConsoleQuery,
   ProviderConsole,
 } from './provider-console';
 import type {Realm} from './realm-context';
@@ -580,11 +584,38 @@ async function postRaw(url: string, body: unknown): Promise<RawSidecarReply> {
 }
 
 /* ── 服务商管理台（只读快照 + 显式运维动作） ─────────── */
+export type ConsoleCsvKind = 'accounts' | 'logs' | 'task-runs';
+
 export const providerConsoleApi = {
   snapshot: (id: string, window = '7d') =>
     get<ProviderConsole>(`/api/providers/${encodeURIComponent(id)}/console`, {window}),
-  action: (id: string, action: string, extra?: {task?: string; task_id?: string; force?: boolean}) =>
+  action: (
+    id: string,
+    action: string,
+    extra?: {task?: string; task_id?: string; credential?: string; force?: boolean},
+  ) =>
     post<ConsoleActionReply>(`/api/providers/${encodeURIComponent(id)}/console/actions`, {action, ...extra}),
+  accounts: (id: string, query: ConsoleQuery = {}) =>
+    get<ConsolePage<ConsoleAccountRow>>(
+      `/api/providers/${encodeURIComponent(id)}/console/accounts`,
+      query as Record<string, unknown>,
+    ),
+  logs: (id: string, query: ConsoleQuery = {}) =>
+    get<ConsolePage<ConsoleLog>>(
+      `/api/providers/${encodeURIComponent(id)}/console/logs`,
+      query as Record<string, unknown>,
+    ),
+  /** 导出走 blob：后端按 Content-Disposition 给文件名，前端不猜 */
+  exportCsv: async (id: string, kind: ConsoleCsvKind, query: ConsoleQuery = {}) => {
+    const url =
+      kind === 'task-runs'
+        ? '/api/providers/codebuddy/tasks/export'
+        : `/api/providers/${encodeURIComponent(id)}/console/${kind}/export`;
+    const resp = await http.get(url, {params: query, responseType: 'blob'});
+    const disposition = String(resp.headers['content-disposition'] || '');
+    const matched = disposition.match(/filename="([^"]+)"/);
+    return {blob: resp.data as Blob, filename: matched?.[1] || `${id}-${kind}.csv`};
+  },
   media: (id: string, kind: 'files' | 'editable' = 'files') =>
     get<ConsoleMediaInventory>(`/api/providers/${encodeURIComponent(id)}/console/media`, {kind}),
   codebuddyTasks: (limit = 20) =>

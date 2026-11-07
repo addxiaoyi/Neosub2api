@@ -16,7 +16,7 @@ import asyncio
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from ..adapters.base import ProviderError
@@ -38,6 +38,7 @@ class ActionIn(BaseModel):
     action: str
     task: str = ""
     task_id: str = ""
+    credential: str = ""
     force: bool = False
 
 
@@ -264,6 +265,7 @@ async def run_action(
     adapter = _adapter(request, provider_id)
     actor = _actor(user)
     started = int(time.time())
+    target = body.task or body.task_id or body.credential
     result: dict[str, Any] = {}
     message = ""
 
@@ -323,25 +325,255 @@ async def run_action(
             if cancelled is None:
                 return {"ok": False, "action": action, "result": {}, "message": "任务不存在或已结束"}
             result = {"cancelled": True, "id": body.task_id}
+        elif action == "clear_cooldown":
+            result = {"cooldown": await console.clear_cooldown(adapter, body.credential)}
+        elif action == "reset_sessions":
+            if provider_id != "qoder":
+                raise HTTPException(400, "重置会话仅支持 qoder")
+            accounts_fn = getattr(adapter, "_accounts", None)
+            invalidate = getattr(adapter, "_invalidate_session", None)
+            if not callable(accounts_fn) or not callable(invalidate):
+                raise HTTPException(400, "该服务商没有可重置的会话缓存")
+            accounts = [item for item in accounts_fn() if getattr(item, "token", "")]
+            for account in accounts:
+                invalidate(account)
+            result = {"cleared": len(accounts), "accounts": len(accounts)}
         else:
             raise HTTPException(400, f"该服务商不支持动作：{console.clean(action)}")
     except HTTPException:
         raise
     except ProviderError as exc:
         message = _log_error(exc)
-        _audit(request, user, f"console.{provider_id}.{action}", body.task or body.task_id, f"failed: {message}")
+        _audit(request, user, f"console.{provider_id}.{action}", target, f"failed: {message}")
         return {"ok": False, "action": action, "result": result, "message": message}
     except asyncio.TimeoutError:
         message = "上游探测超时"
-        _audit(request, user, f"console.{provider_id}.{action}", body.task or body.task_id, f"failed: {message}")
+        _audit(request, user, f"console.{provider_id}.{action}", target, f"failed: {message}")
         return {"ok": False, "action": action, "result": result, "message": message}
     except Exception as exc:  # noqa: BLE001 - 统一收口成脱敏后的对外文案
         message = _log_error(exc)
-        _audit(request, user, f"console.{provider_id}.{action}", body.task or body.task_id, f"failed: {message}")
+        _audit(request, user, f"console.{provider_id}.{action}", target, f"failed: {message}")
         return {"ok": False, "action": action, "result": result, "message": message}
 
-    _audit(request, user, f"console.{provider_id}.{action}", body.task or body.task_id, "ok")
+    _audit(request, user, f"console.{provider_id}.{action}", target, "ok")
     return {"ok": True, "action": action, "result": result, "message": ""}
+
+
+_EXPORT_MAX = 5000
+
+_ACCOUNT_COLUMNS = (
+    ("uid", "UID"),
+    ("nickname", "昵称"),
+    ("file", "文件"),
+    ("realm", "地区"),
+    ("expired_at", "到期时间"),
+    ("disabled", "已停用"),
+    ("credits", "积分"),
+    ("created", "登记时间"),
+)
+
+_LOG_COLUMNS = (
+    ("time", "时间"),
+    ("model", "模型"),
+    ("status", "状态码"),
+    ("latency_ms", "耗时(ms)"),
+    ("tokens", "Token"),
+    ("stream", "流式"),
+    ("error", "错误"),
+)
+
+_TASK_COLUMNS = (
+    ("task", "任务"),
+    ("status", "结果"),
+    ("actor", "操作人"),
+    ("started", "开始"),
+    ("finished", "结束"),
+    ("message", "摘要"),
+)
+
+
+def _ensure_console_provider(provider_id: str) -> None:
+    if provider_id not in console.CONSOLE_PROVIDERS:
+        raise HTTPException(404, f"未知的 provider：{console.clean(provider_id)}")
+
+
+def _stamp(ts: Any) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts))) if int(ts or 0) else ""
+
+
+def _csv(provider_id: str, kind: str, rows: list[dict[str, Any]], columns: tuple[tuple[str, str], ...]) -> Response:
+    name = f"{provider_id}-{kind}-{time.strftime('%Y%m%d')}.csv"
+    return Response(
+        content=console.csv_text(rows, list(columns)),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+def _collect(fetch: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """导出不分页：按 100 条翻页取全量，上限 5000 行防止把库拖垮。"""
+    items: list[dict[str, Any]] = []
+    page = 1
+    while len(items) < _EXPORT_MAX:
+        chunk = fetch(page=page, size=console.MAX_PAGE_SIZE, **kwargs)
+        items.extend(chunk["items"])
+        if page >= chunk["pages"] or not chunk["items"]:
+            break
+        page += 1
+    return items[:_EXPORT_MAX]
+
+
+def _account_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "uid": item["uid"],
+            "nickname": item["nickname"],
+            "file": item["file"],
+            "realm": item["realm"],
+            "expired_at": _stamp(item["expires_at"]) or "长期",
+            "disabled": "是" if item["disabled"] else "否",
+            "credits": "" if item["credits"] is None else item["credits"],
+            "created": _stamp(item["created_at"]),
+        }
+        for item in items
+    ]
+
+
+def _log_export_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "time": _stamp(item["ts"]),
+            "model": item["model"],
+            "status": item["status"],
+            "latency_ms": item["latency_ms"],
+            "tokens": item["tokens"],
+            "stream": "是" if item["stream"] else "否",
+            "error": item["error"],
+        }
+        for item in items
+    ]
+
+
+@router.get("/{provider_id}/console/accounts")
+async def console_accounts(
+    provider_id: str,
+    request: Request,
+    page: int = Query(1),
+    size: int = Query(console.DEFAULT_PAGE_SIZE),
+    status: str = Query("all"),
+    q: str = Query(""),
+    user: dict = Depends(current_user),
+) -> dict[str, Any]:
+    _ensure_console_provider(provider_id)
+    conn = _db(request)
+    try:
+        return console.accounts_page(
+            conn, provider_id, console.owner_scope(user), page=page, size=size, status=status, q=q
+        )
+    except ValueError as exc:
+        raise HTTPException(400, console.clean(str(exc))) from None
+    finally:
+        conn.close()
+
+
+@router.get("/{provider_id}/console/accounts/export")
+async def console_accounts_export(
+    provider_id: str,
+    request: Request,
+    status: str = Query("all"),
+    q: str = Query(""),
+    user: dict = Depends(current_user),
+) -> Response:
+    _ensure_console_provider(provider_id)
+    owner = console.owner_scope(user)
+    conn = _db(request)
+    try:
+        items = _collect(
+            lambda **kw: console.accounts_page(conn, provider_id, owner, status=status, q=q, **kw)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, console.clean(str(exc))) from None
+    finally:
+        conn.close()
+    return _csv(provider_id, "accounts", _account_export_rows(items), _ACCOUNT_COLUMNS)
+
+
+@router.get("/{provider_id}/console/logs")
+async def console_logs(
+    provider_id: str,
+    request: Request,
+    page: int = Query(1),
+    size: int = Query(console.DEFAULT_PAGE_SIZE),
+    status: str = Query("all"),
+    model: str = Query(""),
+    q: str = Query(""),
+    window: str = Query("7d"),
+    user: dict = Depends(current_user),
+) -> dict[str, Any]:
+    _ensure_console_provider(provider_id)
+    conn = _db(request)
+    try:
+        return console.logs_page(
+            conn,
+            provider_id,
+            console.owner_scope(user),
+            page=page,
+            size=size,
+            status=status,
+            model=model,
+            q=q,
+            window=window,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, console.clean(str(exc))) from None
+    finally:
+        conn.close()
+
+
+@router.get("/{provider_id}/console/logs/export")
+async def console_logs_export(
+    provider_id: str,
+    request: Request,
+    status: str = Query("all"),
+    model: str = Query(""),
+    q: str = Query(""),
+    window: str = Query("7d"),
+    user: dict = Depends(current_user),
+) -> Response:
+    _ensure_console_provider(provider_id)
+    owner = console.owner_scope(user)
+    conn = _db(request)
+    try:
+        items = _collect(
+            lambda **kw: console.logs_page(
+                conn, provider_id, owner, status=status, model=model, q=q, window=window, **kw
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(400, console.clean(str(exc))) from None
+    finally:
+        conn.close()
+    return _csv(provider_id, "logs", _log_export_rows(items), _LOG_COLUMNS)
+
+
+@router.get("/codebuddy/tasks/export")
+async def codebuddy_tasks_export(
+    request: Request,
+    user: dict = Depends(admin_user),
+) -> Response:
+    runs = provider_tasks.list_runs(request.app.state.settings.data_dir, "codebuddy", 50)
+    rows = [
+        {
+            "task": run.get("task", ""),
+            "status": run.get("status", ""),
+            "actor": run.get("actor", ""),
+            "started": _stamp(run.get("started_at")),
+            "finished": _stamp(run.get("finished_at")),
+            "message": console.clean(run.get("message"), 200),
+        }
+        for run in runs
+    ]
+    return _csv("codebuddy", "task-runs", rows, _TASK_COLUMNS)
 
 
 @router.get("/{provider_id}/console/media")

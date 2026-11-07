@@ -8,13 +8,18 @@
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
+import os
 from typing import Any
 
+from ..adapters.base import ProviderError
 from ..api_utils import mask_secret, mask_text, now, redact_endpoints
 from ..billing import WINDOW_TZ_OFFSET, to_usd
 from . import muse_session
 from .proxy_pool import ProxyPool
+from .rotation import fingerprint
 
 CONSOLE_PROVIDERS = (
     "codebuddy",
@@ -29,18 +34,22 @@ CONSOLE_PROVIDERS = (
 )
 
 WINDOW_SECONDS = {"24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+MAX_PAGE_SIZE = 100
+DEFAULT_PAGE_SIZE = 20
+ACCOUNT_STATUS = ("all", "active", "expired", "disabled")
+LOG_STATUS = ("all", "ok", "failed")
 _TZ = dt.timezone(dt.timedelta(seconds=WINDOW_TZ_OFFSET))
 
 # 每家管理台能做的事：probe 是通用探活，其余按适配器实际实现挂载
 ACTIONS = {
     "codebuddy": ("probe", "run_task"),
-    "muse": ("probe", "keepalive"),
+    "muse": ("probe", "keepalive", "clear_cooldown"),
     "gptgrok": ("probe", "cancel_task"),
-    "zcode": ("probe", "claim"),
-    "trae": ("probe",),
-    "qoder": ("probe",),
+    "zcode": ("probe", "claim", "clear_cooldown"),
+    "trae": ("probe", "clear_cooldown"),
+    "qoder": ("probe", "clear_cooldown", "reset_sessions"),
     "qoder_sidecar": ("probe",),
-    "codar": ("probe",),
+    "codar": ("probe", "clear_cooldown"),
     "codar_sidecar": ("probe",),
 }
 
@@ -249,6 +258,150 @@ def recent_logs(conn: Any, pid: str, owner: str | None, limit: int = 20) -> list
     ]
 
 
+def _page_args(page: Any, size: Any) -> tuple[int, int]:
+    try:
+        page_no = max(1, int(page or 1))
+    except (TypeError, ValueError):
+        page_no = 1
+    try:
+        size_no = int(size or DEFAULT_PAGE_SIZE)
+    except (TypeError, ValueError):
+        size_no = DEFAULT_PAGE_SIZE
+    return page_no, max(1, min(MAX_PAGE_SIZE, size_no))
+
+
+def _paged(rows: list[dict[str, Any]], total: int, page: int, size: int) -> dict[str, Any]:
+    return {"items": rows, "total": total, "page": page, "size": size, "pages": (total + size - 1) // size}
+
+
+def accounts_page(
+    conn: Any,
+    pid: str,
+    owner: str | None,
+    *,
+    page: Any = 1,
+    size: Any = DEFAULT_PAGE_SIZE,
+    status: str = "all",
+    q: str = "",
+) -> dict[str, Any]:
+    """账号清单分页：admin 看全站，其余角色只看自己名下；文件只回 basename。"""
+    if status not in ACCOUNT_STATUS:
+        raise ValueError(f"不支持的账号筛选：{status}")
+    page_no, size_no = _page_args(page, size)
+    where = ["provider = ?"]
+    params: list[Any] = [pid]
+    if owner is not None:
+        where.append("owner_user_id = ?")
+        params.append(owner)
+    stamp = now()
+    if status == "active":
+        where.append("disabled = 0 AND (expires_at = 0 OR expires_at >= ?)")
+        params.append(stamp)
+    elif status == "expired":
+        where.append("expires_at != 0 AND expires_at < ?")
+        params.append(stamp)
+    elif status == "disabled":
+        where.append("disabled != 0")
+    term = str(q or "").strip()[:64]
+    if term:
+        like = f"%{term}%"
+        where.append("(uid LIKE ? OR nickname LIKE ? OR file LIKE ?)")
+        params.extend([like, like, like])
+    clause = " WHERE " + " AND ".join(where)
+    total = int(conn.execute("SELECT COUNT(*) AS n FROM accounts" + clause, params).fetchone()["n"] or 0)
+    rows = conn.execute(
+        "SELECT file, provider, uid, nickname, enterprise_id, realm, expires_at, credits, note, disabled, created_at "
+        "FROM accounts" + clause + " ORDER BY created_at DESC, file DESC LIMIT ? OFFSET ?",
+        (*params, size_no, (page_no - 1) * size_no),
+    ).fetchall()
+    items = []
+    for row in rows:
+        expires_at = int(row["expires_at"] or 0)
+        items.append(
+            {
+                "file": os.path.basename(str(row["file"] or "")),
+                "uid": str(row["uid"] or ""),
+                "nickname": str(row["nickname"] or "")[:64],
+                "enterprise_id": str(row["enterprise_id"] or "")[:64],
+                "realm": str(row["realm"] or ""),
+                "expires_at": expires_at,
+                "is_expired": bool(expires_at and expires_at < stamp),
+                "credits": row["credits"],
+                "note": clean(row["note"], 80),
+                "disabled": bool(row["disabled"]),
+                "created_at": int(row["created_at"] or 0),
+            }
+        )
+    return _paged(items, total, page_no, size_no)
+
+
+def logs_page(
+    conn: Any,
+    pid: str,
+    owner: str | None,
+    *,
+    page: Any = 1,
+    size: Any = DEFAULT_PAGE_SIZE,
+    status: str = "all",
+    model: str = "",
+    q: str = "",
+    window: str = "7d",
+) -> dict[str, Any]:
+    if status not in LOG_STATUS:
+        raise ValueError(f"不支持的日志筛选：{status}")
+    page_no, size_no = _page_args(page, size)
+    span = WINDOW_SECONDS.get(window, WINDOW_SECONDS["7d"])
+    scope, scope_params = _owned(owner)
+    where = ["provider = ?", "ts >= ?"]
+    params: list[Any] = [pid, now() - span, *scope_params]
+    if scope:
+        where.append(scope)
+    if status == "ok":
+        where.append("status < 400 AND (error IS NULL OR error = '')")
+    elif status == "failed":
+        where.append("(status >= 400 OR error IS NOT NULL AND error != '')")
+    model_term = str(model or "").strip()[:64]
+    if model_term:
+        where.append("model = ?")
+        params.append(model_term)
+    keyword = str(q or "").strip()[:64]
+    if keyword:
+        like = f"%{keyword}%"
+        where.append("(model LIKE ? OR error LIKE ?)")
+        params.extend([like, like])
+    clause = " WHERE " + " AND ".join(where)
+    total = int(conn.execute("SELECT COUNT(*) AS n FROM request_logs" + clause, params).fetchone()["n"] or 0)
+    rows = conn.execute(
+        "SELECT id, ts, model, status, latency_ms, stream, prompt_tokens, completion_tokens, error "
+        "FROM request_logs" + clause + " ORDER BY id DESC LIMIT ? OFFSET ?",
+        (*params, size_no, (page_no - 1) * size_no),
+    ).fetchall()
+    items = [
+        {
+            "id": int(row["id"]),
+            "ts": int(row["ts"]),
+            "model": str(row["model"] or ""),
+            "status": int(row["status"]),
+            "latency_ms": int(row["latency_ms"] or 0),
+            "stream": bool(row["stream"]),
+            "tokens": int(row["prompt_tokens"] or 0) + int(row["completion_tokens"] or 0),
+            "error": clean(row["error"], 160),
+        }
+        for row in rows
+    ]
+    return _paged(items, total, page_no, size_no)
+
+
+def csv_text(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
+    """导出用 CSV：补 BOM 让 Excel 正确识别中文，列序由调用方固定。"""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow([label for _, label in columns])
+    for row in rows:
+        writer.writerow([row.get(key, "") for key, _ in columns])
+    return "\ufeff" + buffer.getvalue()
+
+
 def rotation_groups(adapter: Any) -> tuple[Any, list[str], str]:
     pool = None
     for name in ("_pool", "_keys_pool", "_scheduler"):
@@ -282,6 +435,23 @@ async def rotation_snapshot(adapter: Any) -> dict[str, Any] | None:
         return await pool.snapshot(keys)
     except Exception:
         return None
+
+
+async def clear_cooldown(adapter: Any, credential: str = "") -> dict[str, Any]:
+    """显式清掉本地冷却/熔断计数：只改进程内调度状态，下一次请求会重新选中该凭据。"""
+    pool, keys, group = rotation_groups(adapter)
+    if pool is None or not keys:
+        raise ProviderError(400, "该服务商没有可清冷却的凭据池")
+    reset = getattr(pool, "report_success", None) or getattr(pool, "note_success", None)
+    if not callable(reset):
+        raise ProviderError(400, "该服务商的凭据池不支持清冷却")
+    wanted = str(credential or "").strip()
+    targets = [key for key in keys if not wanted or fingerprint(key) == wanted]
+    if wanted and not targets:
+        raise ProviderError(400, "未找到匹配的凭据")
+    for key in targets:
+        await reset(key)
+    return {"cleared": len(targets), "keys": [fingerprint(key) for key in targets], "group": group}
 
 
 def muse_sessions(pid: str, adapter: Any, settings: Any) -> dict[str, Any] | None:

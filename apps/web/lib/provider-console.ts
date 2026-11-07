@@ -205,6 +205,41 @@ export interface ConsoleActionReply {
   message: string;
 }
 
+/** 管理端分页壳：items/total/page/size/pages 与后端 accounts_page / logs_page 一致。 */
+export interface ConsolePage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
+}
+
+export interface ConsoleAccountRow {
+  file: string;
+  uid: string;
+  nickname: string;
+  enterprise_id: string;
+  realm: string;
+  expires_at: number;
+  is_expired: boolean;
+  credits: number | null;
+  note: string;
+  disabled: boolean;
+  created_at: number;
+}
+
+export type ConsoleAccountStatus = 'all' | 'active' | 'expired' | 'disabled';
+export type ConsoleLogStatus = 'all' | 'ok' | 'failed';
+
+export interface ConsoleQuery {
+  page?: number;
+  size?: number;
+  status?: ConsoleAccountStatus | ConsoleLogStatus;
+  model?: string;
+  q?: string;
+  window?: string;
+}
+
 export interface CodebuddyTaskPage {
   items: ConsoleTaskRun[];
   task_types: string[];

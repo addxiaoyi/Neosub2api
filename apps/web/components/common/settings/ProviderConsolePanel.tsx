@@ -5,12 +5,16 @@ import {
   Activity,
   AlertTriangle,
   BadgeCheck,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   Database,
+  Download,
   KeyRound,
   Loader2,
   Play,
   RefreshCw,
+  Search,
   ShieldCheck,
   TerminalSquare,
   TimerReset,
@@ -22,7 +26,12 @@ import {
 } from '@/lib/api';
 import type {
   CodebuddyTaskPage,
+  ConsoleAccountRow,
+  ConsoleAccountStatus,
+  ConsoleLog,
+  ConsoleLogStatus,
   ConsoleMediaInventory,
+  ConsolePage,
   ConsoleRotationEntry,
   ProviderConsole,
 } from '@/lib/provider-console';
@@ -31,8 +40,15 @@ import {notify} from '@/lib/toast';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 
-type Tab = 'overview' | 'connections' | 'runtime' | 'tasks' | 'usage';
+type Tab = 'overview' | 'connections' | 'accounts' | 'runtime' | 'tasks' | 'usage';
 type Window = '24h' | '7d' | '30d';
+
+type ConfirmState = {
+  action: string;
+  extra?: {task?: string; task_id?: string; credential?: string; force?: boolean};
+  target: string;
+  effect: string;
+};
 
 const WINDOW_LABEL: Record<Window, string> = {
   '24h': 'providerConsole.window24h',
@@ -68,27 +84,102 @@ function Row({label, children}: {label: string; children: React.ReactNode}) {
   );
 }
 
-function RotationTable({rotation}: {rotation: ProviderConsole['rotation']}) {
+const ACTION_LABEL: Record<string, string> = {
+  probe: 'providerConsole.action.probe',
+  keepalive: 'providerConsole.action.keepalive',
+  claim: 'providerConsole.action.claim',
+  run_task: 'providerConsole.action.runTask',
+  cancel_task: 'providerConsole.action.cancelTask',
+  clear_cooldown: 'providerConsole.action.clearCooldown',
+  reset_sessions: 'providerConsole.action.resetSessions',
+};
+
+const ROTATION_STATE_KEY: Record<string, string> = {
+  ready: 'providerConsole.rotation.state.ready',
+  cooling: 'providerConsole.rotation.state.cooling',
+  breaker: 'providerConsole.rotation.state.breaker',
+  degraded: 'providerConsole.rotation.state.degraded',
+};
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function Pager({
+  page,
+  pages,
+  total,
+  busy,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  pages: number;
+  total: number;
+  busy: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+      <span>{t('providerConsole.common.total', {total})}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-6 rounded-full px-2 text-[10px]"
+        disabled={busy || page <= 1}
+        onClick={onPrev}
+      >
+        <ChevronLeft className="mr-0.5 h-3 w-3" />
+        {t('providerConsole.common.prev')}
+      </Button>
+      <span className="tabular-nums">{t('providerConsole.common.pageOf', {page, pages: Math.max(pages, 1)})}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-6 rounded-full px-2 text-[10px]"
+        disabled={busy || page >= pages}
+        onClick={onNext}
+      >
+        {t('providerConsole.common.next')}
+        <ChevronRight className="ml-0.5 h-3 w-3" />
+      </Button>
+    </div>
+  );
+}
+
+function RotationTable({
+  rotation,
+  onClear,
+  busy,
+}: {
+  rotation: ProviderConsole['rotation'];
+  onClear?: (entry: ConsoleRotationEntry) => void;
+  busy?: boolean;
+}) {
   const t = useT();
   if (!rotation || !rotation.credentials.length) {
     return <div className="text-[10px] text-muted-foreground">{t('providerConsole.rotation.none')}</div>;
   }
-  const stateKey: Record<string, string> = {
-    ready: 'providerConsole.rotation.state.ready',
-    cooling: 'providerConsole.rotation.state.cooling',
-    breaker: 'providerConsole.rotation.state.breaker',
-    degraded: 'providerConsole.rotation.state.degraded',
-  };
   return (
     <div className="overflow-x-auto">
       <table className="min-w-full text-[10px]">
         <thead className="text-muted-foreground">
           <tr className="text-left">
             <th className="py-1 pr-3 font-normal">{t('providerConsole.rotation.id')}</th>
-            <th className="py-1 pr-3 font-normal">{t('providerConsole.rotation.state')}</th>
+            <th className="py-1 pr-3 font-normal">{t('providerConsole.rotation.stateLabel')}</th>
             <th className="py-1 pr-3 font-normal">{t('providerConsole.rotation.cooldown')}</th>
             <th className="py-1 pr-3 font-normal">{t('providerConsole.rotation.failures')}</th>
             <th className="py-1 font-normal">{t('providerConsole.rotation.weight')}</th>
+            {onClear ? <th className="py-1 font-normal" /> : null}
           </tr>
         </thead>
         <tbody>
@@ -97,12 +188,25 @@ function RotationTable({rotation}: {rotation: ProviderConsole['rotation']}) {
               <td className="py-1 pr-3 font-mono">{entry.id}</td>
               <td className="py-1 pr-3">
                 <Badge variant={entry.state === 'ready' ? 'secondary' : 'destructive'} className="rounded-full">
-                  {t(stateKey[entry.state] || 'providerConsole.rotation.state.ready')}
+                  {t(ROTATION_STATE_KEY[entry.state] || 'providerConsole.rotation.state.ready')}
                 </Badge>
               </td>
               <td className="py-1 pr-3 tabular-nums">{entry.cooldown_remaining}s</td>
               <td className="py-1 pr-3 tabular-nums">{entry.consecutive_failures}</td>
               <td className="py-1 tabular-nums">{entry.weight}</td>
+              {onClear ? (
+                <td className="py-1 text-right">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 rounded-full px-2 text-[10px]"
+                    disabled={busy}
+                    onClick={() => onClear(entry)}
+                  >
+                    {t('providerConsole.actions.clearCooldown')}
+                  </Button>
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>
@@ -128,6 +232,18 @@ export function ProviderConsolePanel({
   const [note, setNote] = useState('');
   const [tasks, setTasks] = useState<CodebuddyTaskPage | null>(null);
   const [media, setMedia] = useState<ConsoleMediaInventory | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
+  const [accountPage, setAccountPage] = useState<ConsolePage<ConsoleAccountRow> | null>(null);
+  const [accountNo, setAccountNo] = useState(1);
+  const [accountStatus, setAccountStatus] = useState<ConsoleAccountStatus>('all');
+  const [accountQ, setAccountQ] = useState('');
+
+  const [logPage, setLogPage] = useState<ConsolePage<ConsoleLog> | null>(null);
+  const [logNo, setLogNo] = useState(1);
+  const [logStatus, setLogStatus] = useState<ConsoleLogStatus>('all');
+  const [logModel, setLogModel] = useState('');
+  const [logQ, setLogQ] = useState('');
 
   const isAdmin = data ? !data.readonly : false;
   const showTasks = providerId === 'codebuddy' || providerId === 'gptgrok';
@@ -169,7 +285,62 @@ export function ProviderConsolePanel({
   const actions = useMemo(() => new Set(data?.actions || []), [data]);
   const canProbe = actions.has('probe');
 
-  async function runAction(action: string, extra?: {task?: string; task_id?: string; force?: boolean}) {
+  useEffect(() => {
+    setAccountPage(null);
+    setLogPage(null);
+    setAccountNo(1);
+    setLogNo(1);
+    setConfirm(null);
+  }, [providerId]);
+
+  const loadAccounts = useCallback(async () => {
+    try {
+      setAccountPage(
+        await providerConsoleApi.accounts(providerId, {
+          page: accountNo,
+          size: 20,
+          status: accountStatus,
+          q: accountQ.trim(),
+        }),
+      );
+    } catch (e) {
+      notify.err(errText(e));
+    }
+  }, [providerId, accountNo, accountStatus, accountQ]);
+
+  const loadLogs = useCallback(async () => {
+    try {
+      setLogPage(
+        await providerConsoleApi.logs(providerId, {
+          page: logNo,
+          size: 20,
+          status: logStatus,
+          model: logModel.trim(),
+          q: logQ.trim(),
+          window: win,
+        }),
+      );
+    } catch (e) {
+      notify.err(errText(e));
+    }
+  }, [providerId, logNo, logStatus, logModel, logQ, win]);
+
+  useEffect(() => {
+    if (tab !== 'accounts' || !data) return;
+    const timer = setTimeout(() => void loadAccounts(), accountQ ? 400 : 0);
+    return () => clearTimeout(timer);
+  }, [tab, data, loadAccounts, accountQ]);
+
+  useEffect(() => {
+    if (tab !== 'usage') return;
+    const timer = setTimeout(() => void loadLogs(), logQ ? 400 : 0);
+    return () => clearTimeout(timer);
+  }, [tab, loadLogs, logQ]);
+
+  async function runAction(
+    action: string,
+    extra?: {task?: string; task_id?: string; credential?: string; force?: boolean},
+  ) {
     if (busy) return;
     setBusy(action);
     setNote('');
@@ -183,6 +354,42 @@ export function ProviderConsolePanel({
       }
       await load();
       if (providerId === 'codebuddy') await loadTasks();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function ask(
+    action: string,
+    extra: ConfirmState['extra'],
+    target: string,
+    effect: string,
+  ) {
+    if (busy) return;
+    setConfirm({action, extra, target, effect});
+  }
+
+  async function runConfirmed() {
+    if (!confirm) return;
+    const {action, extra} = confirm;
+    setConfirm(null);
+    await runAction(action, extra);
+  }
+
+  async function exportCsv(kind: 'accounts' | 'logs' | 'task-runs') {
+    if (busy) return;
+    setBusy(`export:${kind}`);
+    try {
+      const query =
+        kind === 'accounts'
+          ? {status: accountStatus, q: accountQ.trim()}
+          : kind === 'logs'
+            ? {status: logStatus, model: logModel.trim(), q: logQ.trim(), window: win}
+            : {};
+      const {blob, filename} = await providerConsoleApi.exportCsv(providerId, kind, query);
+      saveBlob(blob, filename);
     } catch (e) {
       notify.err(errText(e));
     } finally {
@@ -208,6 +415,7 @@ export function ProviderConsolePanel({
   const tabs: {id: Tab; label: string}[] = [
     {id: 'overview', label: t('providerConsole.tabs.overview')},
     {id: 'connections', label: t('providerConsole.tabs.connections')},
+    {id: 'accounts', label: t('providerConsole.tabs.accounts')},
     {id: 'runtime', label: t('providerConsole.tabs.runtime')},
     ...(showTasks ? [{id: 'tasks' as Tab, label: t('providerConsole.tabs.tasks')}] : []),
     {id: 'usage', label: t('providerConsole.tabs.usage')},
@@ -395,7 +603,31 @@ export function ProviderConsolePanel({
               <span>{t('providerConsole.rotation.rule')}: {rotation?.rule || '—'}</span>
               {rotation?.group ? <span>{t('providerConsole.rotation.group')}: {rotation.group}</span> : null}
             </div>
-            <RotationTable rotation={rotation} />
+            <RotationTable
+              rotation={rotation}
+              busy={busy !== ''}
+              onClear={
+                actions.has('clear_cooldown')
+                  ? (entry) =>
+                      ask(
+                        'clear_cooldown',
+                        {credential: entry.id},
+                        t('providerConsole.confirm.clearCooldownTarget', {
+                          provider: data.provider.label,
+                          credential: entry.id,
+                          state: `${t(ROTATION_STATE_KEY[entry.state] || 'providerConsole.rotation.state.ready')} · ${entry.cooldown_remaining}s · ${entry.consecutive_failures}`,
+                        }),
+                        t('providerConsole.confirm.clearCooldownEffect', {
+                          provider: data.provider.label,
+                          models: data.config.models.length
+                            ? data.config.models.slice(0, 3).join(' / ') +
+                              (data.config.models.length > 3 ? ' …' : '')
+                            : t('providerConsole.confirm.allModels'),
+                        }),
+                      )
+                  : undefined
+              }
+            />
           </div>
         </div>
       )}
@@ -468,7 +700,17 @@ export function ProviderConsolePanel({
                   variant="outline"
                   className="mt-2 rounded-full text-[10px]"
                   disabled={busy !== ''}
-                  onClick={() => void runAction('keepalive')}
+                  onClick={() =>
+                    ask(
+                      'keepalive',
+                      undefined,
+                      t('providerConsole.confirm.keepaliveTarget', {
+                        provider: data.provider.label,
+                        count: features.sessions?.entries ?? config.session?.cookie_pool ?? 0,
+                      }),
+                      t('providerConsole.confirm.keepaliveEffect'),
+                    )
+                  }
                 >
                   {busy === 'keepalive' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
                   {t('providerConsole.runtime.keepaliveRun')}
@@ -501,7 +743,17 @@ export function ProviderConsolePanel({
                   size="sm"
                   className="mt-2 rounded-full text-[10px]"
                   disabled={busy !== '' || !features.claim.enabled || !features.claim.path_configured}
-                  onClick={() => void runAction('claim')}
+                  onClick={() =>
+                    ask(
+                      'claim',
+                      undefined,
+                      t('providerConsole.confirm.claimTarget', {
+                        provider: data.provider.label,
+                        claimed: features.claim?.claimed_count ?? 0,
+                      }),
+                      t('providerConsole.confirm.claimEffect'),
+                    )
+                  }
                 >
                   {busy === 'claim' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
                   {t('providerConsole.runtime.runClaim')}
@@ -547,6 +799,29 @@ export function ProviderConsolePanel({
               <Row label={t('providerConsole.runtime.sessionKeys')}>
                 {features.session_cache.keys.join(' / ') || '—'}
               </Row>
+              {actions.has('reset_sessions') ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2 rounded-full text-[10px]"
+                  disabled={busy !== ''}
+                  onClick={() =>
+                    ask(
+                      'reset_sessions',
+                      undefined,
+                      t('providerConsole.confirm.resetSessionsTarget', {count: features.session_cache?.entries ?? 0}),
+                      t('providerConsole.confirm.resetSessionsEffect'),
+                    )
+                  }
+                >
+                  {busy === 'reset_sessions' ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <TimerReset className="mr-1 h-3 w-3" />
+                  )}
+                  {t('providerConsole.actions.resetSessions')}
+                </Button>
+              ) : null}
             </div>
           ) : null}
 
@@ -622,7 +897,14 @@ export function ProviderConsolePanel({
                   size="sm"
                   className="rounded-full text-[10px]"
                   disabled={busy !== ''}
-                  onClick={() => void runAction('probe')}
+                  onClick={() =>
+                    ask(
+                      'probe',
+                      undefined,
+                      t('providerConsole.confirm.probeTarget', {provider: data.provider.label}),
+                      t('providerConsole.confirm.probeEffect'),
+                    )
+                  }
                 >
                   {busy === 'probe' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
                   {t('providerConsole.runtime.probe')}
@@ -642,9 +924,23 @@ export function ProviderConsolePanel({
           {providerId === 'codebuddy' ? (
             <>
               <div className="rounded-xl bg-muted/60 p-2.5">
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium">
-                  <Play className="h-3.5 w-3.5" />
-                  {t('providerConsole.tasks.title')}
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[10px] font-medium">
+                  <span className="flex items-center gap-1.5">
+                    <Play className="h-3.5 w-3.5" />
+                    {t('providerConsole.tasks.title')}
+                  </span>
+                  {isAdmin ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 rounded-full px-2 text-[10px]"
+                      disabled={busy !== ''}
+                      onClick={() => void exportCsv('task-runs')}
+                    >
+                      {busy === 'export:task-runs' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Download className="mr-1 h-3 w-3" />}
+                      {t('providerConsole.common.export')}
+                    </Button>
+                  ) : null}
                 </div>
                 <div className="text-[10px] leading-4 text-muted-foreground">{t('providerConsole.tasks.codebuddyHint')}</div>
                 {actions.has('run_task') ? (
@@ -653,7 +949,14 @@ export function ProviderConsolePanel({
                       size="sm"
                       className="rounded-full text-[10px]"
                       disabled={busy !== ''}
-                      onClick={() => void runAction('run_task', {task: 'checkin_all'})}
+                      onClick={() =>
+                        ask(
+                          'run_task',
+                          {task: 'checkin_all'},
+                          t('providerConsole.confirm.runTaskTarget', {task: t('providerConsole.tasks.checkinAll')}),
+                          t('providerConsole.confirm.runTaskEffect'),
+                        )
+                      }
                     >
                       {busy === 'run_task' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
                       {t('providerConsole.tasks.checkinAll')}
@@ -663,7 +966,14 @@ export function ProviderConsolePanel({
                       variant="outline"
                       className="rounded-full text-[10px]"
                       disabled={busy !== ''}
-                      onClick={() => void runAction('run_task', {task: 'refresh_credits', force: true})}
+                      onClick={() =>
+                        ask(
+                          'run_task',
+                          {task: 'refresh_credits', force: true},
+                          t('providerConsole.confirm.runTaskTarget', {task: t('providerConsole.tasks.refreshCredits')}),
+                          t('providerConsole.confirm.runTaskEffect'),
+                        )
+                      }
                     >
                       {busy === 'run_task' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
                       {t('providerConsole.tasks.refreshCredits')}
@@ -750,7 +1060,18 @@ export function ProviderConsolePanel({
                                   variant="ghost"
                                   className="h-6 rounded-full px-2 text-[10px]"
                                   disabled={busy !== ''}
-                                  onClick={() => void runAction('cancel_task', {task_id: task.id})}
+                                  onClick={() =>
+                                    ask(
+                                      'cancel_task',
+                                      {task_id: task.id},
+                                      t('providerConsole.confirm.cancelTaskTarget', {
+                                        id: task.id,
+                                        kind: task.kind || '—',
+                                        status: task.status,
+                                      }),
+                                      t('providerConsole.confirm.cancelTaskEffect'),
+                                    )
+                                  }
                                 >
                                   {t('providerConsole.tasks.cancel')}
                                 </Button>
@@ -790,6 +1111,113 @@ export function ProviderConsolePanel({
               </div>
             </>
           ) : null}
+        </div>
+      )}
+
+      {tab === 'accounts' && (
+        <div className="mt-3 space-y-2">
+          <div className="rounded-xl bg-muted/60 p-2.5">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[10px] font-medium">
+              <span className="flex items-center gap-1.5">
+                <Database className="h-3.5 w-3.5" />
+                {t('providerConsole.accounts.title')}
+              </span>
+              {isAdmin ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 rounded-full px-2 text-[10px]"
+                  disabled={busy !== '' || !accountPage}
+                  onClick={() => void exportCsv('accounts')}
+                >
+                  {busy === 'export:accounts' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Download className="mr-1 h-3 w-3" />}
+                  {t('providerConsole.common.export')}
+                </Button>
+              ) : null}
+            </div>
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+              <select
+                className="h-6 rounded-md border border-border bg-background px-1.5 text-[10px]"
+                value={accountStatus}
+                onChange={(event) => {
+                  setAccountStatus(event.target.value as ConsoleAccountStatus);
+                  setAccountNo(1);
+                }}
+              >
+                <option value="all">{t('providerConsole.accounts.status.all')}</option>
+                <option value="active">{t('providerConsole.accounts.status.active')}</option>
+                <option value="expired">{t('providerConsole.accounts.status.expired')}</option>
+                <option value="disabled">{t('providerConsole.accounts.status.disabled')}</option>
+              </select>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-1.5 top-1.5 h-3 w-3 text-muted-foreground" />
+                <input
+                  className="h-6 w-44 rounded-md border border-border bg-background pl-6 pr-1.5 text-[10px]"
+                  placeholder={t('providerConsole.accounts.searchPlaceholder')}
+                  value={accountQ}
+                  onChange={(event) => {
+                    setAccountQ(event.target.value);
+                    setAccountNo(1);
+                  }}
+                />
+              </div>
+            </div>
+            {!accountPage || accountPage.items.length === 0 ? (
+              <div className="text-[10px] text-muted-foreground">{t('providerConsole.accounts.empty')}</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-[10px]">
+                  <thead className="text-muted-foreground">
+                    <tr className="text-left">
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.uid')}</th>
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.nickname')}</th>
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.file')}</th>
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.realm')}</th>
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.expiresAt')}</th>
+                      <th className="py-1 pr-3 font-normal">{t('providerConsole.accounts.credits')}</th>
+                      <th className="py-1 font-normal">{t('providerConsole.accounts.state')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {accountPage.items.map((row) => (
+                      <tr key={`${row.file}-${row.uid}`} className="border-t border-border/30">
+                        <td className="py-1 pr-3 font-mono">{row.uid || '—'}</td>
+                        <td className="py-1 pr-3">{row.nickname || '—'}</td>
+                        <td className="py-1 pr-3 font-mono">{row.file || '—'}</td>
+                        <td className="py-1 pr-3">{row.realm || '—'}</td>
+                        <td className="py-1 pr-3 whitespace-nowrap">
+                          {row.expires_at ? stamp(row.expires_at) : t('providerConsole.accounts.longTerm')}
+                        </td>
+                        <td className="py-1 pr-3 tabular-nums">{row.credits ?? '—'}</td>
+                        <td className="py-1">
+                          <Badge
+                            variant={row.disabled || row.is_expired ? 'destructive' : 'secondary'}
+                            className="rounded-full"
+                          >
+                            {row.disabled
+                              ? t('providerConsole.accounts.status.disabled')
+                              : row.is_expired
+                                ? t('providerConsole.accounts.status.expired')
+                                : t('providerConsole.accounts.status.active')}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {accountPage ? (
+              <Pager
+                page={accountPage.page}
+                pages={accountPage.pages}
+                total={accountPage.total}
+                busy={busy !== ''}
+                onPrev={() => setAccountNo((value) => Math.max(1, value - 1))}
+                onNext={() => setAccountNo((value) => value + 1)}
+              />
+            ) : null}
+          </div>
         </div>
       )}
 
@@ -839,12 +1267,61 @@ export function ProviderConsolePanel({
           </div>
 
           <div className="rounded-xl bg-muted/60 p-2.5">
-            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium">
-              <BadgeCheck className="h-3.5 w-3.5" />
-              {t('providerConsole.usage.recentLogs')}
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[10px] font-medium">
+              <span className="flex items-center gap-1.5">
+                <BadgeCheck className="h-3.5 w-3.5" />
+                {t('providerConsole.usage.recentLogs')}
+              </span>
+              {isAdmin ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 rounded-full px-2 text-[10px]"
+                  disabled={busy !== '' || !logPage}
+                  onClick={() => void exportCsv('logs')}
+                >
+                  {busy === 'export:logs' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Download className="mr-1 h-3 w-3" />}
+                  {t('providerConsole.common.export')}
+                </Button>
+              ) : null}
             </div>
-            {logs.length === 0 ? (
-              <div className="text-[10px] text-muted-foreground">{t('providerConsole.usage.noLogs')}</div>
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+              <select
+                className="h-6 rounded-md border border-border bg-background px-1.5 text-[10px]"
+                value={logStatus}
+                onChange={(event) => {
+                  setLogStatus(event.target.value as ConsoleLogStatus);
+                  setLogNo(1);
+                }}
+              >
+                <option value="all">{t('providerConsole.logs.status.all')}</option>
+                <option value="ok">{t('providerConsole.logs.status.ok')}</option>
+                <option value="failed">{t('providerConsole.logs.status.failed')}</option>
+              </select>
+              <input
+                className="h-6 w-28 rounded-md border border-border bg-background px-1.5 text-[10px]"
+                placeholder={t('providerConsole.logs.modelPlaceholder')}
+                value={logModel}
+                onChange={(event) => {
+                  setLogModel(event.target.value);
+                  setLogNo(1);
+                }}
+              />
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-1.5 top-1.5 h-3 w-3 text-muted-foreground" />
+                <input
+                  className="h-6 w-36 rounded-md border border-border bg-background pl-6 pr-1.5 text-[10px]"
+                  placeholder={t('providerConsole.logs.keywordPlaceholder')}
+                  value={logQ}
+                  onChange={(event) => {
+                    setLogQ(event.target.value);
+                    setLogNo(1);
+                  }}
+                />
+              </div>
+            </div>
+            {!logPage || logPage.items.length === 0 ? (
+              <div className="text-[10px] text-muted-foreground">{t('providerConsole.logs.empty')}</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full text-[10px]">
@@ -858,7 +1335,7 @@ export function ProviderConsolePanel({
                     </tr>
                   </thead>
                   <tbody>
-                    {logs.map((log) => (
+                    {logPage.items.map((log) => (
                       <tr key={log.id} className="border-t border-border/30">
                         <td className="py-1 pr-3 whitespace-nowrap">{stamp(log.ts)}</td>
                         <td className="py-1 pr-3 font-mono">{log.model || '—'}</td>
@@ -871,9 +1348,60 @@ export function ProviderConsolePanel({
                 </table>
               </div>
             )}
+            {logPage ? (
+              <Pager
+                page={logPage.page}
+                pages={logPage.pages}
+                total={logPage.total}
+                busy={busy !== ''}
+                onPrev={() => setLogNo((value) => Math.max(1, value - 1))}
+                onNext={() => setLogNo((value) => value + 1)}
+              />
+            ) : null}
           </div>
         </div>
       )}
+
+      {confirm ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-4 shadow-lg">
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold">
+              <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+              {t('providerConsole.confirm.title', {
+                action: t(ACTION_LABEL[confirm.action] || 'providerConsole.action.probe'),
+              })}
+            </div>
+            <div className="space-y-1.5 text-[10px] leading-4">
+              <div>
+                <span className="text-muted-foreground">{t('providerConsole.confirm.target')}</span>
+                <span className="ml-1 break-all">{confirm.target}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">{t('providerConsole.confirm.effect')}</span>
+                <span className="ml-1">{confirm.effect}</span>
+              </div>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button size="sm" variant="ghost" className="rounded-full text-[10px]" onClick={() => setConfirm(null)}>
+                {t('providerConsole.confirm.cancel')}
+              </Button>
+              <Button
+                size="sm"
+                className="rounded-full text-[10px]"
+                disabled={busy !== ''}
+                onClick={() => void runConfirmed()}
+              >
+                {busy !== '' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                {t('providerConsole.confirm.run')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
