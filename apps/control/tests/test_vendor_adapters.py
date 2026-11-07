@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import sys
@@ -280,10 +279,12 @@ async def test_rotation_state_is_per_instance(tmp_path, fake_base):
 
 
 async def test_key_pool_cooldown_expires():
-    pool = KeyPool()
+    # 注入时钟：到期与否按推进的时间点判定，不再靠真实 sleep 卡 10ms 余量
+    now = [1000.0]
+    pool = KeyPool(clock=lambda: now[0])
     await pool.cool("k1", 0.05)
     assert await pool.available(["k1", "k2"]) == ["k2"]
-    await asyncio.sleep(0.06)
+    now[0] += 0.06
     assert await pool.available(["k1", "k2"]) == ["k1", "k2"]
 
 
