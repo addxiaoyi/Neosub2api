@@ -22,11 +22,13 @@ from .backup_crypto import (
     CryptoKeyInvalid,
     CryptoKeyMissing,
     CryptoVerifyError,
+    backend_info as backup_backend_info,
     is_sealed,
     load_key,
     seal_text,
     unseal_text,
 )
+from .update_signing import backend_info as signing_backend_info
 
 REQUIRED_ENV = "UNIFIED_SECRET_AT_REST_REQUIRED"
 
@@ -237,6 +239,12 @@ def status(db) -> dict[str, Any]:
     counts["key_state"] = state
     counts["required"] = required()
     counts["mode"] = "encrypted" if state == "ok" else "plaintext"
+    # 两条后端都可能回落到纯标准库：把当前进程实际用的实现和回落原因一起给出，
+    # 让降级在界面上可见，而不是只留一行启动日志。
+    counts["crypto_backends"] = {
+        "manifest_signing": signing_backend_info(),
+        "backup_encryption": backup_backend_info(),
+    }
     return counts
 
 

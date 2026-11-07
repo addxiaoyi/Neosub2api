@@ -1227,7 +1227,14 @@
       "plaintextLeft": "未封存 {count} 筆",
       "undecryptable": "{count} 筆已封存憑證用目前金鑰解不開，相關服務商會按「無可用憑證」處理。",
       "fixTitle": "下一步：設定加密金鑰",
-      "fixDesc": "把 `UNIFIED_BACKUP_ENCRYPTION_KEY` 設為 32 位元組的 base64 字串後重新啟動服務，啟動時會自動把既有明文憑證遷移成密文。未封存計數歸零前，不要把資料庫檔案外發或提交到儲存庫。"
+      "fixDesc": "把 `UNIFIED_BACKUP_ENCRYPTION_KEY` 設為 32 位元組的 base64 字串後重新啟動服務，啟動時會自動把既有明文憑證遷移成密文。未封存計數歸零前，不要把資料庫檔案外發或提交到儲存庫。",
+      "cryptoTitle": "密碼學後端",
+      "cryptoDesc": "驗簽與加密優先使用 cryptography，缺少時回退純標準庫實作；這裡顯示目前行程實際使用的那一個。",
+      "cryptoSigning": "發布清單驗簽（Ed25519）",
+      "cryptoBackup": "備份與落庫加密（AES-256-GCM）",
+      "cryptoLib": "cryptography {version}",
+      "cryptoStdlib": "純標準庫（降級）",
+      "cryptoReason": "回退原因：{reason}"
     },
     "tabRuntime": "執行參數",
     "runtime": {

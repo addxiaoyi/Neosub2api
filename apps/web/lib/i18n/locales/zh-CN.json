@@ -1571,7 +1571,14 @@
       "plaintextLeft": "未封存 {count} 条",
       "undecryptable": "{count} 条已封存凭据用当前密钥解不开，相关服务商会按「无可用凭据」处理。",
       "fixTitle": "下一步：配置加密密钥",
-      "fixDesc": "把 `UNIFIED_BACKUP_ENCRYPTION_KEY` 设为 32 字节的 base64 字符串后重启服务，启动时会自动把已有明文凭据迁移成密文。未封存计数归零前，不要把数据库文件外发或提交到仓库。"
+      "fixDesc": "把 `UNIFIED_BACKUP_ENCRYPTION_KEY` 设为 32 字节的 base64 字符串后重启服务，启动时会自动把已有明文凭据迁移成密文。未封存计数归零前，不要把数据库文件外发或提交到仓库。",
+      "cryptoTitle": "密码学后端",
+      "cryptoDesc": "验签与加密优先用 cryptography，缺失时回落纯标准库实现；这里显示当前进程实际使用的那一个。",
+      "cryptoSigning": "发布清单验签（Ed25519）",
+      "cryptoBackup": "备份与落库加密（AES-256-GCM）",
+      "cryptoLib": "cryptography {version}",
+      "cryptoStdlib": "纯标准库（降级）",
+      "cryptoReason": "回落原因：{reason}"
     },
     "tabRuntime": "运行参数",
     "runtime": {

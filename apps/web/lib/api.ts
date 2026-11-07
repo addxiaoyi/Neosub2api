@@ -522,6 +522,13 @@ export const securityApi = {
   secretAtRest: () => get<SecretAtRest>('/api/security/secret-at-rest'),
 };
 
+/** 密码学后端：lib 用 cryptography，stdlib 是设计好的纯标准库回落 */
+export type CryptoBackend = {
+  implementation: 'lib' | 'stdlib';
+  library_version: string;
+  reason: string;
+};
+
 export type SecretAtRest = {
   credentials_total: number;
   credentials_sealed: number;
@@ -536,6 +543,10 @@ export type SecretAtRest = {
   /** UNIFIED_SECRET_AT_REST_REQUIRED 当前是否为真（改后需重启才影响启动行为） */
   required: boolean;
   mode: 'encrypted' | 'plaintext';
+  crypto_backends: {
+    manifest_signing: CryptoBackend;
+    backup_encryption: CryptoBackend;
+  };
 };
 
 /* ── 运行时指标（限流配置的唯一只读出口，admin）────────────── */

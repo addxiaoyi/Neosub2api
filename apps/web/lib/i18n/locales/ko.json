@@ -1227,7 +1227,14 @@
       "plaintextLeft": "미봉인 {count}건",
       "undecryptable": "봉인된 자격 증명 {count}건을 현재 키로 복호화할 수 없습니다. 해당 프로바이더는 사용 가능한 자격 증명이 없는 것으로 처리됩니다.",
       "fixTitle": "다음 단계: 암호화 키 설정",
-      "fixDesc": "`UNIFIED_BACKUP_ENCRYPTION_KEY`에 32바이트 base64 문자열을 설정하고 서비스를 재시작하세요. 시작 시 기존 평문 자격 증명이 자동으로 암호문으로 이전됩니다. 미봉인 건수가 0이 될 때까지 데이터베이스 파일을 외부에 공유하거나 저장소에 커밋하지 마세요."
+      "fixDesc": "`UNIFIED_BACKUP_ENCRYPTION_KEY`에 32바이트 base64 문자열을 설정하고 서비스를 재시작하세요. 시작 시 기존 평문 자격 증명이 자동으로 암호문으로 이전됩니다. 미봉인 건수가 0이 될 때까지 데이터베이스 파일을 외부에 공유하거나 저장소에 커밋하지 마세요.",
+      "cryptoTitle": "암호화 백엔드",
+      "cryptoDesc": "서명 검증과 암호화는 cryptography를 우선 사용하고, 없으면 표준 라이브러리 구현으로 대체합니다. 여기에는 현재 프로세스가 실제로 사용하는 구현이 표시됩니다.",
+      "cryptoSigning": "릴리스 매니페스트 서명 검증(Ed25519)",
+      "cryptoBackup": "백업 및 저장 시 암호화(AES-256-GCM)",
+      "cryptoLib": "cryptography {version}",
+      "cryptoStdlib": "표준 라이브러리만(대체)",
+      "cryptoReason": "대체 이유: {reason}"
     },
     "tabRuntime": "실행 설정",
     "runtime": {

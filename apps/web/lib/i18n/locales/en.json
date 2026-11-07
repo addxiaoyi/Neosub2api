@@ -1595,7 +1595,14 @@
       "plaintextLeft": "{count} not sealed",
       "undecryptable": "{count} sealed credentials cannot be decrypted with the current key; affected providers will be treated as having no usable credentials.",
       "fixTitle": "Next step: configure an encryption key",
-      "fixDesc": "Set `UNIFIED_BACKUP_ENCRYPTION_KEY` to a 32-byte base64 string and restart the service; existing plaintext credentials are migrated to sealed values on startup. Until the unsealed count reaches zero, do not share the database file or commit it to a repository."
+      "fixDesc": "Set `UNIFIED_BACKUP_ENCRYPTION_KEY` to a 32-byte base64 string and restart the service; existing plaintext credentials are migrated to sealed values on startup. Until the unsealed count reaches zero, do not share the database file or commit it to a repository.",
+      "cryptoTitle": "Crypto backend",
+      "cryptoDesc": "Signing and encryption prefer cryptography and fall back to the standard-library implementation when it is missing; this shows the one this process actually uses.",
+      "cryptoSigning": "Release manifest signing (Ed25519)",
+      "cryptoBackup": "Backup and at-rest encryption (AES-256-GCM)",
+      "cryptoLib": "cryptography {version}",
+      "cryptoStdlib": "Standard library only (fallback)",
+      "cryptoReason": "Fallback reason: {reason}"
     },
     "tabRuntime": "Runtime settings",
     "runtime": {

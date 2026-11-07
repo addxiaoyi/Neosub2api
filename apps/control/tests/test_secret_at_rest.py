@@ -165,6 +165,7 @@ def test_status_counts(plain_env, db):
     assert summary["mode"] == "plaintext"
     assert summary["credentials_plaintext"] == 1
     assert summary["sessions_plaintext"] == 0
+    assert set(summary["crypto_backends"]) == {"manifest_signing", "backup_encryption"}
 
 
 def test_status_endpoint_exposes_counts_without_secrets(plain_env, db):
@@ -179,6 +180,14 @@ def test_status_endpoint_exposes_counts_without_secrets(plain_env, db):
     assert body["mode"] == "plaintext"
     assert body["credentials_plaintext"] == 1
     assert "sk-plain" not in json.dumps(body)
+    # 后端实现走既有安全状态出口：lib 有版本号，stdlib 必须给出回落原因，
+    # 只有“降级”两个字没法排查，界面上要能看到具体缺了什么
+    for name, backend in body["crypto_backends"].items():
+        assert backend["implementation"] in {"lib", "stdlib"}, name
+        if backend["implementation"] == "lib":
+            assert backend["library_version"], name
+        else:
+            assert backend["reason"], name
 
 
 def test_session_tokens_are_hashed(db):

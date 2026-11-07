@@ -3,7 +3,7 @@
 import {useCallback, useEffect, useState} from 'react';
 import {ShieldAlert, ShieldCheck, TriangleAlert} from 'lucide-react';
 import {errText, metricsApi, securityApi} from '@/lib/api';
-import type {RateLimitSnapshot, SecretAtRest} from '@/lib/api';
+import type {CryptoBackend, RateLimitSnapshot, SecretAtRest} from '@/lib/api';
 import {notify} from '@/lib/toast';
 import {useI18n} from '@/lib/i18n/provider';
 import {RichText} from '@/lib/i18n/rich-text';
@@ -64,6 +64,24 @@ export function SecurityPostureSection({isAdmin}: {isAdmin: boolean}) {
   const plaintextTotal = atRest
     ? atRest.credentials_plaintext + atRest.api_keys_plaintext
     : 0;
+
+  const cryptoRow = (label: string, backend: CryptoBackend) => (
+    <div className="rounded-2xl bg-background/60 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[11px] font-medium">{label}</span>
+        <span className="shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          {backend.implementation === 'lib'
+            ? t('settings.securityPosture.cryptoLib', {version: backend.library_version || '-'})
+            : t('settings.securityPosture.cryptoStdlib')}
+        </span>
+      </div>
+      {backend.implementation !== 'lib' && backend.reason && (
+        <div className="mt-1 text-[11px] leading-relaxed text-warning-text">
+          {t('settings.securityPosture.cryptoReason', {reason: backend.reason})}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-3">
@@ -225,6 +243,32 @@ export function SecurityPostureSection({isAdmin}: {isAdmin: boolean}) {
               </div>
             )}
           </>
+        )}
+      </div>
+
+      <div className="rounded-[20px] bg-muted px-3.5 py-3">
+        <div className="text-sm font-medium">
+          {t('settings.securityPosture.cryptoTitle')}
+        </div>
+        <div className="mt-0.5 text-xs text-muted-foreground">
+          {t('settings.securityPosture.cryptoDesc')}
+        </div>
+
+        {atRest === null ? (
+          <div className="mt-2 text-xs text-muted-foreground">
+            {t(atRestFailed ? 'settings.securityPosture.readAtRestFailed' : 'common.loading')}
+          </div>
+        ) : (
+          <div className="mt-2 grid grid-cols-1 gap-1.5 xl:grid-cols-2">
+            {cryptoRow(
+              t('settings.securityPosture.cryptoSigning'),
+              atRest.crypto_backends.manifest_signing,
+            )}
+            {cryptoRow(
+              t('settings.securityPosture.cryptoBackup'),
+              atRest.crypto_backends.backup_encryption,
+            )}
+          </div>
         )}
       </div>
     </div>
